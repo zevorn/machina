@@ -6,9 +6,9 @@ instead of ASCII art code blocks.
 import os
 
 from pptx import Presentation
-from pptx.util import Pt, Emu, Cm
+from pptx.util import Pt, Emu
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml.ns import qn
 
@@ -47,10 +47,10 @@ def safe_add_picture(sl, path, left, top, width, height=None):
             print(f"  warn: {path} not found, skipping")
             _img_warned.add(path)
         return
-    args = [path, left, top, width]
     if height is not None:
-        args.append(height)
-    sl.shapes.add_picture(*args)
+        sl.shapes.add_picture(path, left, top, width, height)
+    else:
+        sl.shapes.add_picture(path, left, top, width)
 
 
 # ============================================================

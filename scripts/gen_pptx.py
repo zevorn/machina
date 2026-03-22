@@ -46,10 +46,10 @@ def safe_add_picture(sl, path, left, top, width, height=None):
             print(f"  warn: {path} not found, skipping")
             _img_warned.add(path)
         return
-    args = [path, left, top, width]
     if height is not None:
-        args.append(height)
-    sl.shapes.add_picture(*args)
+        sl.shapes.add_picture(path, left, top, width, height)
+    else:
+        sl.shapes.add_picture(path, left, top, width)
 
 
 # ============================================================
