@@ -24,6 +24,8 @@ pub struct Plic {
     threshold: Vec<u32>,
     claim: Vec<u32>,
     context_outputs: Vec<Option<IrqLine>>,
+    /// Per-source level state for level-triggered resample.
+    source_level: Vec<bool>,
 }
 
 impl Plic {
@@ -42,6 +44,7 @@ impl Plic {
             threshold: vec![0u32; num_contexts as usize],
             claim: vec![0u32; num_contexts as usize],
             context_outputs: outputs,
+            source_level: vec![false; num_sources as usize],
         }
     }
 
@@ -53,8 +56,14 @@ impl Plic {
     }
 
     /// Set or clear a source interrupt and re-evaluate
-    /// outputs.
+    /// outputs.  Tracks the wire level so that
+    /// level-triggered sources can be resampled on
+    /// complete.
     pub fn set_irq(&mut self, source: u32, level: bool) {
+        if source == 0 || source >= self.num_sources {
+            return;
+        }
+        self.source_level[source as usize] = level;
         self.set_pending(source, level);
         self.update_outputs();
     }
@@ -137,6 +146,8 @@ impl Plic {
     }
 
     /// Complete (acknowledge) a previously claimed IRQ.
+    /// If the source is still asserted (level-triggered),
+    /// re-pend and re-evaluate outputs.
     pub fn complete_irq(&mut self, context: u32, irq: u32) {
         if context >= self.num_contexts {
             return;
@@ -144,6 +155,15 @@ impl Plic {
         let ctx = context as usize;
         if self.claim[ctx] == irq {
             self.claim[ctx] = 0;
+        }
+        // Level-triggered resample: if the source wire is
+        // still high, re-assert pending.
+        if irq > 0
+            && (irq as usize) < self.source_level.len()
+            && self.source_level[irq as usize]
+        {
+            self.set_pending(irq, true);
+            self.update_outputs();
         }
     }
 

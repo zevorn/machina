@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use machina_hw_char::uart::Uart16550;
-use machina_hw_core::chardev::Chardev;
+use machina_hw_core::chardev::{CharFrontend, Chardev};
 use machina_hw_core::irq::{IrqLine, IrqSink};
 
 // -- Test helpers --
@@ -160,7 +160,8 @@ fn test_uart_tx_to_chardev() {
     }
     let shared_buf = Arc::clone(&buf_ref);
     let chardev = SharedChardev { buf: shared_buf };
-    uart.attach_chardev(Box::new(chardev));
+    let fe = CharFrontend::new(Box::new(chardev));
+    uart.attach_chardev(fe);
 
     // Write 'A' to THR.
     uart.write(0, 0x41);

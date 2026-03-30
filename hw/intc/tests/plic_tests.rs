@@ -166,3 +166,61 @@ fn test_plic_claim_on_read() {
     let claimed2 = plic.read(0x200004, 4);
     assert_eq!(claimed2, 0, "second claim should return 0");
 }
+
+#[test]
+fn test_plic_level_triggered_resample() {
+    let mut plic = Plic::new(64, 1);
+
+    // Connect output for context 0.
+    let sink = Arc::new(TestIrqSink::new(16));
+    let out_irq = 11u32; // MEI
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, out_irq);
+    plic.connect_context_output(0, line);
+
+    // priority[1] = 1, enable IRQ 1 for ctx 0.
+    plic.write(0x04, 4, 1);
+    plic.write(0x2000, 4, 0x02);
+
+    // Assert source 1 (level-triggered: wire stays high).
+    plic.set_irq(1, true);
+    assert!(sink.level(out_irq), "output should be high");
+
+    // Claim via MMIO — clears pending.
+    let claimed = plic.read(0x200004, 4);
+    assert_eq!(claimed, 1);
+
+    // Complete without lowering source — should re-pend.
+    plic.write(0x200004, 4, 1);
+
+    // Pending must be re-set because source is still high.
+    let pending = plic.read(0x1000, 4);
+    assert_ne!(
+        pending & (1 << 1),
+        0,
+        "pending should be re-set after complete while source high"
+    );
+    assert!(
+        sink.level(out_irq),
+        "output should remain high after resample"
+    );
+
+    // Now lower the source, claim and complete again.
+    plic.set_irq(1, false);
+
+    // Re-assert so we can claim again.
+    plic.set_irq(1, true);
+    let claimed2 = plic.read(0x200004, 4);
+    assert_eq!(claimed2, 1);
+
+    // Lower source before completing.
+    plic.set_irq(1, false);
+    plic.write(0x200004, 4, 1);
+
+    // Should NOT re-pend because source was lowered.
+    let pending2 = plic.read(0x1000, 4);
+    assert_eq!(
+        pending2 & (1 << 1),
+        0,
+        "pending should stay cleared when source is low"
+    );
+}

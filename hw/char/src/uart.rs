@@ -12,7 +12,7 @@
 
 use std::collections::VecDeque;
 
-use machina_hw_core::chardev::Chardev;
+use machina_hw_core::chardev::CharFrontend;
 use machina_hw_core::irq::IrqLine;
 
 // IER bits
@@ -49,7 +49,7 @@ pub struct Uart16550 {
     rx_fifo: VecDeque<u8>,
     irq_pending: bool,
     irq_line: Option<IrqLine>,
-    chardev: Option<Box<dyn Chardev + Send>>,
+    chardev: Option<CharFrontend>,
 }
 
 impl Uart16550 {
@@ -79,9 +79,9 @@ impl Uart16550 {
         self.irq_line = Some(irq);
     }
 
-    /// Attach a character device backend.
-    pub fn attach_chardev(&mut self, backend: Box<dyn Chardev + Send>) {
-        self.chardev = Some(backend);
+    /// Attach a character device frontend.
+    pub fn attach_chardev(&mut self, fe: CharFrontend) {
+        self.chardev = Some(fe);
     }
 
     /// Push a byte into the receive FIFO.
@@ -191,9 +191,9 @@ impl Uart16550 {
 
     fn write_thr(&mut self, val: u8) {
         self.thr = val;
-        // Forward to chardev backend if attached.
-        if let Some(ref mut c) = self.chardev {
-            c.write(val);
+        // Forward to chardev frontend if attached.
+        if let Some(ref mut fe) = self.chardev {
+            fe.write(&[val]);
         }
         // In emulation the byte is "transmitted"
         // instantly, so THRE stays set.

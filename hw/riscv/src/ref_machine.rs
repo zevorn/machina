@@ -26,10 +26,6 @@ const PLIC_SIZE: u64 = 0x0400_0000;
 const ACLINT_SIZE: u64 = 0x0001_0000;
 const UART0_SIZE: u64 = 0x100;
 
-// CLINT sub-region boundary: offsets below this are MSWI,
-// offsets at or above are MTIMER.
-const CLINT_MTIMER_OFFSET: u64 = 0x4000;
-
 const UART_IRQ: u32 = 10;
 const PLIC_NUM_SOURCES: u32 = 96;
 // PLIC context count is 2 * cpu_count (M-mode + S-mode per
@@ -115,21 +111,11 @@ struct AclintMmio(Arc<Mutex<Aclint>>);
 
 impl MmioOps for AclintMmio {
     fn read(&self, offset: u64, size: u32) -> u64 {
-        let dev = self.0.lock().unwrap();
-        if offset < CLINT_MTIMER_OFFSET {
-            dev.mswi_read(offset, size)
-        } else {
-            dev.mtimer_read(offset - CLINT_MTIMER_OFFSET, size)
-        }
+        self.0.lock().unwrap().read(offset, size)
     }
 
     fn write(&self, offset: u64, size: u32, val: u64) {
-        let mut dev = self.0.lock().unwrap();
-        if offset < CLINT_MTIMER_OFFSET {
-            dev.mswi_write(offset, size, val);
-        } else {
-            dev.mtimer_write(offset - CLINT_MTIMER_OFFSET, size, val);
-        }
+        self.0.lock().unwrap().write(offset, size, val);
     }
 }
 
@@ -171,8 +157,6 @@ pub struct RefMachine {
     aclint_mti_irqs: Vec<IrqLine>,
     // ACLINT → CPU MSI per hart.
     aclint_msi_irqs: Vec<IrqLine>,
-    // Character device frontend for UART.
-    chardev: Option<Mutex<CharFrontend>>,
 }
 
 impl RefMachine {
@@ -193,7 +177,6 @@ impl RefMachine {
             plic_sei_irqs: Vec::new(),
             aclint_mti_irqs: Vec::new(),
             aclint_msi_irqs: Vec::new(),
-            chardev: None,
         }
     }
 
@@ -231,11 +214,6 @@ impl RefMachine {
     /// UART → PLIC IRQ line reference.
     pub fn uart_irq(&self) -> &IrqLine {
         self.uart_irq.as_ref().expect("machine not initialized")
-    }
-
-    /// Character device frontend for the UART.
-    pub fn chardev(&self) -> &Option<Mutex<CharFrontend>> {
-        &self.chardev
     }
 
     /// Write a byte slice into RAM at `offset` bytes from
@@ -467,15 +445,12 @@ impl Machine for RefMachine {
         self.uart_irq =
             Some(IrqLine::new(plic_as_sink as Arc<dyn IrqSink>, UART_IRQ));
 
-        // ---- Chardev ----
-        self.chardev =
-            Some(Mutex::new(CharFrontend::new(Box::new(NullChardev))));
-
         // ---- Attach IRQ + chardev to UART ----
         {
+            let fe = CharFrontend::new(Box::new(NullChardev));
             let mut u = self.uart.as_ref().unwrap().lock().unwrap();
             u.attach_irq(uart_irq_line);
-            u.attach_chardev(Box::new(NullChardev));
+            u.attach_chardev(fe);
         }
 
         // ---- Connect PLIC context outputs ----

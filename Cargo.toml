@@ -28,3 +28,7 @@ edition = "2021"
 [[bin]]
 name = "machina"
 path = "src/main.rs"
+
+[dependencies]
+machina-core = { path = "core" }
+machina-hw-riscv = { path = "hw/riscv" }

@@ -34,50 +34,50 @@ impl IrqSink for TestIrqSink {
 fn test_aclint_mtime_read_write() {
     let mut aclint = Aclint::new(2);
 
-    // mtime at MTIMER offset 0xBFF8, initially 0.
-    assert_eq!(aclint.mtimer_read(0xBFF8, 8), 0);
+    // mtime at offset 0xBFF8, initially 0.
+    assert_eq!(aclint.read(0xBFF8, 8), 0);
 
     // Write mtime.
-    aclint.mtimer_write(0xBFF8, 8, 1000);
-    assert_eq!(aclint.mtimer_read(0xBFF8, 8), 1000);
+    aclint.write(0xBFF8, 8, 1000);
+    assert_eq!(aclint.read(0xBFF8, 8), 1000);
 }
 
 #[test]
 fn test_aclint_mtimecmp_set() {
     let mut aclint = Aclint::new(2);
 
-    // mtimecmp[0] at offset 0x0000.
-    aclint.mtimer_write(0x0000, 8, 500);
-    assert_eq!(aclint.mtimer_read(0x0000, 8), 500);
+    // mtimecmp[0] at offset 0x4000.
+    aclint.write(0x4000, 8, 500);
+    assert_eq!(aclint.read(0x4000, 8), 500);
 
-    // mtimecmp[1] at offset 0x0008.
-    aclint.mtimer_write(0x0008, 8, 1000);
-    assert_eq!(aclint.mtimer_read(0x0008, 8), 1000);
+    // mtimecmp[1] at offset 0x4008.
+    aclint.write(0x4008, 8, 1000);
+    assert_eq!(aclint.read(0x4008, 8), 1000);
 }
 
 #[test]
 fn test_aclint_msip_set_clear() {
     let mut aclint = Aclint::new(2);
 
-    // msip[0] at MSWI offset 0x0000.
-    aclint.mswi_write(0x0000, 4, 1);
-    assert_eq!(aclint.mswi_read(0x0000, 4), 1);
+    // msip[0] at offset 0x0000.
+    aclint.write(0x0000, 4, 1);
+    assert_eq!(aclint.read(0x0000, 4), 1);
 
     // Clear.
-    aclint.mswi_write(0x0000, 4, 0);
-    assert_eq!(aclint.mswi_read(0x0000, 4), 0);
+    aclint.write(0x0000, 4, 0);
+    assert_eq!(aclint.read(0x0000, 4), 0);
 
     // Only bit 0 is writable.
-    aclint.mswi_write(0x0000, 4, 0xFF);
-    assert_eq!(aclint.mswi_read(0x0000, 4), 1);
+    aclint.write(0x0000, 4, 0xFF);
+    assert_eq!(aclint.read(0x0000, 4), 1);
 }
 
 #[test]
 fn test_aclint_timer_compare() {
     let mut aclint = Aclint::new(2);
 
-    // Set mtimecmp[0] = 5.
-    aclint.mtimer_write(0x0000, 8, 5);
+    // Set mtimecmp[0] = 5 at offset 0x4000.
+    aclint.write(0x4000, 8, 5);
 
     // Initially no pending.
     assert!(!aclint.timer_irq_pending(0));
@@ -106,8 +106,8 @@ fn test_aclint_tick_mti() {
     let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti_irq);
     aclint.connect_mti(0, line);
 
-    // Set mtimecmp[0] = 3.
-    aclint.mtimer_write(0x0000, 8, 3);
+    // Set mtimecmp[0] = 3 at offset 0x4000.
+    aclint.write(0x4000, 8, 3);
 
     // MTI should be low.
     assert!(!sink.level(mti_irq), "MTI should be low before threshold");
@@ -122,7 +122,7 @@ fn test_aclint_tick_mti() {
     assert!(sink.level(mti_irq), "MTI should be high at mtime=3");
 
     // Raise mtimecmp to clear: set mtimecmp[0] = 100.
-    aclint.mtimer_write(0x0000, 8, 100);
+    aclint.write(0x4000, 8, 100);
     assert!(
         !sink.level(mti_irq),
         "MTI should go low after raising mtimecmp"
@@ -142,11 +142,28 @@ fn test_aclint_msi_output() {
     // Initially low.
     assert!(!sink.level(msi_irq), "MSI should be low");
 
-    // Write msip[0] = 1.
-    aclint.mswi_write(0x0000, 4, 1);
+    // Write msip[0] = 1 at offset 0x0000.
+    aclint.write(0x0000, 4, 1);
     assert!(sink.level(msi_irq), "MSI should go high after msip=1");
 
     // Clear msip[0].
-    aclint.mswi_write(0x0000, 4, 0);
+    aclint.write(0x0000, 4, 0);
     assert!(!sink.level(msi_irq), "MSI should go low after msip=0");
+}
+
+#[test]
+fn test_aclint_clint_layout() {
+    let mut aclint = Aclint::new(2);
+
+    // msip[0] at offset 0x0000.
+    aclint.write(0x0000, 4, 1);
+    assert_eq!(aclint.read(0x0000, 4), 1);
+
+    // mtimecmp[0] at offset 0x4000.
+    aclint.write(0x4000, 8, 42);
+    assert_eq!(aclint.read(0x4000, 8), 42);
+
+    // mtime at offset 0xBFF8.
+    aclint.write(0xBFF8, 8, 999);
+    assert_eq!(aclint.read(0xBFF8, 8), 999);
 }
