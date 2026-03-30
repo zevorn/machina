@@ -178,6 +178,13 @@ fn main() {
         FullSystemCpu::new(cpu0, ram_ptr, ram_size, shared_mip, wfi_waker)
     };
 
+    // Set machine AddressSpace for MMIO dispatch from
+    // JIT helpers.
+    machina_system::cpus::set_machine_address_space(
+        machine.address_space(),
+        ram_size,
+    );
+
     eprintln!(
         "machina: cpu0 pc=0x{:x} priv={}, \
          entering execution loop",

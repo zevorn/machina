@@ -233,28 +233,59 @@ impl GuestCpu for FullSystemCpu {
 // the JIT can call them by raw function pointer.
 
 use machina_guest_riscv::riscv::cpu::GUEST_BASE_OFFSET;
+use machina_core::address::GPA;
+use machina_memory::address_space::AddressSpace;
 
-/// Read 1/2/4/8 bytes from guest address `addr`.
-///
-/// For RAM addresses (>= RAM_BASE), performs a direct
-/// host-memory read via `guest_base + addr`. For MMIO
-/// addresses, returns 0 (proper device dispatch is a
-/// future enhancement).
-///
-/// Returns the value zero-extended to u64.
-///
-/// # Safety
-/// `env` must point to a valid `RiscvCpu` whose
-/// `guest_base` field yields a valid host mapping for
-/// RAM addresses.
+// Static pointer to the machine's AddressSpace for MMIO
+// dispatch from JIT helpers. Set before exec loop entry,
+// valid for the duration of execution. Single-machine,
+// single-thread assumption.
+static MACHINE_AS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static RAM_END: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Set the machine AddressSpace for MMIO dispatch.
+/// Must be called before entering the exec loop.
+pub fn set_machine_address_space(
+    as_: &AddressSpace,
+    ram_size: u64,
+) {
+    MACHINE_AS.store(
+        as_ as *const AddressSpace as usize,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    RAM_END.store(
+        RAM_BASE + ram_size,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+}
+
+fn get_as() -> Option<&'static AddressSpace> {
+    let p = MACHINE_AS
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if p == 0 {
+        None
+    } else {
+        Some(unsafe { &*(p as *const AddressSpace) })
+    }
+}
+
+/// Read 1/2/4/8 bytes from guest address.
+/// RAM fast path for addresses in [RAM_BASE, RAM_END).
+/// All other addresses go through AddressSpace MMIO.
 #[no_mangle]
 pub unsafe extern "C" fn machina_mem_read(
     env: *mut u8,
     addr: u64,
     size: u32,
 ) -> u64 {
-    if addr >= RAM_BASE {
-        let gb = *(env.add(GUEST_BASE_OFFSET as usize) as *const u64);
+    let end = RAM_END
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if addr >= RAM_BASE && addr < end {
+        let gb = *(env.add(
+            GUEST_BASE_OFFSET as usize,
+        ) as *const u64);
         let ptr = (gb + addr) as *const u8;
         match size {
             1 => *ptr as u64,
@@ -263,21 +294,16 @@ pub unsafe extern "C" fn machina_mem_read(
             8 => *(ptr as *const u64),
             _ => 0,
         }
+    } else if let Some(as_) = get_as() {
+        as_.read(GPA::new(addr), size)
     } else {
-        // MMIO stub: return 0 for now.
         0
     }
 }
 
-/// Write 1/2/4/8 bytes to guest address `addr`.
-///
-/// For RAM addresses (>= RAM_BASE), performs a direct
-/// host-memory write via `guest_base + addr`. For MMIO
-/// addresses, the write is silently dropped (proper
-/// device dispatch is a future enhancement).
-///
-/// # Safety
-/// Same requirements as `machina_mem_read`.
+/// Write 1/2/4/8 bytes to guest address.
+/// RAM fast path for [RAM_BASE, RAM_END).
+/// All other addresses go through AddressSpace MMIO.
 #[no_mangle]
 pub unsafe extern "C" fn machina_mem_write(
     env: *mut u8,
@@ -285,8 +311,12 @@ pub unsafe extern "C" fn machina_mem_write(
     val: u64,
     size: u32,
 ) {
-    if addr >= RAM_BASE {
-        let gb = *(env.add(GUEST_BASE_OFFSET as usize) as *const u64);
+    let end = RAM_END
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if addr >= RAM_BASE && addr < end {
+        let gb = *(env.add(
+            GUEST_BASE_OFFSET as usize,
+        ) as *const u64);
         let ptr = (gb + addr) as *mut u8;
         match size {
             1 => *ptr = val as u8,
@@ -295,6 +325,7 @@ pub unsafe extern "C" fn machina_mem_write(
             8 => *(ptr as *mut u64) = val,
             _ => {}
         }
+    } else if let Some(as_) = get_as() {
+        as_.write(GPA::new(addr), size, val);
     }
-    // MMIO stub: silently drop non-RAM writes for now.
 }

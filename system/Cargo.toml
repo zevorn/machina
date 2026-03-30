@@ -7,3 +7,4 @@ edition = "2021"
 machina-core = { path = "../core" }
 machina-accel = { path = "../accel" }
 machina-guest-riscv = { path = "../guest/riscv" }
+machina-memory = { path = "../memory" }
