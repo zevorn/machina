@@ -3,26 +3,30 @@
   English | <a href="README.zh.md">中文</a>
 </p>
 
-A modular RISC-V emulator written in Rust, featuring a JIT dynamic binary translation engine. Supports both **linux-user** mode (user-space ELF execution with syscall emulation) and **full-system** mode (hardware emulation with device models, interrupt controllers, and machine firmware).
+A modular RISC-V full-system emulator written in Rust, featuring a JIT dynamic binary translation engine with hardware device models, interrupt controllers, and machine firmware support.
 
-> **Status**: Both emulation modes are operational. The JIT pipeline — RISC-V guest decode, TCG IR generation, optimization (constant folding, copy propagation, algebraic simplification), register allocation, and x86-64 code generation — is fully functional with MTTCG support and direct TB chaining. Linux-user mode runs real guest programs (dhrystone, printf, float). Full-system mode boots a RISC-V reference machine with PLIC, ACLINT, UART, Sv39 MMU, and SBI firmware interface.
+> **Status**: The JIT pipeline — RISC-V guest decode, TCG IR generation, optimization (constant folding, copy propagation, algebraic simplification), register allocation, and x86-64 code generation — is fully functional with MTTCG support and direct TB chaining. Full-system mode boots a RISC-V reference machine with PLIC, ACLINT, UART, Sv39 MMU, and SBI firmware interface.
 
 ## Architecture
 
 ```
-                          ┌──────────────────────────────────────────────────────────┐
-                          │                     JIT Pipeline                         │
-┌──────────────┐    ┌─────┴─────┐    ┌──────────┐    ┌───────────┐    ┌─────────────┴──┐    ┌─────────┐
-│ Guest Binary │───→│ Frontend  │───→│ IR Build │───→│ Optimizer │───→│ RegAlloc+Code  │───→│ Execute │
-│ (RISC-V)     │    │ (decode + │    │ (gen_*)  │    │           │    │ gen (x86-64)   │    │ (JIT)   │
-└──────────────┘    │  trans_*) │    └──────────┘    └───────────┘    └────────────────┘    └─────────┘
-                    └───────────┘
-                                              ┌───────────────────────────────┐
-                                              │        Execution Modes        │
-                                    ┌─────────┴─────────┐    ┌───────────────┴───────────┐
-                                    │    linux-user      │    │       full-system          │
-                                    │ ELF load + syscall │    │ Devices + MMU + IRQ + SBI  │
-                                    └───────────────────┘    └───────────────────────────┘
++-----------+   +----------+   +----------+   +-----------+   +----------+
+|   Guest   |-->| Frontend |-->| IR Build |-->| Optimizer |-->| Backend  |
+|   Binary  |   | (decode, |   | (gen_*)  |   |           |   | (x86-64) |
+|   (RV64)  |   |  trans_*)|   +----------+   +-----------+   +----------+
++-----------+   +----------+                                       |
+                                                                   v
+                            +------------------------------------------+
+                            |            Execution Engine               |
+                            | TB Cache + MTTCG + Chaining + MMIO       |
+                            +--------------------+---------------------+
+                                                 |
+                                                 v
+                            +------------------------------------------+
+                            |          Full-System Emulation            |
+                            | riscv64-ref: PLIC + ACLINT + UART + FDT |
+                            | Sv39 MMU + SBI Firmware Interface        |
+                            +------------------------------------------+
 ```
 
 ## Workspace
@@ -43,7 +47,7 @@ A modular RISC-V emulator written in Rust, featuring a JIT dynamic binary transl
 | **machina-disas** | `disas/` | RISC-V instruction disassembler |
 | **machina-monitor** | `monitor/` | Debug/monitor interface (WIP) |
 | **machina-util** | `util/` | Shared utilities |
-| **machina-tests** | `tests/` | 964 tests: unit, backend, frontend, difftest, integration, MTTCG, linux-user, machine |
+| **machina-tests** | `tests/` | 964 tests: unit, backend, frontend, difftest, integration, MTTCG, machine |
 | **machina-mtest** | `tests/mtest/` | Machine-level test framework |
 | **machina-irdump** | `tools/irdump/` | IR dump tool for debugging |
 | **machina-irbackend** | `tools/irbackend/` | IR backend inspection tool |
@@ -61,14 +65,8 @@ cargo fmt --check            # Format check
 ## Running
 
 ```bash
-# Linux-user mode: run a RISC-V ELF directly
-cargo run --release --bin tcg-riscv64 -- target/guest/riscv64/dhrystone
-
-# Full-system mode: boot a RISC-V reference machine
+# Boot a RISC-V reference machine
 cargo run --release --bin machina -- -M riscv64-ref -m 128M -bios fw.bin -nographic
-
-# Performance stats
-TCG_STATS=1 target/release/tcg-riscv64 target/guest/riscv64/dhrystone
 ```
 
 ## Key Design Decisions
@@ -105,32 +103,14 @@ TCG_STATS=1 target/release/tcg-riscv64 target/guest/riscv64/dhrystone
 - **Boot**: Firmware/kernel loading, FDT generation with device phandles, SBI stub
 - **Device Infrastructure**: qdev model, IRQ sinks, clock, FDT builder, image loader
 
-### Linux-User Emulation
-
-- **ELF Loader**: RISC-V ELF loading with guest `argv` propagation and auxv layout
-- **Guest Address Space**: mmap/brk handling for user-mode memory management
-- **Syscall Emulation**: Core Linux syscalls for user-mode workloads
-- **Runner**: `tcg-riscv64 <elf> [args...]`
-
 ### Testing (964 tests)
 
 - **Unit**: Core data structures, IR APIs, backend instruction encoding
-- **Frontend**: 91 RISC-V instruction tests through full decode → IR → codegen → execute pipeline
-- **Difftest**: Differential testing against QEMU (qemu-riscv64) with edge-case values
+- **Frontend**: 91 RISC-V instruction tests through full decode -> IR -> codegen -> execute pipeline
+- **Difftest**: Differential testing against QEMU with edge-case values
 - **Integration**: End-to-end pipeline — ALU, branches, loops, memory, complex sequences
 - **MTTCG**: Concurrent lookup/translation/chaining (26 tests)
-- **Linux-user**: Guest programs — hello, hello_printf, hello_float, dhrystone, argv_echo
 - **Machine**: Full-system boot and device tests
-
-## Performance
-
-In linux-user mode, machina achieves ~30% faster execution than QEMU TCG on benchmarks like dhrystone, thanks to:
-
-- **`next_tb_hint`**: Skips TB lookup entirely on chained exits (hot loop hit rate near 100%)
-- **`exit_target` atomic cache**: Single-entry cache for indirect jumps, avoiding hash lookups
-- **Simplified codegen**: Constraint-driven design eliminates register shuffling overhead
-
-See [Performance Analysis](docs/performance.md) for details.
 
 ## QEMU Reference
 

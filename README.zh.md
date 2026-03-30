@@ -3,26 +3,30 @@
   <a href="README.md">English</a> | 中文
 </p>
 
-一个用 Rust 编写的模块化 RISC-V 模拟器，采用 JIT 动态二进制翻译引擎。支持 **linux-user** 模式（用户态 ELF 执行与 syscall 仿真）和 **full-system** 模式（硬件仿真，包含设备模型、中断控制器和机器固件）。
+一个用 Rust 编写的模块化 RISC-V 全系统模拟器，采用 JIT 动态二进制翻译引擎，支持硬件设备模型、中断控制器和机器固件。
 
-> **状态**：两种仿真模式均已可用。JIT 流水线——RISC-V 客户指令解码、TCG IR 生成、优化（常量折叠、拷贝传播、代数简化）、寄存器分配和 x86-64 代码生成——已完整实现，支持 MTTCG 和直接 TB 链路。Linux-user 模式可运行真实 guest 程序（dhrystone、printf、float）。Full-system 模式可引导 RISC-V 参考机器，包含 PLIC、ACLINT、UART、Sv39 MMU 和 SBI 固件接口。
+> **状态**：JIT 流水线——RISC-V 客户指令解码、TCG IR 生成、优化（常量折叠、拷贝传播、代数简化）、寄存器分配和 x86-64 代码生成——已完整实现，支持 MTTCG 和直接 TB 链路。Full-system 模式可引导 RISC-V 参考机器，包含 PLIC、ACLINT、UART、Sv39 MMU 和 SBI 固件接口。
 
 ## 架构
 
 ```
-                          ┌──────────────────────────────────────────────────────────┐
-                          │                     JIT 流水线                            │
-┌──────────────┐    ┌─────┴─────┐    ┌──────────┐    ┌───────────┐    ┌─────────────┴──┐    ┌─────────┐
-│ Guest Binary │───→│ 前端      │───→│ IR 构建  │───→│  优化器   │───→│ 寄存器分配     │───→│  执行   │
-│ (RISC-V)     │    │ (decode + │    │ (gen_*)  │    │           │    │ +代码生成      │    │ (JIT)   │
-└──────────────┘    │  trans_*) │    └──────────┘    └───────────┘    │ (x86-64)       │    └─────────┘
-                    └───────────┘                                     └────────────────┘
-                                              ┌───────────────────────────────┐
-                                              │          执行模式              │
-                                    ┌─────────┴─────────┐    ┌───────────────┴───────────┐
-                                    │    linux-user      │    │       full-system          │
-                                    │ ELF 加载 + syscall │    │ 设备 + MMU + IRQ + SBI     │
-                                    └───────────────────┘    └───────────────────────────┘
++-----------+   +----------+   +----------+   +-----------+   +----------+
+|   Guest   |-->| Frontend |-->| IR Build |-->| Optimizer |-->| Backend  |
+|   Binary  |   | (decode, |   | (gen_*)  |   |           |   | (x86-64) |
+|   (RV64)  |   |  trans_*)|   +----------+   +-----------+   +----------+
++-----------+   +----------+                                       |
+                                                                   v
+                            +------------------------------------------+
+                            |            Execution Engine               |
+                            | TB Cache + MTTCG + Chaining + MMIO       |
+                            +--------------------+---------------------+
+                                                 |
+                                                 v
+                            +------------------------------------------+
+                            |          Full-System Emulation            |
+                            | riscv64-ref: PLIC + ACLINT + UART + FDT |
+                            | Sv39 MMU + SBI Firmware Interface        |
+                            +------------------------------------------+
 ```
 
 ## Workspace 结构
@@ -43,7 +47,7 @@
 | **machina-disas** | `disas/` | RISC-V 指令反汇编器 |
 | **machina-monitor** | `monitor/` | 调试/监控接口（开发中） |
 | **machina-util** | `util/` | 共享工具库 |
-| **machina-tests** | `tests/` | 964 个测试：单元、后端、前端、差分、集成、MTTCG、linux-user、机器级 |
+| **machina-tests** | `tests/` | 964 个测试：单元、后端、前端、差分、集成、MTTCG、机器级 |
 | **machina-mtest** | `tests/mtest/` | 机器级测试框架 |
 | **machina-irdump** | `tools/irdump/` | IR 转储调试工具 |
 | **machina-irbackend** | `tools/irbackend/` | IR 后端检查工具 |
@@ -61,14 +65,8 @@ cargo fmt --check            # 格式检查
 ## 运行
 
 ```bash
-# Linux-user 模式：直接运行 RISC-V ELF
-cargo run --release --bin tcg-riscv64 -- target/guest/riscv64/dhrystone
-
-# Full-system 模式：引导 RISC-V 参考机器
+# 引导 RISC-V 参考机器
 cargo run --release --bin machina -- -M riscv64-ref -m 128M -bios fw.bin -nographic
-
-# 性能统计
-TCG_STATS=1 target/release/tcg-riscv64 target/guest/riscv64/dhrystone
 ```
 
 ## 关键设计决策
@@ -105,32 +103,14 @@ TCG_STATS=1 target/release/tcg-riscv64 target/guest/riscv64/dhrystone
 - **引导**：固件/内核加载、FDT 生成（含设备 phandle）、SBI 桩
 - **设备基础设施**：qdev 模型、IRQ sink、clock、FDT 构建器、镜像加载器
 
-### Linux-User 仿真
-
-- **ELF 加载器**：RISC-V ELF 加载，支持 guest `argv` 透传和 auxv 布局
-- **Guest 地址空间管理**：mmap/brk 用户态内存管理
-- **Syscall 仿真**：核心 Linux 系统调用处理
-- **运行器**：`tcg-riscv64 <elf> [args...]`
-
 ### 测试体系（964 个测试）
 
 - **单元测试**：核心数据结构、IR API、后端指令编码
-- **前端测试**：91 个 RISC-V 指令测试，覆盖完整 decode → IR → codegen → execute 流水线
-- **差分测试**：对比 QEMU（qemu-riscv64 用户态）验证指令正确性
+- **前端测试**：91 个 RISC-V 指令测试，覆盖完整 decode -> IR -> codegen -> execute 流水线
+- **差分测试**：对比 QEMU 验证指令正确性
 - **集成测试**：端到端流水线——ALU、分支、循环、内存、复杂序列
 - **MTTCG 测试**：并发查找/翻译/链路（26 个测试）
-- **Linux-user 测试**：guest 程序——hello、hello_printf、hello_float、dhrystone、argv_echo
 - **机器测试**：全系统引导和设备测试
-
-## 性能
-
-在 linux-user 模式下，machina 在 dhrystone 等基准测试中比 QEMU TCG 快约 30%，得益于：
-
-- **`next_tb_hint`**：链式退出时完全跳过 TB 查找（热循环命中率接近 100%）
-- **`exit_target` 原子缓存**：间接跳转单项缓存，避免 hash 查找
-- **简化 codegen**：约束驱动设计消除寄存器搬运开销
-
-详见 [性能分析](docs/performance.md)。
 
 ## QEMU 参考
 
