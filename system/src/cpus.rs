@@ -16,12 +16,8 @@ use machina_accel::GuestCpu;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::exception::Exception;
 use machina_guest_riscv::riscv::ext::RiscvCfg;
-use machina_guest_riscv::riscv::{
-    RiscvDisasContext, RiscvTranslator,
-};
-use machina_guest_riscv::{
-    translator_loop, DisasJumpType, TranslatorOps,
-};
+use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
+use machina_guest_riscv::{translator_loop, DisasJumpType, TranslatorOps};
 
 const NUM_GPRS: usize = 32;
 const RAM_BASE: u64 = 0x8000_0000;
@@ -63,9 +59,8 @@ impl FullSystemCpu {
         shared_mip: SharedMip,
         wfi_waker: Arc<WfiWaker>,
     ) -> Self {
-        cpu.guest_base = (ram_ptr as usize)
-            .wrapping_sub(RAM_BASE as usize)
-            as u64;
+        cpu.guest_base =
+            (ram_ptr as usize).wrapping_sub(RAM_BASE as usize) as u64;
         Self {
             cpu,
             ram_ptr,
@@ -97,14 +92,8 @@ impl GuestCpu for FullSystemCpu {
         0
     }
 
-    fn gen_code(
-        &mut self,
-        ir: &mut Context,
-        pc: u64,
-        max_insns: u32,
-    ) -> u32 {
-        let base = (self.ram_ptr as usize)
-            .wrapping_sub(RAM_BASE as usize)
+    fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
+        let base = (self.ram_ptr as usize).wrapping_sub(RAM_BASE as usize)
             as *const u8;
 
         let pc_offset = pc.wrapping_sub(RAM_BASE);
@@ -120,16 +109,12 @@ impl GuestCpu for FullSystemCpu {
         let cfg = RiscvCfg::default();
 
         if ir.nb_globals() == 0 {
-            let mut d =
-                RiscvDisasContext::new(pc, base, cfg);
+            let mut d = RiscvDisasContext::new(pc, base, cfg);
             d.base.max_insns = limit;
-            translator_loop::<RiscvTranslator>(
-                &mut d, ir,
-            );
+            translator_loop::<RiscvTranslator>(&mut d, ir);
             d.base.num_insns * 4
         } else {
-            let mut d =
-                RiscvDisasContext::new(pc, base, cfg);
+            let mut d = RiscvDisasContext::new(pc, base, cfg);
             d.base.max_insns = limit;
             d.env = TempIdx(0);
             for i in 0..NUM_GPRS {
@@ -139,17 +124,12 @@ impl GuestCpu for FullSystemCpu {
             RiscvTranslator::tb_start(&mut d, ir);
             loop {
                 RiscvTranslator::insn_start(&mut d, ir);
-                RiscvTranslator::translate_insn(
-                    &mut d, ir,
-                );
-                if d.base.is_jmp != DisasJumpType::Next
-                {
+                RiscvTranslator::translate_insn(&mut d, ir);
+                if d.base.is_jmp != DisasJumpType::Next {
                     break;
                 }
-                if d.base.num_insns >= d.base.max_insns
-                {
-                    d.base.is_jmp =
-                        DisasJumpType::TooMany;
+                if d.base.num_insns >= d.base.max_insns {
+                    d.base.is_jmp = DisasJumpType::TooMany;
                     break;
                 }
             }
@@ -168,22 +148,17 @@ impl GuestCpu for FullSystemCpu {
         // Combine software mip (CPU-set bits like SSIP)
         // with device mip (PLIC/ACLINT-driven bits).
         // Don't modify csr.mip — just check.
-        let dev_mip =
-            self.shared_mip.load(Ordering::Relaxed);
+        let dev_mip = self.shared_mip.load(Ordering::Relaxed);
         let effective = self.cpu.csr.mip | dev_mip;
         effective & self.cpu.csr.mie != 0
     }
 
     fn is_halted(&self) -> bool {
-        self.cpu
-            .halted
-            .load(Ordering::Relaxed)
+        self.cpu.halted.load(Ordering::Relaxed)
     }
 
     fn set_halted(&mut self, halted: bool) {
-        self.cpu
-            .halted
-            .store(halted, Ordering::Relaxed);
+        self.cpu.halted.store(halted, Ordering::Relaxed);
     }
 
     fn privilege_level(&self) -> u8 {
@@ -196,8 +171,7 @@ impl GuestCpu for FullSystemCpu {
         // software-only mip. Device bit presence is
         // always re-evaluated from shared_mip on the
         // next pending_interrupt() call.
-        let dev_mip =
-            self.shared_mip.load(Ordering::Relaxed);
+        let dev_mip = self.shared_mip.load(Ordering::Relaxed);
         let saved = self.cpu.csr.mip;
         self.cpu.csr.mip = saved | dev_mip;
         self.cpu.handle_interrupt();
@@ -207,11 +181,7 @@ impl GuestCpu for FullSystemCpu {
         self.cpu.csr.mip &= !dev_mip;
     }
 
-    fn handle_exception(
-        &mut self,
-        excp: u32,
-        tval: u64,
-    ) {
+    fn handle_exception(&mut self, excp: u32, tval: u64) {
         let e = match excp {
             0 => Exception::InstructionMisaligned,
             1 => Exception::InstructionAccessFault,
@@ -250,4 +220,81 @@ impl GuestCpu for FullSystemCpu {
         // updating SharedMip.
         self.wfi_waker.wait()
     }
+}
+
+// ---- JIT memory helpers for MMIO-safe access ----
+//
+// Called from JIT-generated code when a guest memory
+// address falls outside the RAM region. The fast path
+// (addr >= RAM_BASE) stays inline in the JIT; only
+// non-RAM accesses land here.
+//
+// Signature must be `extern "C"` and `#[no_mangle]` so
+// the JIT can call them by raw function pointer.
+
+use machina_guest_riscv::riscv::cpu::GUEST_BASE_OFFSET;
+
+/// Read 1/2/4/8 bytes from guest address `addr`.
+///
+/// For RAM addresses (>= RAM_BASE), performs a direct
+/// host-memory read via `guest_base + addr`. For MMIO
+/// addresses, returns 0 (proper device dispatch is a
+/// future enhancement).
+///
+/// Returns the value zero-extended to u64.
+///
+/// # Safety
+/// `env` must point to a valid `RiscvCpu` whose
+/// `guest_base` field yields a valid host mapping for
+/// RAM addresses.
+#[no_mangle]
+pub unsafe extern "C" fn machina_mem_read(
+    env: *mut u8,
+    addr: u64,
+    size: u32,
+) -> u64 {
+    if addr >= RAM_BASE {
+        let gb = *(env.add(GUEST_BASE_OFFSET as usize) as *const u64);
+        let ptr = (gb + addr) as *const u8;
+        match size {
+            1 => *ptr as u64,
+            2 => *(ptr as *const u16) as u64,
+            4 => *(ptr as *const u32) as u64,
+            8 => *(ptr as *const u64),
+            _ => 0,
+        }
+    } else {
+        // MMIO stub: return 0 for now.
+        0
+    }
+}
+
+/// Write 1/2/4/8 bytes to guest address `addr`.
+///
+/// For RAM addresses (>= RAM_BASE), performs a direct
+/// host-memory write via `guest_base + addr`. For MMIO
+/// addresses, the write is silently dropped (proper
+/// device dispatch is a future enhancement).
+///
+/// # Safety
+/// Same requirements as `machina_mem_read`.
+#[no_mangle]
+pub unsafe extern "C" fn machina_mem_write(
+    env: *mut u8,
+    addr: u64,
+    val: u64,
+    size: u32,
+) {
+    if addr >= RAM_BASE {
+        let gb = *(env.add(GUEST_BASE_OFFSET as usize) as *const u64);
+        let ptr = (gb + addr) as *mut u8;
+        match size {
+            1 => *ptr = val as u8,
+            2 => *(ptr as *mut u16) = val as u16,
+            4 => *(ptr as *mut u32) = val as u32,
+            8 => *(ptr as *mut u64) = val,
+            _ => {}
+        }
+    }
+    // MMIO stub: silently drop non-RAM writes for now.
 }

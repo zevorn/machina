@@ -211,11 +211,7 @@ fn test_ref_machine_irq_wiring() {
     // default priority=0, threshold=0, so 0 > 0 is false).
     let cpus = m.cpus_lock();
     let cpu = cpus[0].as_ref().unwrap();
-    assert_eq!(
-        cpu.csr.mip & (1 << 11),
-        0,
-        "MEI should be low initially"
-    );
+    assert_eq!(cpu.csr.mip & (1 << 11), 0, "MEI should be low initially");
 }
 
 #[test]
@@ -375,25 +371,15 @@ fn test_take_cpu_preserves_boot_state() {
     assert_eq!(cpu.pc, RAM_BASE, "pc preserved");
     assert_eq!(cpu.gpr[10], 0, "a0 preserved");
     assert!(cpu.gpr[11] >= RAM_BASE, "a1 preserved");
-    assert_eq!(
-        cpu.priv_level,
-        PrivLevel::Machine,
-        "priv preserved"
-    );
+    assert_eq!(cpu.priv_level, PrivLevel::Machine, "priv preserved");
 
     // After take, slot 0 is None.
     let cpus = m.cpus_lock();
-    assert!(
-        cpus[0].is_none(),
-        "cpus[0] must be None after take"
-    );
+    assert!(cpus[0].is_none(), "cpus[0] must be None after take");
 
     // Second take returns None.
     drop(cpus);
-    assert!(
-        m.take_cpu(0).is_none(),
-        "double take must return None"
-    );
+    assert!(m.take_cpu(0).is_none(), "double take must return None");
 }
 
 #[test]

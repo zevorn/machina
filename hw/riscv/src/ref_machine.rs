@@ -57,11 +57,11 @@ pub struct RiscvCpuIrqSink {
 }
 
 impl RiscvCpuIrqSink {
-    pub fn new(
-        shared_mip: Arc<AtomicU64>,
-        wfi_waker: Arc<WfiWaker>,
-    ) -> Self {
-        Self { shared_mip, wfi_waker }
+    pub fn new(shared_mip: Arc<AtomicU64>, wfi_waker: Arc<WfiWaker>) -> Self {
+        Self {
+            shared_mip,
+            wfi_waker,
+        }
     }
 }
 
@@ -69,13 +69,11 @@ impl IrqSink for RiscvCpuIrqSink {
     fn set_irq(&self, irq: u32, level: bool) {
         let bit = 1u64 << irq;
         if level {
-            self.shared_mip
-                .fetch_or(bit, Ordering::SeqCst);
+            self.shared_mip.fetch_or(bit, Ordering::SeqCst);
             // Wake halted CPU waiting in WFI.
             self.wfi_waker.wake();
         } else {
-            self.shared_mip
-                .fetch_and(!bit, Ordering::SeqCst);
+            self.shared_mip.fetch_and(!bit, Ordering::SeqCst);
         }
     }
 }
@@ -212,9 +210,7 @@ impl RefMachine {
     }
 
     /// Lock the CPU vector for shared access.
-    pub fn cpus_lock(
-        &self,
-    ) -> MutexGuard<'_, Vec<Option<RiscvCpu>>> {
+    pub fn cpus_lock(&self) -> MutexGuard<'_, Vec<Option<RiscvCpu>>> {
         self.cpus.lock().unwrap()
     }
 
@@ -226,16 +222,12 @@ impl RefMachine {
     }
 
     /// Get a clone of the shared CPU vector Arc.
-    pub fn cpus_arc(
-        &self,
-    ) -> Arc<Mutex<Vec<Option<RiscvCpu>>>> {
+    pub fn cpus_arc(&self) -> Arc<Mutex<Vec<Option<RiscvCpu>>>> {
         Arc::clone(&self.cpus)
     }
 
     /// Expose the CPU vector for CpuManager integration.
-    pub fn cpus_shared(
-        &self,
-    ) -> Arc<Mutex<Vec<Option<RiscvCpu>>>> {
+    pub fn cpus_shared(&self) -> Arc<Mutex<Vec<Option<RiscvCpu>>>> {
         self.cpus.clone()
     }
 
@@ -441,8 +433,7 @@ impl Machine for RefMachine {
 
         // Create per-hart CPUs.
         {
-            let mut cpus =
-                Vec::with_capacity(opts.cpu_count as usize);
+            let mut cpus = Vec::with_capacity(opts.cpu_count as usize);
             for _ in 0..opts.cpu_count {
                 cpus.push(Some(RiscvCpu::new()));
             }
@@ -502,12 +493,11 @@ impl Machine for RefMachine {
 
         // ---- Attach IRQ + chardev to UART ----
         {
-            let backend: Box<dyn Chardev + Send> =
-                if opts.nographic {
-                    Box::new(StdioChardev::new())
-                } else {
-                    Box::new(NullChardev)
-                };
+            let backend: Box<dyn Chardev + Send> = if opts.nographic {
+                Box::new(StdioChardev::new())
+            } else {
+                Box::new(NullChardev)
+            };
             let fe = CharFrontend::new(backend);
             let mut u = self.uart.as_ref().unwrap().lock().unwrap();
             u.attach_irq(uart_irq_line);
@@ -520,38 +510,23 @@ impl Machine for RefMachine {
         {
             let mip = &self.shared_mip;
             let wk = &self.wfi_waker;
-            let mut p =
-                self.plic.as_ref().unwrap().lock().unwrap();
+            let mut p = self.plic.as_ref().unwrap().lock().unwrap();
             for hart in 0..opts.cpu_count as usize {
                 let _ = hart;
-                let mei_sink = Arc::new(
-                    RiscvCpuIrqSink::new(
-                        Arc::clone(mip),
-                        Arc::clone(wk),
-                    ),
-                );
-                let mei_line = IrqLine::new(
-                    mei_sink as Arc<dyn IrqSink>,
-                    IRQ_MEI,
-                );
-                p.connect_context_output(
-                    (2 * hart) as u32,
-                    mei_line,
-                );
-                let sei_sink = Arc::new(
-                    RiscvCpuIrqSink::new(
-                        Arc::clone(mip),
-                        Arc::clone(wk),
-                    ),
-                );
-                let sei_line = IrqLine::new(
-                    sei_sink as Arc<dyn IrqSink>,
-                    IRQ_SEI,
-                );
-                p.connect_context_output(
-                    (2 * hart + 1) as u32,
-                    sei_line,
-                );
+                let mei_sink = Arc::new(RiscvCpuIrqSink::new(
+                    Arc::clone(mip),
+                    Arc::clone(wk),
+                ));
+                let mei_line =
+                    IrqLine::new(mei_sink as Arc<dyn IrqSink>, IRQ_MEI);
+                p.connect_context_output((2 * hart) as u32, mei_line);
+                let sei_sink = Arc::new(RiscvCpuIrqSink::new(
+                    Arc::clone(mip),
+                    Arc::clone(wk),
+                ));
+                let sei_line =
+                    IrqLine::new(sei_sink as Arc<dyn IrqSink>, IRQ_SEI);
+                p.connect_context_output((2 * hart + 1) as u32, sei_line);
             }
         }
 
@@ -559,31 +534,22 @@ impl Machine for RefMachine {
         {
             let mip = &self.shared_mip;
             let wk = &self.wfi_waker;
-            let mut a =
-                self.aclint.as_ref().unwrap().lock().unwrap();
+            let mut a = self.aclint.as_ref().unwrap().lock().unwrap();
             for hart in 0..opts.cpu_count as usize {
                 let _ = hart;
-                let mti_sink = Arc::new(
-                    RiscvCpuIrqSink::new(
-                        Arc::clone(mip),
-                        Arc::clone(wk),
-                    ),
-                );
-                let mti_line = IrqLine::new(
-                    mti_sink as Arc<dyn IrqSink>,
-                    IRQ_MTI,
-                );
+                let mti_sink = Arc::new(RiscvCpuIrqSink::new(
+                    Arc::clone(mip),
+                    Arc::clone(wk),
+                ));
+                let mti_line =
+                    IrqLine::new(mti_sink as Arc<dyn IrqSink>, IRQ_MTI);
                 a.connect_mti(hart as u32, mti_line);
-                let msi_sink = Arc::new(
-                    RiscvCpuIrqSink::new(
-                        Arc::clone(mip),
-                        Arc::clone(wk),
-                    ),
-                );
-                let msi_line = IrqLine::new(
-                    msi_sink as Arc<dyn IrqSink>,
-                    IRQ_MSI,
-                );
+                let msi_sink = Arc::new(RiscvCpuIrqSink::new(
+                    Arc::clone(mip),
+                    Arc::clone(wk),
+                ));
+                let msi_line =
+                    IrqLine::new(msi_sink as Arc<dyn IrqSink>, IRQ_MSI);
                 a.connect_msi(hart as u32, msi_line);
             }
         }

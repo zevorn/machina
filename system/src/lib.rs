@@ -7,9 +7,7 @@ pub use cpus::FullSystemCpu;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use machina_accel::exec::exec_loop::{
-    cpu_exec_loop_mt, ExitReason,
-};
+use machina_accel::exec::exec_loop::{cpu_exec_loop_mt, ExitReason};
 use machina_accel::exec::{PerCpuState, SharedState};
 use machina_accel::ir::context::Context;
 use machina_accel::GuestCpu;
@@ -113,14 +111,9 @@ mod tests {
             wk2.wait()
         });
         // Give the thread time to enter wait().
-        std::thread::sleep(
-            std::time::Duration::from_millis(50),
-        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
         wk.stop();
         let result = handle.join().unwrap();
-        assert!(
-            !result,
-            "wait() must return false when stopped"
-        );
+        assert!(!result, "wait() must return false when stopped");
     }
 }
