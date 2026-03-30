@@ -1,66 +1,56 @@
 // WFI wakeup primitive: Condvar-based notification for
-// halted CPU wakeup by device IRQ delivery.
+// halted CPU wakeup by device IRQ or manager stop.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 
 /// Wakeup signal for WFI (Wait For Interrupt).
 ///
-/// Device IRQ sinks call `wake()` after updating SharedMip
-/// to unblock a CPU waiting in `wait_for_interrupt()`.
+/// - Device IRQ sinks call `wake()` to unblock WFI.
+/// - CpuManager calls `stop()` to force-unblock WFI
+///   for safe shutdown.
 pub struct WfiWaker {
-    mu: Mutex<bool>,
+    notified: Mutex<bool>,
+    stopped: AtomicBool,
     cv: Condvar,
 }
 
 impl WfiWaker {
     pub fn new() -> Self {
         Self {
-            mu: Mutex::new(false),
+            notified: Mutex::new(false),
+            stopped: AtomicBool::new(false),
             cv: Condvar::new(),
         }
     }
 
-    /// Wake a halted CPU. Called by device IRQ sinks.
+    /// Wake halted CPU (device IRQ arrived).
     pub fn wake(&self) {
-        let mut notified = self.mu.lock().unwrap();
-        *notified = true;
+        let mut n = self.notified.lock().unwrap();
+        *n = true;
         self.cv.notify_all();
     }
 
-    /// Block until woken by `wake()`. Returns true when
-    /// woken by signal. Does not timeout — blocks
-    /// indefinitely until an interrupt arrives.
-    pub fn wait(&self) -> bool {
-        let mut notified = self.mu.lock().unwrap();
-        while !*notified {
-            notified = self.cv.wait(notified).unwrap();
-        }
-        *notified = false;
-        true
+    /// Force-unblock any waiting CPU (manager stop).
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.cv.notify_all();
     }
 
-    /// Block with timeout. Returns true if woken by
-    /// signal, false on timeout.
-    pub fn wait_timeout(
-        &self,
-        timeout: std::time::Duration,
-    ) -> bool {
-        let mut notified = self.mu.lock().unwrap();
-        if *notified {
-            *notified = false;
-            return true;
+    /// Block until woken by `wake()` or `stop()`.
+    /// Returns true if woken by IRQ, false if stopped.
+    pub fn wait(&self) -> bool {
+        let mut n = self.notified.lock().unwrap();
+        loop {
+            if *n {
+                *n = false;
+                return true;
+            }
+            if self.stopped.load(Ordering::SeqCst) {
+                return false;
+            }
+            n = self.cv.wait(n).unwrap();
         }
-        let (guard, _result) = self
-            .cv
-            .wait_timeout(notified, timeout)
-            .unwrap();
-        let woken = *guard;
-        drop(guard);
-        if woken {
-            let mut n = self.mu.lock().unwrap();
-            *n = false;
-        }
-        woken
     }
 }
 

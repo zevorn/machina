@@ -181,6 +181,8 @@ fn main() {
     let ram_size = machine.ram_size();
 
     let wfi_waker = machine.wfi_waker();
+    let mut cpu_mgr = CpuManager::new();
+    cpu_mgr.set_wfi_waker(wfi_waker.clone());
     let mut fs_cpu = unsafe {
         FullSystemCpu::new(
             cpu0,
@@ -190,8 +192,6 @@ fn main() {
             wfi_waker,
         )
     };
-
-    let cpu_mgr = CpuManager::new();
 
     eprintln!(
         "machina: cpu0 pc=0x{:x} priv={}, \
