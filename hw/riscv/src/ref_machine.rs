@@ -9,7 +9,9 @@ use machina_core::machine::{Machine, MachineOpts};
 use machina_core::wfi::WfiWaker;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_hw_char::uart::Uart16550;
-use machina_hw_core::chardev::{CharFrontend, NullChardev};
+use machina_hw_core::chardev::{
+    CharFrontend, Chardev, NullChardev, StdioChardev,
+};
 use machina_hw_core::fdt::FdtBuilder;
 use machina_hw_core::irq::{IrqLine, IrqSink};
 use machina_hw_intc::aclint::Aclint;
@@ -500,7 +502,13 @@ impl Machine for RefMachine {
 
         // ---- Attach IRQ + chardev to UART ----
         {
-            let fe = CharFrontend::new(Box::new(NullChardev));
+            let backend: Box<dyn Chardev + Send> =
+                if opts.nographic {
+                    Box::new(StdioChardev::new())
+                } else {
+                    Box::new(NullChardev)
+                };
+            let fe = CharFrontend::new(backend);
             let mut u = self.uart.as_ref().unwrap().lock().unwrap();
             u.attach_irq(uart_irq_line);
             u.attach_chardev(fe);

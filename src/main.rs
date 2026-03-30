@@ -144,6 +144,7 @@ fn main() {
         kernel: cli.kernel.clone(),
         bios: cli.bios.clone(),
         append: None,
+        nographic: cli.nographic,
     };
 
     if let Err(e) = machine.init(&opts) {

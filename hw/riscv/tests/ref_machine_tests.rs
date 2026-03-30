@@ -12,6 +12,7 @@ fn default_opts() -> MachineOpts {
         kernel: None,
         bios: None,
         append: None,
+        nographic: false,
     }
 }
 
@@ -99,6 +100,7 @@ fn test_ref_machine_zero_ram_fails() {
         kernel: None,
         bios: None,
         append: None,
+        nographic: false,
     };
     let result = m.init(&opts);
     assert!(result.is_err(), "init with 0 RAM should fail");
@@ -147,6 +149,7 @@ fn test_ref_machine_plic_contexts_multi_hart() {
         kernel: None,
         bios: None,
         append: None,
+        nographic: false,
     };
     m.init(&opts).expect("init failed");
 
@@ -356,6 +359,40 @@ fn test_boot_sets_cpu_state() {
         cpu.priv_level,
         PrivLevel::Machine,
         "privilege should be Machine"
+    );
+}
+
+#[test]
+fn test_take_cpu_preserves_boot_state() {
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+    let bios = [0x13u8; 16];
+    m.write_ram(0, &bios).expect("write_ram failed");
+    m.boot().expect("boot failed");
+
+    // take_cpu returns CPU with boot state intact.
+    let cpu = m.take_cpu(0).expect("take_cpu failed");
+    assert_eq!(cpu.pc, RAM_BASE, "pc preserved");
+    assert_eq!(cpu.gpr[10], 0, "a0 preserved");
+    assert!(cpu.gpr[11] >= RAM_BASE, "a1 preserved");
+    assert_eq!(
+        cpu.priv_level,
+        PrivLevel::Machine,
+        "priv preserved"
+    );
+
+    // After take, slot 0 is None.
+    let cpus = m.cpus_lock();
+    assert!(
+        cpus[0].is_none(),
+        "cpus[0] must be None after take"
+    );
+
+    // Second take returns None.
+    drop(cpus);
+    assert!(
+        m.take_cpu(0).is_none(),
+        "double take must return None"
     );
 }
 

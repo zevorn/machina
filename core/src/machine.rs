@@ -10,6 +10,7 @@ pub struct MachineOpts {
     pub kernel: Option<PathBuf>,
     pub bios: Option<PathBuf>,
     pub append: Option<String>,
+    pub nographic: bool,
 }
 
 pub trait Machine: Send + Sync {
