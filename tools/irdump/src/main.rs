@@ -10,10 +10,10 @@ use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::process;
 
-use machina_core::context::Context;
-use machina_core::dump::dump_ops_with;
-use machina_core::serialize;
-use machina_core::TempIdx;
+use machina_accel::ir::context::Context;
+use machina_accel::ir::dump::dump_ops_with;
+use machina_accel::ir::serialize;
+use machina_accel::ir::TempIdx;
 use machina_frontend::riscv::cpu::NUM_GPRS;
 use machina_frontend::riscv::ext::RiscvCfg;
 use machina_frontend::riscv::{RiscvDisasContext, RiscvTranslator};

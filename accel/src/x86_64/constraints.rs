@@ -1,12 +1,12 @@
 use crate::constraint::*;
 use crate::x86_64::regs::{Reg, ALLOCATABLE_REGS};
-use machina_core::Opcode;
+use crate::ir::Opcode;
 
-const R: machina_core::RegSet = ALLOCATABLE_REGS;
-const R_NO_RCX: machina_core::RegSet = machina_core::RegSet::from_raw(
+const R: crate::ir::RegSet = ALLOCATABLE_REGS;
+const R_NO_RCX: crate::ir::RegSet = crate::ir::RegSet::from_raw(
     ALLOCATABLE_REGS.raw() & !(1u64 << Reg::Rcx as u64),
 );
-const R_NO_RAX_RDX: machina_core::RegSet = machina_core::RegSet::from_raw(
+const R_NO_RAX_RDX: crate::ir::RegSet = crate::ir::RegSet::from_raw(
     ALLOCATABLE_REGS.raw()
         & !((1u64 << Reg::Rax as u64) | (1u64 << Reg::Rdx as u64)),
 );

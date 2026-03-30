@@ -1,8 +1,8 @@
-use machina_backend::code_buffer::CodeBuffer;
-use machina_backend::x86_64::emitter::*;
-use machina_backend::x86_64::regs::*;
-use machina_backend::x86_64::X86_64CodeGen;
-use machina_backend::HostCodeGen;
+use machina_accel::code_buffer::CodeBuffer;
+use machina_accel::x86_64::emitter::*;
+use machina_accel::x86_64::regs::*;
+use machina_accel::x86_64::X86_64CodeGen;
+use machina_accel::HostCodeGen;
 
 // -- regs tests --
 
@@ -250,7 +250,7 @@ fn patch_jump_forward() {
 #[test]
 fn init_context_sets_reserved_regs() {
     let gen = X86_64CodeGen::new();
-    let mut ctx = machina_core::Context::new();
+    let mut ctx = machina_accel::ir::Context::new();
     gen.init_context(&mut ctx);
 
     assert!(ctx.reserved_regs.contains(Reg::Rsp as u8));
@@ -1061,18 +1061,18 @@ fn shrd_ri_test() {
 
 #[test]
 fn x86cond_from_tcg() {
-    assert_eq!(X86Cond::from_tcg(machina_core::Cond::Eq), X86Cond::Je);
-    assert_eq!(X86Cond::from_tcg(machina_core::Cond::Ne), X86Cond::Jne);
-    assert_eq!(X86Cond::from_tcg(machina_core::Cond::Lt), X86Cond::Jl);
-    assert_eq!(X86Cond::from_tcg(machina_core::Cond::Ge), X86Cond::Jge);
-    assert_eq!(X86Cond::from_tcg(machina_core::Cond::Ltu), X86Cond::Jb);
-    assert_eq!(X86Cond::from_tcg(machina_core::Cond::Geu), X86Cond::Jae);
+    assert_eq!(X86Cond::from_tcg(machina_accel::ir::Cond::Eq), X86Cond::Je);
+    assert_eq!(X86Cond::from_tcg(machina_accel::ir::Cond::Ne), X86Cond::Jne);
+    assert_eq!(X86Cond::from_tcg(machina_accel::ir::Cond::Lt), X86Cond::Jl);
+    assert_eq!(X86Cond::from_tcg(machina_accel::ir::Cond::Ge), X86Cond::Jge);
+    assert_eq!(X86Cond::from_tcg(machina_accel::ir::Cond::Ltu), X86Cond::Jb);
+    assert_eq!(X86Cond::from_tcg(machina_accel::ir::Cond::Geu), X86Cond::Jae);
 }
 
 #[test]
 fn x86cond_from_tcg_always_never_fallback() {
-    assert_eq!(X86Cond::from_tcg(machina_core::Cond::Always), X86Cond::Je);
-    assert_eq!(X86Cond::from_tcg(machina_core::Cond::Never), X86Cond::Jne);
+    assert_eq!(X86Cond::from_tcg(machina_accel::ir::Cond::Always), X86Cond::Je);
+    assert_eq!(X86Cond::from_tcg(machina_accel::ir::Cond::Never), X86Cond::Jne);
 }
 
 #[test]

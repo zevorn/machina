@@ -1,11 +1,15 @@
 use std::sync::atomic::Ordering;
 
-use crate::{
-    ExecEnv, GuestCpu, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING,
+use super::{
+    ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING,
 };
-use machina_backend::translate::translate;
-use machina_backend::HostCodeGen;
-use machina_core::tb::{decode_tb_exit, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN};
+use crate::cpu::GuestCpu;
+use crate::translate::translate;
+use crate::HostCodeGen;
+use crate::ir::tb::{
+    decode_tb_exit, TranslationBlock, EXIT_TARGET_NONE,
+    TB_EXIT_NOCHAIN,
+};
 
 /// Reason the execution loop exited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +198,7 @@ where
     let guest_size = cpu.gen_code(
         &mut guard.ir_ctx,
         pc,
-        machina_core::tb::TranslationBlock::max_insns(0),
+        TranslationBlock::max_insns(0),
     );
     unsafe {
         shared.tb_store.get_mut(tb_idx).size = guest_size;

@@ -1,9 +1,9 @@
-use machina_backend::code_buffer::CodeBuffer;
-use machina_backend::x86_64::emitter::*;
-use machina_backend::x86_64::regs::*;
-use machina_backend::x86_64::X86_64CodeGen;
-use machina_backend::HostCodeGen;
-use machina_core::{Context, Op, OpIdx, Opcode, Type};
+use machina_accel::code_buffer::CodeBuffer;
+use machina_accel::x86_64::emitter::*;
+use machina_accel::x86_64::regs::*;
+use machina_accel::x86_64::X86_64CodeGen;
+use machina_accel::HostCodeGen;
+use machina_accel::ir::{Context, Op, OpIdx, Opcode, Type};
 
 fn emit_bytes(f: impl FnOnce(&mut CodeBuffer)) -> Vec<u8> {
     let mut buf = CodeBuffer::new(4096).unwrap();
@@ -716,7 +716,7 @@ fn codegen_setcond_movzx_sil() {
         op,
         &[Reg::Rsi as u8],
         &[Reg::Rax as u8, Reg::Rcx as u8],
-        &[machina_core::Cond::Eq as u32],
+        &[machina_accel::ir::Cond::Eq as u32],
     );
     assert_eq!(
         code,
@@ -731,7 +731,7 @@ fn codegen_setcond_movzx_dil() {
         op,
         &[Reg::Rdi as u8],
         &[Reg::Rax as u8, Reg::Rcx as u8],
-        &[machina_core::Cond::Eq as u32],
+        &[machina_accel::ir::Cond::Eq as u32],
     );
     assert_eq!(
         code,

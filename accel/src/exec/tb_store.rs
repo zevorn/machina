@@ -2,9 +2,9 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use machina_backend::code_buffer::CodeBuffer;
-use machina_backend::HostCodeGen;
-use machina_core::tb::{TranslationBlock, TB_HASH_SIZE};
+use crate::code_buffer::CodeBuffer;
+use crate::HostCodeGen;
+use crate::ir::tb::{TranslationBlock, TB_HASH_SIZE};
 
 const MAX_TBS: usize = 65536;
 

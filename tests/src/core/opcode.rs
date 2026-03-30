@@ -1,6 +1,6 @@
-use machina_core::op::MAX_OP_ARGS;
-use machina_core::opcode::*;
-use machina_core::types::Type;
+use machina_accel::ir::op::MAX_OP_ARGS;
+use machina_accel::ir::opcode::*;
+use machina_accel::ir::types::Type;
 
 fn assert_def(
     opc: Opcode,

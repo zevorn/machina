@@ -3,11 +3,11 @@
 //
 // Reference: ~/qemu/tcg/optimize.c
 
-use machina_core::op::OpIdx;
-use machina_core::opcode::{OpFlags, Opcode};
-use machina_core::temp::TempIdx;
-use machina_core::types::{Cond, Type};
-use machina_core::Context;
+use crate::ir::op::OpIdx;
+use crate::ir::opcode::{OpFlags, Opcode};
+use crate::ir::temp::TempIdx;
+use crate::ir::types::{Cond, Type};
+use crate::ir::Context;
 
 /// Per-temp optimization info tracked during the pass.
 #[derive(Clone, Copy, Default)]
@@ -193,8 +193,8 @@ fn reset_copies(info: &mut [TempInfo]) {
 /// Invalidate output temp info for ops we don't optimize.
 fn invalidate_outputs(
     info: &mut [TempInfo],
-    def: &machina_core::OpDef,
-    args: &[TempIdx; machina_core::MAX_OP_ARGS],
+    def: &crate::ir::OpDef,
+    args: &[TempIdx; crate::ir::MAX_OP_ARGS],
     ctx: &Context,
 ) {
     for &tidx in args.iter().take(def.nb_oargs as usize) {
@@ -305,7 +305,7 @@ fn fold_mov(
     ctx: &mut Context,
     info: &mut Vec<TempInfo>,
     op_idx: OpIdx,
-    args: [TempIdx; machina_core::MAX_OP_ARGS],
+    args: [TempIdx; crate::ir::MAX_OP_ARGS],
     ty: Type,
 ) {
     let dst = args[0];
@@ -326,7 +326,7 @@ fn fold_unary(
     info: &mut Vec<TempInfo>,
     op_idx: OpIdx,
     opc: Opcode,
-    args: [TempIdx; machina_core::MAX_OP_ARGS],
+    args: [TempIdx; crate::ir::MAX_OP_ARGS],
     ty: Type,
 ) {
     let dst = args[0];
@@ -351,7 +351,7 @@ fn fold_ext(
     info: &mut Vec<TempInfo>,
     op_idx: OpIdx,
     opc: Opcode,
-    args: [TempIdx; machina_core::MAX_OP_ARGS],
+    args: [TempIdx; crate::ir::MAX_OP_ARGS],
 ) {
     let dst = args[0];
     let src = args[1];
@@ -383,7 +383,7 @@ fn fold_binary(
     info: &mut Vec<TempInfo>,
     op_idx: OpIdx,
     opc: Opcode,
-    args: [TempIdx; machina_core::MAX_OP_ARGS],
+    args: [TempIdx; crate::ir::MAX_OP_ARGS],
     ty: Type,
 ) {
     let dst = args[0];
@@ -591,7 +591,7 @@ fn fold_brcond(
     ctx: &mut Context,
     info: &[TempInfo],
     op_idx: OpIdx,
-    args: [TempIdx; machina_core::MAX_OP_ARGS],
+    args: [TempIdx; crate::ir::MAX_OP_ARGS],
     ty: Type,
 ) {
     let a_idx = args[0]; // iarg 0

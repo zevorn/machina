@@ -176,21 +176,21 @@ pub enum X86Cond {
 
 impl X86Cond {
     /// Map TCG condition to x86 JCC condition code.
-    pub fn from_tcg(cond: machina_core::Cond) -> Self {
+    pub fn from_tcg(cond: crate::ir::Cond) -> Self {
         match cond {
-            machina_core::Cond::Eq | machina_core::Cond::TstEq => X86Cond::Je,
-            machina_core::Cond::Ne | machina_core::Cond::TstNe => X86Cond::Jne,
-            machina_core::Cond::Lt => X86Cond::Jl,
-            machina_core::Cond::Ge => X86Cond::Jge,
-            machina_core::Cond::Le => X86Cond::Jle,
-            machina_core::Cond::Gt => X86Cond::Jg,
-            machina_core::Cond::Ltu => X86Cond::Jb,
-            machina_core::Cond::Geu => X86Cond::Jae,
-            machina_core::Cond::Leu => X86Cond::Jbe,
-            machina_core::Cond::Gtu => X86Cond::Ja,
+            crate::ir::Cond::Eq | crate::ir::Cond::TstEq => X86Cond::Je,
+            crate::ir::Cond::Ne | crate::ir::Cond::TstNe => X86Cond::Jne,
+            crate::ir::Cond::Lt => X86Cond::Jl,
+            crate::ir::Cond::Ge => X86Cond::Jge,
+            crate::ir::Cond::Le => X86Cond::Jle,
+            crate::ir::Cond::Gt => X86Cond::Jg,
+            crate::ir::Cond::Ltu => X86Cond::Jb,
+            crate::ir::Cond::Geu => X86Cond::Jae,
+            crate::ir::Cond::Leu => X86Cond::Jbe,
+            crate::ir::Cond::Gtu => X86Cond::Ja,
             // Caller should not use Jcc for Always/Never
-            machina_core::Cond::Always => X86Cond::Je,
-            machina_core::Cond::Never => X86Cond::Jne,
+            crate::ir::Cond::Always => X86Cond::Je,
+            crate::ir::Cond::Never => X86Cond::Jne,
         }
     }
 

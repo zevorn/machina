@@ -1,7 +1,7 @@
-use machina_core::op::*;
-use machina_core::opcode::Opcode;
-use machina_core::temp::TempIdx;
-use machina_core::types::{RegSet, Type};
+use machina_accel::ir::op::*;
+use machina_accel::ir::opcode::Opcode;
+use machina_accel::ir::temp::TempIdx;
+use machina_accel::ir::types::{RegSet, Type};
 
 #[test]
 fn op_new_defaults() {

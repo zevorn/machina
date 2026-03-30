@@ -1,9 +1,9 @@
-use machina_backend::code_buffer::CodeBuffer;
-use machina_backend::translate::translate_and_execute;
-use machina_backend::HostCodeGen;
-use machina_backend::X86_64CodeGen;
-use machina_core::types::Type;
-use machina_core::Context;
+use machina_accel::code_buffer::CodeBuffer;
+use machina_accel::translate::translate_and_execute;
+use machina_accel::HostCodeGen;
+use machina_accel::X86_64CodeGen;
+use machina_accel::ir::types::Type;
+use machina_accel::ir::Context;
 
 use super::{setup_riscv_globals, RiscvCpuState, RiscvCpuStateMem};
 
@@ -104,7 +104,7 @@ fn test_shift_out_rcx_count_non_rcx() {
 
     let env = ctx.new_fixed(
         Type::I64,
-        machina_backend::x86_64::Reg::Rbp as u8,
+        machina_accel::x86_64::Reg::Rbp as u8,
         "env",
     );
 
@@ -258,8 +258,8 @@ fn test_slt_sltu() {
     let t_sltu = ctx.new_temp(Type::I64);
 
     ctx.gen_insn_start(0x3200);
-    ctx.gen_setcond(Type::I64, t_slt, a, b, machina_core::Cond::Lt);
-    ctx.gen_setcond(Type::I64, t_sltu, a, b, machina_core::Cond::Ltu);
+    ctx.gen_setcond(Type::I64, t_slt, a, b, machina_accel::ir::Cond::Lt);
+    ctx.gen_setcond(Type::I64, t_sltu, a, b, machina_accel::ir::Cond::Ltu);
     ctx.gen_mov(Type::I64, regs[8], t_slt);
     ctx.gen_mov(Type::I64, regs[9], t_sltu);
     ctx.gen_exit_tb(0);
@@ -394,7 +394,7 @@ fn test_signed_unsigned_branches() {
         Type::I64,
         neg1,
         one,
-        machina_core::Cond::Lt,
+        machina_accel::ir::Cond::Lt,
         label_signed_taken,
     );
     ctx.gen_mov(Type::I64, t0, c0);
@@ -412,7 +412,7 @@ fn test_signed_unsigned_branches() {
         Type::I64,
         neg1,
         one,
-        machina_core::Cond::Gtu,
+        machina_accel::ir::Cond::Gtu,
         label_unsigned_taken,
     );
     ctx.gen_mov(Type::I64, t0, c0);
@@ -502,7 +502,7 @@ fn test_beq_taken() {
         Type::I64,
         regs[1],
         regs[2],
-        machina_core::Cond::Eq,
+        machina_accel::ir::Cond::Eq,
         label_eq,
     );
 
@@ -561,7 +561,7 @@ fn test_beq_not_taken() {
         Type::I64,
         regs[1],
         regs[2],
-        machina_core::Cond::Eq,
+        machina_accel::ir::Cond::Eq,
         label_eq,
     );
 

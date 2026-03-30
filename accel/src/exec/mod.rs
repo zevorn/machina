@@ -1,7 +1,7 @@
 //! TCG Execution Engine — TB cache and CPU execution loop.
 //!
 //! Provides the execution loop that drives the
-//! lookup → translate → execute cycle, with TB caching via
+//! lookup -> translate -> execute cycle, with TB caching via
 //! a global hash table and per-CPU jump cache.
 //!
 //! Reference: `~/qemu/accel/tcg/cpu-exec.c`,
@@ -17,10 +17,10 @@ use std::cell::UnsafeCell;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use machina_backend::code_buffer::CodeBuffer;
-use machina_backend::HostCodeGen;
-use machina_core::tb::JumpCache;
-use machina_core::Context;
+use crate::code_buffer::CodeBuffer;
+use crate::ir::tb::JumpCache;
+use crate::ir::Context;
+use crate::HostCodeGen;
 
 /// Execution statistics for profiling the TB lookup/chain
 /// pipeline.
@@ -44,7 +44,8 @@ pub struct ExecStats {
 
 impl fmt::Display for ExecStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let total_lookup = self.jc_hit + self.ht_hit + self.translate;
+        let total_lookup =
+            self.jc_hit + self.ht_hit + self.translate;
         writeln!(f, "=== TCG Execution Stats ===")?;
         writeln!(f, "loop iters:    {}", self.loop_iters)?;
         writeln!(f, "--- TB lookup ---")?;
@@ -88,9 +89,6 @@ fn pct(n: u64, total: u64) -> f64 {
     }
 }
 
-// Re-export GuestCpu from core for backward compatibility.
-pub use machina_core::cpu::GuestCpu;
-
 /// State protected by translate_lock.
 pub struct TranslateGuard {
     pub ir_ctx: Context,
@@ -100,7 +98,8 @@ pub struct TranslateGuard {
 pub struct SharedState<B: HostCodeGen> {
     pub tb_store: TbStore,
     /// Code buffer wrapped in UnsafeCell: emit methods need
-    /// &mut (under translate_lock), patch/read methods use &self.
+    /// &mut (under translate_lock), patch/read methods use
+    /// &self.
     code_buf: UnsafeCell<CodeBuffer>,
     pub backend: B,
     pub code_gen_start: usize,
@@ -150,7 +149,8 @@ pub struct ExecEnv<B: HostCodeGen> {
 impl<B: HostCodeGen> ExecEnv<B> {
     pub fn new(mut backend: B) -> Self {
         let mut code_buf =
-            CodeBuffer::new(16 * 1024 * 1024).expect("mmap failed");
+            CodeBuffer::new(16 * 1024 * 1024)
+                .expect("mmap failed");
         backend.emit_prologue(&mut code_buf);
         backend.emit_epilogue(&mut code_buf);
         let code_gen_start = code_buf.offset();
@@ -163,7 +163,9 @@ impl<B: HostCodeGen> ExecEnv<B> {
             code_buf: UnsafeCell::new(code_buf),
             backend,
             code_gen_start,
-            translate_lock: Mutex::new(TranslateGuard { ir_ctx }),
+            translate_lock: Mutex::new(
+                TranslateGuard { ir_ctx },
+            ),
         });
 
         Self {

@@ -12,11 +12,11 @@ use super::fpu;
 use super::insn_decode::*;
 use super::RiscvDisasContext;
 use crate::DisasJumpType;
-use machina_core::context::Context;
-use machina_core::tb::{
+use machina_accel::ir::context::Context;
+use machina_accel::ir::tb::{
     EXCP_EBREAK, EXCP_ECALL, TB_EXIT_IDX0, TB_EXIT_NOCHAIN,
 };
-use machina_core::types::{Cond, MemOp, Type};
+use machina_accel::ir::types::{Cond, MemOp, Type};
 
 /// Bail out (return false) if the MISA letter-extension
 /// is absent.

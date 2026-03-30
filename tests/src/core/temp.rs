@@ -1,5 +1,5 @@
-use machina_core::temp::*;
-use machina_core::types::*;
+use machina_accel::ir::temp::*;
+use machina_accel::ir::types::*;
 
 #[test]
 fn temp_ebb_defaults() {

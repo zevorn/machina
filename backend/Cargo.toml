@@ -1,8 +1,0 @@
-[package]
-name = "machina-backend"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-machina-core = { path = "../core" }
-libc = "0.2"

@@ -1,5 +1,5 @@
-use machina_core::op::MAX_OP_ARGS;
-use machina_core::RegSet;
+use crate::ir::op::MAX_OP_ARGS;
+use crate::ir::RegSet;
 
 /// Constraint for a single argument of an IR op.
 ///

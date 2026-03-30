@@ -1,4 +1,4 @@
-use machina_core::types::Type;
+use machina_accel::ir::types::Type;
 
 use super::{run_riscv_tb, RiscvCpuState, RiscvCpuStateMem};
 
@@ -203,70 +203,70 @@ riscv_shift_case!(
 
 riscv_setcond_case!(
     test_setcond_eq_case,
-    machina_core::Cond::Eq,
+    machina_accel::ir::Cond::Eq,
     5u64,
     5u64,
     1u64
 );
 riscv_setcond_case!(
     test_setcond_ne_case,
-    machina_core::Cond::Ne,
+    machina_accel::ir::Cond::Ne,
     5u64,
     6u64,
     1u64
 );
 riscv_setcond_case!(
     test_setcond_lt_case,
-    machina_core::Cond::Lt,
+    machina_accel::ir::Cond::Lt,
     0xFFFF_FFFF_FFFF_FFFFu64,
     1u64,
     1u64
 );
 riscv_setcond_case!(
     test_setcond_ge_case,
-    machina_core::Cond::Ge,
+    machina_accel::ir::Cond::Ge,
     5u64,
     0xFFFF_FFFF_FFFF_FFFFu64,
     1u64
 );
 riscv_setcond_case!(
     test_setcond_le_case,
-    machina_core::Cond::Le,
+    machina_accel::ir::Cond::Le,
     0xFFFF_FFFF_FFFF_FFFEu64,
     0xFFFF_FFFF_FFFF_FFFFu64,
     1u64
 );
 riscv_setcond_case!(
     test_setcond_gt_case,
-    machina_core::Cond::Gt,
+    machina_accel::ir::Cond::Gt,
     2u64,
     1u64,
     1u64
 );
 riscv_setcond_case!(
     test_setcond_ltu_case,
-    machina_core::Cond::Ltu,
+    machina_accel::ir::Cond::Ltu,
     0xFFFF_FFFF_FFFF_FFFFu64,
     1u64,
     0u64
 );
 riscv_setcond_case!(
     test_setcond_geu_case,
-    machina_core::Cond::Geu,
+    machina_accel::ir::Cond::Geu,
     0xFFFF_FFFF_FFFF_FFFFu64,
     1u64,
     1u64
 );
 riscv_setcond_case!(
     test_setcond_leu_case,
-    machina_core::Cond::Leu,
+    machina_accel::ir::Cond::Leu,
     1u64,
     0xFFFF_FFFF_FFFF_FFFFu64,
     1u64
 );
 riscv_setcond_case!(
     test_setcond_gtu_case,
-    machina_core::Cond::Gtu,
+    machina_accel::ir::Cond::Gtu,
     2u64,
     3u64,
     0u64
@@ -274,7 +274,7 @@ riscv_setcond_case!(
 
 riscv_branch_case!(
     test_bne_taken_extra,
-    machina_core::Cond::Ne,
+    machina_accel::ir::Cond::Ne,
     10u64,
     11u64,
     1u64,
@@ -283,7 +283,7 @@ riscv_branch_case!(
 );
 riscv_branch_case!(
     test_bne_not_taken_extra,
-    machina_core::Cond::Ne,
+    machina_accel::ir::Cond::Ne,
     10u64,
     10u64,
     1u64,
@@ -292,7 +292,7 @@ riscv_branch_case!(
 );
 riscv_branch_case!(
     test_blt_taken_extra,
-    machina_core::Cond::Lt,
+    machina_accel::ir::Cond::Lt,
     0xFFFF_FFFF_FFFF_FFFEu64,
     1u64,
     3u64,
@@ -301,7 +301,7 @@ riscv_branch_case!(
 );
 riscv_branch_case!(
     test_bge_not_taken_extra,
-    machina_core::Cond::Ge,
+    machina_accel::ir::Cond::Ge,
     1u64,
     2u64,
     3u64,
@@ -310,7 +310,7 @@ riscv_branch_case!(
 );
 riscv_branch_case!(
     test_bltu_taken_extra,
-    machina_core::Cond::Ltu,
+    machina_accel::ir::Cond::Ltu,
     1u64,
     2u64,
     5u64,
@@ -319,7 +319,7 @@ riscv_branch_case!(
 );
 riscv_branch_case!(
     test_bgeu_taken_extra,
-    machina_core::Cond::Geu,
+    machina_accel::ir::Cond::Geu,
     0xFFFF_FFFF_FFFF_FFFFu64,
     1u64,
     7u64,
@@ -405,13 +405,13 @@ fn test_complex_slt_branch_select() {
             t_cond,
             regs[1],
             regs[2],
-            machina_core::Cond::Lt,
+            machina_accel::ir::Cond::Lt,
         );
         ctx.gen_brcond(
             Type::I64,
             t_cond,
             regs[0],
-            machina_core::Cond::Ne,
+            machina_accel::ir::Cond::Ne,
             label_taken,
         );
 
@@ -576,7 +576,7 @@ fn test_complex_branch_fallthrough() {
             Type::I64,
             regs[1],
             regs[2],
-            machina_core::Cond::Ne,
+            machina_accel::ir::Cond::Ne,
             label_taken,
         );
         ctx.gen_mov(Type::I64, t1, c1);
@@ -685,7 +685,7 @@ fn test_brcond_on_temp_eq() {
 
         ctx.gen_insn_start(0x5130);
         ctx.gen_add(Type::I64, t_add, regs[1], regs[2]);
-        ctx.gen_brcond(Type::I64, t_add, c30, machina_core::Cond::Eq, label_eq);
+        ctx.gen_brcond(Type::I64, t_add, c30, machina_accel::ir::Cond::Eq, label_eq);
         ctx.gen_mov(Type::I64, t_out, c0);
         ctx.gen_mov(Type::I64, regs[4], t_out);
         ctx.gen_br(label_end);
@@ -724,7 +724,7 @@ fn test_countdown_loop_sum() {
             Type::I64,
             regs[1],
             c0,
-            machina_core::Cond::Ne,
+            machina_accel::ir::Cond::Ne,
             label_loop,
         );
         ctx.gen_exit_tb(0);

@@ -1,11 +1,10 @@
 [workspace]
 members = [
     "core",
-    "backend",
+    "accel",
     "frontend",
     "decode",
     "disas",
-    "exec",
     "tests",
     "tools/irdump",
     "tools/irbackend",

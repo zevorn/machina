@@ -8,6 +8,6 @@ name = "machina-irdump"
 path = "src/main.rs"
 
 [dependencies]
-machina-core = { path = "../../core" }
+machina-accel = { path = "../../accel" }
 machina-disas = { path = "../../disas" }
 machina-frontend = { path = "../../frontend" }

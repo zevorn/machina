@@ -1,4 +1,4 @@
-use machina_core::label::*;
+use machina_accel::ir::label::*;
 
 #[test]
 fn label_new() {

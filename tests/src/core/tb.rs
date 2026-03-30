@@ -1,4 +1,4 @@
-use machina_core::tb::*;
+use machina_accel::ir::tb::*;
 
 #[test]
 fn tb_new() {

@@ -8,5 +8,4 @@ name = "machina-irbackend"
 path = "src/main.rs"
 
 [dependencies]
-machina-core = { path = "../../core" }
-machina-backend = { path = "../../backend" }
+machina-accel = { path = "../../accel" }

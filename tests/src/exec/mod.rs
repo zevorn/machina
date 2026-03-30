@@ -2,12 +2,13 @@
 
 mod mttcg;
 
-use machina_backend::X86_64CodeGen;
-use machina_core::context::Context;
-use machina_core::tb::{EXCP_EBREAK, EXCP_ECALL};
-use machina_core::TempIdx;
-use machina_exec::exec_loop::{cpu_exec_loop, ExitReason};
-use machina_exec::{ExecEnv, GuestCpu};
+use machina_accel::X86_64CodeGen;
+use machina_accel::ir::context::Context;
+use machina_accel::ir::tb::{EXCP_EBREAK, EXCP_ECALL};
+use machina_accel::ir::TempIdx;
+use machina_accel::exec::exec_loop::{cpu_exec_loop, ExitReason};
+use machina_accel::exec::ExecEnv;
+use machina_accel::GuestCpu;
 use machina_frontend::riscv::cpu::RiscvCpu;
 use machina_frontend::riscv::ext::RiscvCfg;
 use machina_frontend::riscv::{RiscvDisasContext, RiscvTranslator};

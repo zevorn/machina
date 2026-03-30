@@ -9,10 +9,10 @@ use super::super::fpu;
 use super::super::insn_decode::*;
 use super::super::RiscvDisasContext;
 use crate::DisasJumpType;
-use machina_core::context::Context;
-use machina_core::tb::{TB_EXIT_IDX0, TB_EXIT_IDX1};
-use machina_core::types::{Cond, MemOp, Type};
-use machina_core::TempIdx;
+use machina_accel::ir::context::Context;
+use machina_accel::ir::tb::{TB_EXIT_IDX0, TB_EXIT_IDX1};
+use machina_accel::ir::types::{Cond, MemOp, Type};
+use machina_accel::ir::TempIdx;
 
 /// Binary IR operation: `fn(ir, ty, dst, lhs, rhs) -> dst`.
 pub(super) type BinOp =
@@ -97,7 +97,7 @@ impl RiscvDisasContext {
         ir.gen_brcond(Type::I64, fs, zero, Cond::Ne, ok);
         let pc = ir.new_const(Type::I64, self.base.pc_next);
         ir.gen_mov(Type::I64, self.pc, pc);
-        ir.gen_exit_tb(machina_core::tb::EXCP_UNDEF);
+        ir.gen_exit_tb(machina_accel::ir::tb::EXCP_UNDEF);
         ir.gen_set_label(ok);
     }
 

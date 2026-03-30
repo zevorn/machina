@@ -1,4 +1,4 @@
-use machina_core::types::*;
+use machina_accel::ir::types::*;
 
 #[test]
 fn type_sizes() {

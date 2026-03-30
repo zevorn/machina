@@ -2,12 +2,13 @@
 
 use std::thread;
 
-use machina_backend::X86_64CodeGen;
-use machina_core::context::Context;
-use machina_core::tb::EXCP_ECALL;
-use machina_core::TempIdx;
-use machina_exec::exec_loop::{cpu_exec_loop_mt, ExitReason};
-use machina_exec::{ExecEnv, GuestCpu, PerCpuState};
+use machina_accel::X86_64CodeGen;
+use machina_accel::ir::context::Context;
+use machina_accel::ir::tb::EXCP_ECALL;
+use machina_accel::ir::TempIdx;
+use machina_accel::exec::exec_loop::{cpu_exec_loop_mt, ExitReason};
+use machina_accel::exec::{ExecEnv, PerCpuState};
+use machina_accel::GuestCpu;
 use machina_frontend::riscv::cpu::RiscvCpu;
 use machina_frontend::riscv::ext::RiscvCfg;
 use machina_frontend::riscv::{RiscvDisasContext, RiscvTranslator};
@@ -109,8 +110,8 @@ fn ecall() -> u32 {
 
 fn new_per_cpu() -> PerCpuState {
     PerCpuState {
-        jump_cache: machina_core::tb::JumpCache::new(),
-        stats: machina_exec::ExecStats::default(),
+        jump_cache: machina_accel::ir::tb::JumpCache::new(),
+        stats: machina_accel::exec::ExecStats::default(),
     }
 }
 

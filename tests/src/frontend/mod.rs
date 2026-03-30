@@ -4,12 +4,12 @@
 
 mod difftest;
 
-use machina_backend::code_buffer::CodeBuffer;
-use machina_backend::translate::translate_and_execute;
-use machina_backend::HostCodeGen;
-use machina_backend::X86_64CodeGen;
-use machina_core::tb::{EXCP_EBREAK, EXCP_ECALL, EXCP_UNDEF};
-use machina_core::Context;
+use machina_accel::code_buffer::CodeBuffer;
+use machina_accel::translate::translate_and_execute;
+use machina_accel::HostCodeGen;
+use machina_accel::X86_64CodeGen;
+use machina_accel::ir::tb::{EXCP_EBREAK, EXCP_ECALL, EXCP_UNDEF};
+use machina_accel::ir::Context;
 use machina_frontend::riscv::cpu::RiscvCpu;
 use machina_frontend::riscv::ext::{MisaExt, RiscvCfg};
 use machina_frontend::riscv::{RiscvDisasContext, RiscvTranslator};

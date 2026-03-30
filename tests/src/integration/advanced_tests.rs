@@ -1,9 +1,9 @@
-use machina_backend::code_buffer::CodeBuffer;
-use machina_backend::translate::translate_and_execute;
-use machina_backend::HostCodeGen;
-use machina_backend::X86_64CodeGen;
-use machina_core::types::Type;
-use machina_core::{Context, Op, Opcode};
+use machina_accel::code_buffer::CodeBuffer;
+use machina_accel::translate::translate_and_execute;
+use machina_accel::HostCodeGen;
+use machina_accel::X86_64CodeGen;
+use machina_accel::ir::types::Type;
+use machina_accel::ir::{Context, Op, Opcode};
 
 use super::{
     run_riscv_tb, setup_riscv_globals, split_i128, split_u128, RiscvCpuState,
@@ -84,7 +84,7 @@ fn test_exec_alu_shift_cond_mov() {
             t_sc,
             regs[4],
             regs[5],
-            machina_core::Cond::Lt,
+            machina_accel::ir::Cond::Lt,
         );
         ctx.gen_mov(Type::I64, regs[22], t_sc);
 
@@ -238,7 +238,7 @@ fn test_exec_control_flow_ops() {
             Type::I64,
             regs[1],
             regs[2],
-            machina_core::Cond::Lt,
+            machina_accel::ir::Cond::Lt,
             label_taken,
         );
         ctx.gen_mov(Type::I64, regs[11], c2);
@@ -663,7 +663,7 @@ fn test_exec_negsetcond_movcond() {
             t_nsc_true,
             c5,
             c5,
-            machina_core::Cond::Eq,
+            machina_accel::ir::Cond::Eq,
         );
         ctx.gen_mov(Type::I64, regs[10], t_nsc_true);
         ctx.gen_negsetcond(
@@ -671,7 +671,7 @@ fn test_exec_negsetcond_movcond() {
             t_nsc_false,
             c5,
             c6,
-            machina_core::Cond::Eq,
+            machina_accel::ir::Cond::Eq,
         );
         ctx.gen_mov(Type::I64, regs[11], t_nsc_false);
 
@@ -682,7 +682,7 @@ fn test_exec_negsetcond_movcond() {
             c5,
             v1a,
             v2a,
-            machina_core::Cond::Eq,
+            machina_accel::ir::Cond::Eq,
         );
         ctx.gen_mov(Type::I64, regs[12], t_mov_true);
         ctx.gen_movcond(
@@ -692,7 +692,7 @@ fn test_exec_negsetcond_movcond() {
             c6,
             v1b,
             v2b,
-            machina_core::Cond::Eq,
+            machina_accel::ir::Cond::Eq,
         );
         ctx.gen_mov(Type::I64, regs[13], t_mov_false);
 
@@ -815,7 +815,7 @@ fn test_sum_loop() {
         Type::I64,
         regs[2],
         regs[3],
-        machina_core::Cond::Le,
+        machina_accel::ir::Cond::Le,
         label_loop,
     );
 

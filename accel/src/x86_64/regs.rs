@@ -1,4 +1,4 @@
-use machina_core::RegSet;
+use crate::ir::RegSet;
 
 /// x86-64 general-purpose register indices.
 ///

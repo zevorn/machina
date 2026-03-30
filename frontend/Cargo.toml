@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-machina-core = { path = "../core" }
+machina-accel = { path = "../accel" }
 libc = "0.2"
 
 [build-dependencies]

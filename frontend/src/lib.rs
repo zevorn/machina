@@ -5,7 +5,7 @@
 
 pub mod riscv;
 
-use machina_core::Context;
+use machina_accel::ir::Context;
 
 // ---------------------------------------------------------------
 // Generic translation framework

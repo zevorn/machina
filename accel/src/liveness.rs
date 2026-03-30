@@ -1,6 +1,6 @@
-use machina_core::op::LifeData;
-use machina_core::temp::TempKind;
-use machina_core::{Context, OpFlags, Opcode, OPCODE_DEFS};
+use crate::ir::op::LifeData;
+use crate::ir::temp::TempKind;
+use crate::ir::{Context, OpFlags, Opcode, OPCODE_DEFS};
 
 /// Perform backward liveness analysis over the IR ops in `ctx`.
 ///
@@ -65,7 +65,7 @@ pub fn liveness_analysis(ctx: &mut Context) {
                 // Last use — mark dead
                 life.set_dead(arg_pos as u32);
                 // If global, needs sync before death
-                let kind = ctx.temp(machina_core::TempIdx(tidx as u32)).kind;
+                let kind = ctx.temp(crate::ir::TempIdx(tidx as u32)).kind;
                 if kind == TempKind::Global {
                     life.set_sync(arg_pos as u32);
                 }
