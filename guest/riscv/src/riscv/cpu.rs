@@ -1,14 +1,19 @@
-//! RISC-V CPU state for user-mode emulation.
+//! RISC-V CPU state.
+
+use super::csr::{CsrFile, PrivLevel};
 
 /// Number of general-purpose registers (x0-x31).
 pub const NUM_GPRS: usize = 32;
 /// Number of floating-point registers (f0-f31).
 pub const NUM_FPRS: usize = 32;
 
-/// RISC-V CPU architectural state (RV64, user-mode).
+/// RISC-V CPU architectural state (RV64).
 ///
 /// Layout must be `#[repr(C)]` so that TCG global temps can
 /// reference fields at fixed offsets from the env pointer.
+/// The hot-path fields (gpr, fpr, pc, etc.) are kept at the
+/// top for stable offsets; the CSR file and privilege level
+/// live below and are accessed via helper methods.
 #[repr(C)]
 pub struct RiscvCpu {
     /// General-purpose registers x0-x31.
@@ -46,6 +51,11 @@ pub struct RiscvCpu {
     pub utval: u64,
     /// User interrupt pending (uip).
     pub uip: u64,
+
+    /// Current privilege level.
+    pub priv_level: PrivLevel,
+    /// Full CSR register file (M/S/U).
+    pub csr: CsrFile,
 }
 
 // Field offsets (bytes) from the start of RiscvCpu.
@@ -118,7 +128,40 @@ impl RiscvCpu {
             ucause: 0,
             utval: 0,
             uip: 0,
+            priv_level: PrivLevel::Machine,
+            csr: CsrFile::new(),
         }
+    }
+
+    /// Set the current privilege level.
+    pub fn set_priv(&mut self, p: PrivLevel) {
+        self.priv_level = p;
+    }
+
+    /// Read a CSR, using the current privilege level.
+    /// Panics on illegal access.
+    pub fn csr_read(&self, addr: u16) -> u64 {
+        self.csr
+            .read(addr, self.priv_level)
+            .expect("illegal CSR read")
+    }
+
+    /// Write a CSR, using the current privilege level.
+    /// Panics on illegal access.
+    pub fn csr_write(&mut self, addr: u16, val: u64) {
+        self.csr
+            .write(addr, val, self.priv_level)
+            .expect("illegal CSR write");
+    }
+
+    /// Try to read a CSR with privilege check.
+    pub fn try_csr_read(&self, addr: u16) -> Result<u64, u64> {
+        self.csr.read(addr, self.priv_level)
+    }
+
+    /// Try to write a CSR with privilege check.
+    pub fn try_csr_write(&mut self, addr: u16, val: u64) -> Result<(), u64> {
+        self.csr.write(addr, val, self.priv_level)
     }
 }
 
