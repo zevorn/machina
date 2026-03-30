@@ -5,7 +5,6 @@ use std::thread;
 use machina_accel::exec::exec_loop::{cpu_exec_loop_mt, ExitReason};
 use machina_accel::exec::{ExecEnv, PerCpuState};
 use machina_accel::ir::context::Context;
-use machina_accel::ir::tb::EXCP_ECALL;
 use machina_accel::ir::TempIdx;
 use machina_accel::GuestCpu;
 use machina_accel::X86_64CodeGen;
@@ -22,6 +21,8 @@ struct TestCpu {
 }
 
 impl GuestCpu for TestCpu {
+    type IrContext = Context;
+
     fn get_pc(&self) -> u64 {
         self.cpu.pc
     }
@@ -137,7 +138,7 @@ fn test_mt_sum_loop() {
         cpu.cpu.gpr[3] = 100; // sum 1..=100
         let mut pc = new_per_cpu();
         let r = unsafe { cpu_exec_loop_mt(&shared1, &mut pc, &mut cpu) };
-        assert_eq!(r, ExitReason::Exit(EXCP_ECALL as usize));
+        assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
         assert_eq!(cpu.cpu.gpr[2], 5050);
     });
 
@@ -151,7 +152,7 @@ fn test_mt_sum_loop() {
         cpu.cpu.gpr[3] = 200; // sum 1..=200
         let mut pc = new_per_cpu();
         let r = unsafe { cpu_exec_loop_mt(&shared2, &mut pc, &mut cpu) };
-        assert_eq!(r, ExitReason::Exit(EXCP_ECALL as usize));
+        assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
         assert_eq!(cpu.cpu.gpr[2], 20100);
     });
 
@@ -180,7 +181,7 @@ fn test_shared_tb_cache() {
             };
             let mut pc = new_per_cpu();
             let r = unsafe { cpu_exec_loop_mt(&s, &mut pc, &mut cpu) };
-            assert_eq!(r, ExitReason::Exit(EXCP_ECALL as usize));
+            assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
             assert_eq!(cpu.cpu.gpr[1], 42);
         }));
     }
@@ -227,7 +228,7 @@ fn test_concurrent_tb_lookup() {
             };
             let mut pc = new_per_cpu();
             let r = unsafe { cpu_exec_loop_mt(&s, &mut pc, &mut cpu) };
-            assert_eq!(r, ExitReason::Exit(EXCP_ECALL as usize));
+            assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
         }));
     }
     for h in handles {
@@ -259,7 +260,7 @@ fn test_concurrent_chaining() {
             cpu.cpu.gpr[3] = 50 + i as u64;
             let mut pc = new_per_cpu();
             let r = unsafe { cpu_exec_loop_mt(&s, &mut pc, &mut cpu) };
-            assert_eq!(r, ExitReason::Exit(EXCP_ECALL as usize));
+            assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
             assert_eq!(cpu.cpu.gpr[1], 50 + i as u64);
         }));
     }
@@ -291,7 +292,7 @@ fn test_concurrent_translation() {
             cpu.cpu.gpr[3] = 10 * (i + 1) as u64;
             let mut pc = new_per_cpu();
             let r = unsafe { cpu_exec_loop_mt(&s, &mut pc, &mut cpu) };
-            assert_eq!(r, ExitReason::Exit(EXCP_ECALL as usize));
+            assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
             let n = cpu.cpu.gpr[3];
             let expected = n * (n + 1) / 2;
             assert_eq!(cpu.cpu.gpr[2], expected);

@@ -1,5 +1,7 @@
 //! RISC-V CPU state.
 
+use std::sync::atomic::{AtomicBool, AtomicU32};
+
 use super::csr::{CsrFile, PrivLevel};
 
 /// Number of general-purpose registers (x0-x31).
@@ -51,6 +53,11 @@ pub struct RiscvCpu {
     pub utval: u64,
     /// User interrupt pending (uip).
     pub uip: u64,
+
+    /// Pending interrupt request bitmap (full-system).
+    pub interrupt_request: AtomicU32,
+    /// Whether the CPU is halted (WFI, full-system).
+    pub halted: AtomicBool,
 
     /// Current privilege level.
     pub priv_level: PrivLevel,
@@ -128,6 +135,8 @@ impl RiscvCpu {
             ucause: 0,
             utval: 0,
             uip: 0,
+            interrupt_request: AtomicU32::new(0),
+            halted: AtomicBool::new(false),
             priv_level: PrivLevel::Machine,
             csr: CsrFile::new(),
         }

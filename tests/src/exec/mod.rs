@@ -5,7 +5,7 @@ mod mttcg;
 use machina_accel::exec::exec_loop::{cpu_exec_loop, ExitReason};
 use machina_accel::exec::ExecEnv;
 use machina_accel::ir::context::Context;
-use machina_accel::ir::tb::{EXCP_EBREAK, EXCP_ECALL};
+use machina_accel::ir::tb::EXCP_EBREAK;
 use machina_accel::ir::TempIdx;
 use machina_accel::GuestCpu;
 use machina_accel::X86_64CodeGen;
@@ -34,6 +34,8 @@ impl TestCpu {
 const NUM_GPRS: usize = 32;
 
 impl GuestCpu for TestCpu {
+    type IrContext = Context;
+
     fn get_pc(&self) -> u64 {
         self.cpu.pc
     }
@@ -181,7 +183,7 @@ fn run(insns: &[u32], setup: impl FnOnce(&mut TestCpu)) -> TestCpu {
     let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
     assert_eq!(
         r,
-        ExitReason::Exit(EXCP_ECALL as usize),
+        ExitReason::Ecall { priv_level: 0 },
         "expected ecall exit"
     );
     t
@@ -195,7 +197,7 @@ fn run_env(
     setup(&mut t);
     let mut env = ExecEnv::new(X86_64CodeGen::new());
     let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
-    assert_eq!(r, ExitReason::Exit(EXCP_ECALL as usize));
+    assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
     (t, env)
 }
 
@@ -224,7 +226,7 @@ fn test_exec_loop_cache_hit() {
     let mut env = ExecEnv::new(X86_64CodeGen::new());
 
     let r1 = unsafe { cpu_exec_loop(&mut env, &mut t) };
-    assert_eq!(r1, ExitReason::Exit(EXCP_ECALL as usize));
+    assert_eq!(r1, ExitReason::Ecall { priv_level: 0 });
     assert_eq!(t.cpu.gpr[1], 5);
     assert_eq!(env.shared.tb_store.len(), 1);
 
@@ -232,7 +234,7 @@ fn test_exec_loop_cache_hit() {
     t.cpu.pc = 0;
     t.cpu.gpr[1] = 0;
     let r2 = unsafe { cpu_exec_loop(&mut env, &mut t) };
-    assert_eq!(r2, ExitReason::Exit(EXCP_ECALL as usize));
+    assert_eq!(r2, ExitReason::Ecall { priv_level: 0 });
     assert_eq!(t.cpu.gpr[1], 5);
     assert_eq!(env.shared.tb_store.len(), 1);
 }
@@ -715,4 +717,145 @@ fn test_multi_branch_targets() {
     assert_eq!(t.cpu.gpr[5], 5); // iterations 5..9
                                  // Multiple TBs from different branch targets
     assert!(env.shared.tb_store.len() >= 4);
+}
+
+// ── Privileged instruction encoding helpers ────────────────
+
+fn mret() -> u32 {
+    0x3020_0073
+}
+fn wfi() -> u32 {
+    0x1050_0073
+}
+fn sfence_vma(rs1: u32, rs2: u32) -> u32 {
+    rv_r(0b0001001, rs2, rs1, 0b000, 0, 0b1110011)
+}
+
+// ── Privileged exit tests ──────────────────────────────────
+
+/// MRET exits the TB, the exec loop calls
+/// execute_mret() and continues.  The instruction after
+/// MRET still executes (default no-op keeps PC at
+/// pc_next, so the next TB is the following insn).
+///
+///   PC=0:  addi x1, x0, 10
+///   PC=4:  mret                → EXCP_MRET, continue
+///   PC=8:  addi x2, x0, 20
+///   PC=12: ecall
+#[test]
+fn test_exec_loop_mret_continues() {
+    let insns = [addi(1, 0, 10), mret(), addi(2, 0, 20), ecall()];
+    let mut t = TestCpu::new(&insns);
+    let mut env = ExecEnv::new(X86_64CodeGen::new());
+    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    assert_eq!(
+        r,
+        ExitReason::Ecall { priv_level: 0 },
+        "mret should not halt; ecall follows"
+    );
+    assert_eq!(t.cpu.gpr[1], 10);
+    assert_eq!(t.cpu.gpr[2], 20);
+}
+
+/// WFI causes the loop to return ExitReason::Halted.
+///
+///   PC=0:  addi x1, x0, 42
+///   PC=4:  wfi                → EXCP_WFI, halt
+#[test]
+fn test_exec_loop_wfi_halts() {
+    let insns = [addi(1, 0, 42), wfi()];
+    let mut t = TestCpu::new(&insns);
+    let mut env = ExecEnv::new(X86_64CodeGen::new());
+    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    assert_eq!(r, ExitReason::Halted);
+    assert_eq!(t.cpu.gpr[1], 42);
+}
+
+/// SFENCE.VMA flushes the TLB and continues execution.
+///
+///   PC=0:  addi x1, x0, 5
+///   PC=4:  sfence.vma x0, x0  → EXCP_SFENCE_VMA, continue
+///   PC=8:  addi x2, x0, 99
+///   PC=12: ecall
+#[test]
+fn test_exec_loop_sfence_vma_continues() {
+    let insns = [addi(1, 0, 5), sfence_vma(0, 0), addi(2, 0, 99), ecall()];
+    let mut t = TestCpu::new(&insns);
+    let mut env = ExecEnv::new(X86_64CodeGen::new());
+    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    assert_eq!(
+        r,
+        ExitReason::Ecall { priv_level: 0 },
+        "sfence.vma should not halt"
+    );
+    assert_eq!(t.cpu.gpr[1], 5);
+    assert_eq!(t.cpu.gpr[2], 99);
+}
+
+/// ECALL returns Ecall with privilege_level().
+/// Default TestCpu returns priv_level=0 (U-mode).
+#[test]
+fn test_ecall_priv_level_u_mode() {
+    let insns = [addi(1, 0, 1), ecall()];
+    let mut t = TestCpu::new(&insns);
+    let mut env = ExecEnv::new(X86_64CodeGen::new());
+    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
+}
+
+/// Verify that different privilege levels produce the
+/// correct Ecall variant.  Uses a wrapper that overrides
+/// privilege_level().
+struct PrivTestCpu {
+    inner: TestCpu,
+    priv_level: u8,
+}
+
+impl GuestCpu for PrivTestCpu {
+    type IrContext = Context;
+
+    fn get_pc(&self) -> u64 {
+        self.inner.get_pc()
+    }
+    fn get_flags(&self) -> u32 {
+        self.inner.get_flags()
+    }
+    fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
+        self.inner.gen_code(ir, pc, max_insns)
+    }
+    fn env_ptr(&mut self) -> *mut u8 {
+        self.inner.env_ptr()
+    }
+    fn privilege_level(&self) -> u8 {
+        self.priv_level
+    }
+}
+
+#[test]
+fn test_ecall_from_different_privs() {
+    // U-mode (0)
+    let insns = [ecall()];
+    let mut cpu = PrivTestCpu {
+        inner: TestCpu::new(&insns),
+        priv_level: 0,
+    };
+    let mut env = ExecEnv::new(X86_64CodeGen::new());
+    let r = unsafe { cpu_exec_loop(&mut env, &mut cpu) };
+    assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
+
+    // S-mode (1)
+    cpu.inner = TestCpu::new(&insns);
+    cpu.priv_level = 1;
+    cpu.inner.cpu.pc = 0;
+    let mut env = ExecEnv::new(X86_64CodeGen::new());
+    let r = unsafe { cpu_exec_loop(&mut env, &mut cpu) };
+    assert_eq!(r, ExitReason::Ecall { priv_level: 1 });
+
+    // M-mode (3)
+    cpu.inner = TestCpu::new(&insns);
+    cpu.priv_level = 3;
+    cpu.inner.cpu.pc = 0;
+    let mut env = ExecEnv::new(X86_64CodeGen::new());
+    let r = unsafe { cpu_exec_loop(&mut env, &mut cpu) };
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
 }

@@ -7,6 +7,7 @@
 
 use super::csr::PrivLevel;
 use super::exception::Exception;
+use super::pmp::Pmp;
 
 // ── Sv39 constants ─────────────────────────────────────────────
 
@@ -135,14 +136,21 @@ impl Mmu {
     /// address using Sv39 page tables and TLB.
     ///
     /// `mem_read` reads an 8-byte value from guest physical
-    /// memory at the given address.
+    /// memory.  `mem_write` writes an 8-byte value (used for
+    /// hardware A/D bit updates in PTEs).
+    ///
+    /// If `pmp` is `Some`, a PMP access check is performed on
+    /// the resulting GPA before returning.
+    #[allow(clippy::too_many_arguments)]
     pub fn translate(
         &mut self,
         gva: u64,
         access: AccessType,
         priv_level: PrivLevel,
         mstatus: u64,
+        pmp: Option<&Pmp>,
         mem_read: impl Fn(u64) -> u64,
+        mut mem_write: impl FnMut(u64, u64),
     ) -> Result<u64, Exception> {
         let mode = (self.satp >> SATP_MODE_SHIFT) & 0xF;
         if mode == SATP_MODE_BARE {
@@ -162,11 +170,27 @@ impl Mmu {
             let pages = entry.page_size >> 12;
             let mask = !(pages - 1);
             if (entry.vpn & mask) == (vpn & mask) {
-                self.stats.tlb_hits += 1;
                 self.check_perm(entry.perm, access, priv_level, mstatus)?;
-                let offset = gva & (entry.page_size - 1);
-                let pa = (entry.ppn << 12) | offset;
-                return Ok(pa);
+                // Write to a page with D=0 requires a
+                // re-walk to set the dirty bit in the PTE.
+                let need_dirty =
+                    access == AccessType::Write && entry.perm & PTE_D == 0;
+                if !need_dirty {
+                    self.stats.tlb_hits += 1;
+                    let offset = gva & (entry.page_size - 1);
+                    let pa = (entry.ppn << 12) | offset;
+                    if let Some(p) = pmp {
+                        p.check_access(
+                            pa,
+                            entry.page_size,
+                            access,
+                            priv_level,
+                        )?;
+                    }
+                    return Ok(pa);
+                }
+                // Invalidate and fall through to walk.
+                self.tlb[idx].valid = false;
             }
         }
 
@@ -174,42 +198,53 @@ impl Mmu {
         self.stats.tlb_misses += 1;
         self.stats.page_walks += 1;
 
-        let (ppn, perm, pg_size) =
+        let (ppn, perm, pg_size, pte_addr, pte) =
             self.walk_page_table(gva, access, &mem_read)?;
 
         self.check_perm(perm, access, priv_level, mstatus)?;
 
-        // Check A/D bits
-        if perm & PTE_A == 0 {
-            return Err(page_fault(access));
+        // Hardware A/D bit management: set A (and D for
+        // writes) in the PTE rather than faulting.
+        let mut new_pte = pte | (PTE_A as u64);
+        if access == AccessType::Write {
+            new_pte |= PTE_D as u64;
         }
-        if access == AccessType::Write && perm & PTE_D == 0 {
-            return Err(page_fault(access));
+        if new_pte != pte {
+            mem_write(pte_addr, new_pte);
         }
+        let updated_perm = (new_pte & 0xFF) as u8;
 
-        // Refill TLB
+        // Refill TLB with updated permissions
         self.tlb[idx] = TlbEntry {
             valid: true,
             vpn,
             ppn,
-            perm,
+            perm: updated_perm,
             asid,
             page_size: pg_size,
         };
 
         let offset = gva & (pg_size - 1);
-        Ok((ppn << 12) | offset)
+        let pa = (ppn << 12) | offset;
+
+        if let Some(p) = pmp {
+            p.check_access(pa, pg_size, access, priv_level)?;
+        }
+
+        Ok(pa)
     }
 
     /// Three-level Sv39 page table walk.
     ///
-    /// Returns `(ppn, perm_bits, page_size)` on success.
+    /// Returns `(ppn, perm_bits, page_size, pte_addr, pte)`
+    /// on success.  The caller uses `pte_addr` and `pte` for
+    /// hardware A/D bit updates.
     fn walk_page_table(
         &self,
         gva: u64,
         access: AccessType,
         mem_read: &impl Fn(u64) -> u64,
-    ) -> Result<(u64, u8, u64), Exception> {
+    ) -> Result<(u64, u8, u64, u64, u64), Exception> {
         let root_ppn = self.satp & SATP_PPN_MASK;
         let mut a = root_ppn * PAGE_SIZE;
 
@@ -245,7 +280,7 @@ impl Mmu {
                 }
                 let ppn = pte >> 10;
                 let pg_size = level_page_size(level);
-                return Ok((ppn, flags, pg_size));
+                return Ok((ppn, flags, pg_size, pte_addr, pte));
             }
 
             // Non-leaf: descend to next level
@@ -281,7 +316,9 @@ impl Mmu {
             return Err(page_fault(access));
         }
 
-        // U-bit vs privilege check
+        // U-bit vs privilege check.
+        // SUM only affects S-mode data access (R/W), never
+        // instruction fetch — spec §4.3.1.
         match priv_level {
             PrivLevel::User => {
                 if !u {
@@ -289,8 +326,13 @@ impl Mmu {
                 }
             }
             PrivLevel::Supervisor => {
-                if u && !sum {
-                    return Err(page_fault(access));
+                if u {
+                    if access == AccessType::Execute {
+                        return Err(page_fault(access));
+                    }
+                    if !sum {
+                        return Err(page_fault(access));
+                    }
                 }
             }
             PrivLevel::Machine => {

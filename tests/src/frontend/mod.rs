@@ -6,8 +6,8 @@ mod difftest;
 
 use machina_accel::code_buffer::CodeBuffer;
 use machina_accel::ir::tb::{
-    EXCP_EBREAK, EXCP_ECALL, EXCP_MRET, EXCP_SFENCE_VMA,
-    EXCP_SRET, EXCP_UNDEF, EXCP_WFI,
+    EXCP_EBREAK, EXCP_ECALL, EXCP_MRET, EXCP_SFENCE_VMA, EXCP_SRET, EXCP_UNDEF,
+    EXCP_WFI,
 };
 use machina_accel::ir::Context;
 use machina_accel::translate::translate_and_execute;

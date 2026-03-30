@@ -186,16 +186,21 @@ impl RiscvDisasContext {
 
     // -- CSR helpers ----------------------------------------
     //
-    // TODO: add translate-time privilege check using CSR
-    // address bits [9:8].  This requires carrying the current
-    // privilege level in RiscvDisasContext (set from TB flags
-    // at translation time).  For now, unimplemented CSRs
-    // fall through to None/false which triggers EXCP_UNDEF,
-    // equivalent to an illegal-instruction exception.
+    // Runtime CSR privilege checking is performed by the
+    // CsrFile::read/write methods (which compare the CSR
+    // address bits [11:8] against the current privilege
+    // level and raise illegal-instruction on violation).
+    // Translate-time checks are therefore an optional fast
+    // path optimisation — they would let us reject
+    // accesses during TB generation and avoid emitting
+    // dead code.  This requires carrying the current
+    // privilege level in RiscvDisasContext (set from TB
+    // flags at translation time).
     //
     // TODO: mstatus.FS check for FP CSR access.  Currently
     // gen_fp_check() guards FP instruction translation; CSR
-    // accesses to fflags/frm/fcsr should also verify FS != Off.
+    // accesses to fflags/frm/fcsr should also verify
+    // FS != Off.
 
     pub(super) fn gen_csr_read(
         &self,

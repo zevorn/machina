@@ -2,8 +2,10 @@ use std::sync::atomic::Ordering;
 
 use super::{ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING};
 use crate::cpu::GuestCpu;
+use crate::ir::context::Context;
 use crate::ir::tb::{
-    decode_tb_exit, TranslationBlock, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
+    decode_tb_exit, TranslationBlock, EXCP_ECALL, EXCP_MRET, EXCP_SFENCE_VMA,
+    EXCP_SRET, EXCP_WFI, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
 };
 use crate::translate::translate;
 use crate::HostCodeGen;
@@ -11,8 +13,12 @@ use crate::HostCodeGen;
 /// Reason the execution loop exited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitReason {
-    /// TB returned a non-zero exit value.
+    /// TB returned a non-zero exit value (EBREAK, UNDEF, etc.).
     Exit(usize),
+    /// ECALL exit with the current privilege level.
+    Ecall { priv_level: u8 },
+    /// WFI: CPU entered halted state.
+    Halted,
     /// Code buffer is full; caller should flush and retry.
     BufferFull,
 }
@@ -28,7 +34,7 @@ pub unsafe fn cpu_exec_loop<B, C>(
 ) -> ExitReason
 where
     B: HostCodeGen,
-    C: GuestCpu,
+    C: GuestCpu<IrContext = Context>,
 {
     cpu_exec_loop_mt(&env.shared, &mut env.per_cpu, cpu)
 }
@@ -48,7 +54,7 @@ pub unsafe fn cpu_exec_loop_mt<B, C>(
 ) -> ExitReason
 where
     B: HostCodeGen,
-    C: GuestCpu,
+    C: GuestCpu<IrContext = Context>,
 {
     let mut next_tb_hint: Option<usize> = None;
 
@@ -116,6 +122,31 @@ where
                 stb.exit_target.store(dst, Ordering::Relaxed);
                 next_tb_hint = Some(dst);
             }
+            v if v == EXCP_MRET as usize => {
+                per_cpu.stats.real_exit += 1;
+                cpu.execute_mret();
+                // Continue at new PC (mepc).
+            }
+            v if v == EXCP_SRET as usize => {
+                per_cpu.stats.real_exit += 1;
+                cpu.execute_sret();
+                // Continue at new PC (sepc).
+            }
+            v if v == EXCP_SFENCE_VMA as usize => {
+                per_cpu.stats.real_exit += 1;
+                cpu.tlb_flush();
+                // Continue execution after TLB flush.
+            }
+            v if v == EXCP_WFI as usize => {
+                per_cpu.stats.real_exit += 1;
+                cpu.set_halted(true);
+                return ExitReason::Halted;
+            }
+            v if v == EXCP_ECALL as usize => {
+                per_cpu.stats.real_exit += 1;
+                let pl = cpu.privilege_level();
+                return ExitReason::Ecall { priv_level: pl };
+            }
             _ => {
                 per_cpu.stats.real_exit += 1;
                 return ExitReason::Exit(exit_code);
@@ -134,7 +165,7 @@ fn tb_find<B, C>(
 ) -> Option<usize>
 where
     B: HostCodeGen,
-    C: GuestCpu,
+    C: GuestCpu<IrContext = Context>,
 {
     // Fast path: jump cache (per-CPU, no lock needed)
     if let Some(idx) = per_cpu.jump_cache.lookup(pc) {
@@ -170,7 +201,7 @@ fn tb_gen_code<B, C>(
 ) -> Option<usize>
 where
     B: HostCodeGen,
-    C: GuestCpu,
+    C: GuestCpu<IrContext = Context>,
 {
     if shared.code_buf().remaining() < MIN_CODE_BUF_REMAINING {
         return None;
@@ -237,7 +268,7 @@ unsafe fn cpu_tb_exec<B, C>(
 ) -> usize
 where
     B: HostCodeGen,
-    C: GuestCpu,
+    C: GuestCpu<IrContext = Context>,
 {
     let tb = shared.tb_store.get(tb_idx);
     let tb_ptr = shared.code_buf().ptr_at(tb.host_offset);
