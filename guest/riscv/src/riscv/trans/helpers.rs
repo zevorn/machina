@@ -185,6 +185,17 @@ impl RiscvDisasContext {
     }
 
     // -- CSR helpers ----------------------------------------
+    //
+    // TODO: add translate-time privilege check using CSR
+    // address bits [9:8].  This requires carrying the current
+    // privilege level in RiscvDisasContext (set from TB flags
+    // at translation time).  For now, unimplemented CSRs
+    // fall through to None/false which triggers EXCP_UNDEF,
+    // equivalent to an illegal-instruction exception.
+    //
+    // TODO: mstatus.FS check for FP CSR access.  Currently
+    // gen_fp_check() guards FP instruction translation; CSR
+    // accesses to fflags/frm/fcsr should also verify FS != Off.
 
     pub(super) fn gen_csr_read(
         &self,

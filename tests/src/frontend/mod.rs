@@ -5,7 +5,10 @@
 mod difftest;
 
 use machina_accel::code_buffer::CodeBuffer;
-use machina_accel::ir::tb::{EXCP_EBREAK, EXCP_ECALL, EXCP_UNDEF};
+use machina_accel::ir::tb::{
+    EXCP_EBREAK, EXCP_ECALL, EXCP_MRET, EXCP_SFENCE_VMA,
+    EXCP_SRET, EXCP_UNDEF, EXCP_WFI,
+};
 use machina_accel::ir::Context;
 use machina_accel::translate::translate_and_execute;
 use machina_accel::HostCodeGen;
@@ -164,6 +167,18 @@ fn ecall() -> u32 {
 }
 fn ebreak() -> u32 {
     0x0010_0073
+}
+fn mret() -> u32 {
+    0x3020_0073
+}
+fn sret() -> u32 {
+    0x1020_0073
+}
+fn wfi() -> u32 {
+    0x1050_0073
+}
+fn sfence_vma(rs1: u32, rs2: u32) -> u32 {
+    rv_r(0b0001001, rs2, rs1, 0b000, 0, 0b1110011)
 }
 // RV64I W-suffix
 fn addiw(rd: u32, rs1: u32, imm: i32) -> u32 {

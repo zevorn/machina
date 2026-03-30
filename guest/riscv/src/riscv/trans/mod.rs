@@ -14,7 +14,8 @@ use super::RiscvDisasContext;
 use crate::DisasJumpType;
 use machina_accel::ir::context::Context;
 use machina_accel::ir::tb::{
-    EXCP_EBREAK, EXCP_ECALL, TB_EXIT_IDX0, TB_EXIT_NOCHAIN,
+    EXCP_EBREAK, EXCP_ECALL, EXCP_MRET, EXCP_SFENCE_VMA,
+    EXCP_SRET, EXCP_WFI, TB_EXIT_IDX0, TB_EXIT_NOCHAIN,
 };
 use machina_accel::ir::types::{Cond, MemOp, Type};
 
@@ -229,6 +230,68 @@ impl Decode<Context> for RiscvDisasContext {
         let pc = ir.new_const(Type::I64, self.base.pc_next);
         ir.gen_mov(Type::I64, self.pc, pc);
         ir.gen_exit_tb(EXCP_EBREAK);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    // ── Privileged: trap return / system ──────────────────
+
+    fn trans_mret(
+        &mut self,
+        ir: &mut Context,
+        _a: &ArgsEmpty,
+    ) -> bool {
+        // Sync PC, then exit TB with EXCP_MRET so the
+        // execution loop calls cpu.execute_mret().
+        // No chaining: privilege level changes invalidate
+        // the TB target assumptions.
+        let pc = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc);
+        ir.gen_exit_tb(EXCP_MRET);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_sret(
+        &mut self,
+        ir: &mut Context,
+        _a: &ArgsEmpty,
+    ) -> bool {
+        let pc = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc);
+        ir.gen_exit_tb(EXCP_SRET);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_wfi(
+        &mut self,
+        ir: &mut Context,
+        _a: &ArgsEmpty,
+    ) -> bool {
+        // Halt until interrupt. Sync PC and exit TB so the
+        // execution loop can enter a wait state.
+        let pc = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc);
+        ir.gen_exit_tb(EXCP_WFI);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_sfence_vma(
+        &mut self,
+        ir: &mut Context,
+        _a: &ArgsR,
+    ) -> bool {
+        // TLB flush. Exit TB with EXCP_SFENCE_VMA so the
+        // execution loop can call cpu.tlb_flush().
+        // No chaining: address translation may change.
+        //
+        // TODO: pass rs1/rs2 to enable page-specific flush
+        // instead of full TLB invalidation.
+        let pc = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc);
+        ir.gen_exit_tb(EXCP_SFENCE_VMA);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
