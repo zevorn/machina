@@ -8,7 +8,8 @@ use machina_accel::exec::ExecEnv;
 use machina_accel::X86_64CodeGen;
 use machina_core::machine::{Machine, MachineOpts};
 use machina_hw_riscv::ref_machine::RefMachine;
-use machina_system::{CpuManager, FullSystemCpu};
+use machina_system::cpus::{new_shared_mip, FullSystemCpu};
+use machina_system::CpuManager;
 
 fn usage() {
     eprintln!("Usage: machina [options]");
@@ -17,7 +18,9 @@ fn usage() {
         "  -M machine    Machine type \
          (default: riscv64-ref)"
     );
-    eprintln!("  -m size       RAM size in MiB (default: 128)");
+    eprintln!(
+        "  -m size       RAM size in MiB (default: 128)"
+    );
     eprintln!("  -bios path    BIOS/firmware binary");
     eprintln!("  -kernel path  Kernel binary");
     eprintln!("  -nographic    Disable graphical output");
@@ -53,12 +56,16 @@ fn parse_args() -> Result<CliArgs, String> {
         match args[i].as_str() {
             "-M" | "-machine" => {
                 i += 1;
-                cli.machine =
-                    args.get(i).ok_or("-M requires argument")?.clone();
+                cli.machine = args
+                    .get(i)
+                    .ok_or("-M requires argument")?
+                    .clone();
             }
             "-m" => {
                 i += 1;
-                let s = args.get(i).ok_or("-m requires argument")?;
+                let s = args
+                    .get(i)
+                    .ok_or("-m requires argument")?;
                 cli.ram_mib = s
                     .trim_end_matches('M')
                     .parse::<u64>()
@@ -77,7 +84,9 @@ fn parse_args() -> Result<CliArgs, String> {
                 i += 1;
                 cli.kernel = Some(
                     args.get(i)
-                        .ok_or("-kernel requires argument")?
+                        .ok_or(
+                            "-kernel requires argument",
+                        )?
                         .clone()
                         .into(),
                 );
@@ -90,7 +99,10 @@ fn parse_args() -> Result<CliArgs, String> {
                 process::exit(0);
             }
             other => {
-                return Err(format!("Unknown option: {}", other));
+                return Err(format!(
+                    "Unknown option: {}",
+                    other
+                ));
             }
         }
         i += 1;
@@ -108,17 +120,19 @@ fn main() {
         }
     };
 
-    // Validate machine type.
+    // Machine selection.
     if cli.machine == "?" {
         eprintln!("Available machines:");
         eprintln!(
-            "  riscv64-ref    \
-             RISC-V reference machine"
+            "  riscv64-ref    RISC-V reference machine"
         );
         process::exit(0);
     }
     if cli.machine != "riscv64-ref" {
-        eprintln!("machina: unknown machine: {}", cli.machine);
+        eprintln!(
+            "machina: unknown machine: {}",
+            cli.machine
+        );
         process::exit(1);
     }
 
@@ -137,51 +151,53 @@ fn main() {
         process::exit(1);
     }
 
-    eprintln!(
-        "machina: {} initialized, {} MiB RAM",
-        machine.name(),
-        cli.ram_mib
-    );
-
     if let Err(e) = machine.boot() {
         eprintln!("machina: boot failed: {}", e);
         process::exit(1);
     }
 
     eprintln!(
-        "machina: {} booted, {} vCPU(s)",
+        "machina: {} booted, {} MiB RAM",
         machine.name(),
-        opts.cpu_count
+        cli.ram_mib
     );
 
-    // Create JIT backend and execution environment.
+    // Create JIT backend.
     let backend = X86_64CodeGen::new();
     let env = ExecEnv::new(backend);
     let shared = env.shared.clone();
 
-    // Take ownership of cpu0 from the machine.
-    let cpus_arc = machine.cpus_shared();
-    let cpu = {
-        let mut lock = cpus_arc.lock().unwrap();
+    // Take CPU0 state from machine for execution.
+    // The shared_mip allows device IRQ sinks to
+    // atomically update mip visible to the exec loop.
+    let shared_mip = new_shared_mip();
+    let cpus = machine.cpus_shared();
+    let cpu0 = {
+        let mut lock = cpus.lock().unwrap();
         lock.remove(0)
     };
 
-    // Get RAM pointer from machine.
     let ram_ptr = machine.ram_ptr();
     let ram_size = machine.ram_size();
 
-    // Build full-system CPU bridge.
-    let mut fs_cpu = unsafe { FullSystemCpu::new(cpu, ram_ptr, ram_size) };
+    let mut fs_cpu = unsafe {
+        FullSystemCpu::new(
+            cpu0, ram_ptr, ram_size, shared_mip,
+        )
+    };
 
     let cpu_mgr = CpuManager::new();
 
     eprintln!(
-        "machina: cpu0 pc=0x{:x}, entering execution loop",
-        fs_cpu.cpu.pc
+        "machina: cpu0 pc=0x{:x} priv={}, \
+         entering execution loop",
+        fs_cpu.cpu.pc,
+        fs_cpu.cpu.priv_level as u8
     );
 
     // Block in the execution loop.
-    let exit = unsafe { cpu_mgr.run_cpu(&mut fs_cpu, &shared) };
+    let exit =
+        unsafe { cpu_mgr.run_cpu(&mut fs_cpu, &shared) };
 
     eprintln!("machina: execution exited: {:?}", exit);
 }
