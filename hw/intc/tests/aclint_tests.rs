@@ -103,35 +103,23 @@ fn test_aclint_tick_mti() {
     // Connect MTI output for hart 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let mti_irq = 7u32;
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        mti_irq,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti_irq);
     aclint.connect_mti(0, line);
 
     // Set mtimecmp[0] = 3.
     aclint.mtimer_write(0x0000, 8, 3);
 
     // MTI should be low.
-    assert!(
-        !sink.level(mti_irq),
-        "MTI should be low before threshold"
-    );
+    assert!(!sink.level(mti_irq), "MTI should be low before threshold");
 
     // Tick twice: mtime = 2, still < 3.
     aclint.tick();
     aclint.tick();
-    assert!(
-        !sink.level(mti_irq),
-        "MTI should be low at mtime=2"
-    );
+    assert!(!sink.level(mti_irq), "MTI should be low at mtime=2");
 
     // Tick once more: mtime = 3, now >= mtimecmp.
     aclint.tick();
-    assert!(
-        sink.level(mti_irq),
-        "MTI should be high at mtime=3"
-    );
+    assert!(sink.level(mti_irq), "MTI should be high at mtime=3");
 
     // Raise mtimecmp to clear: set mtimecmp[0] = 100.
     aclint.mtimer_write(0x0000, 8, 100);
@@ -148,10 +136,7 @@ fn test_aclint_msi_output() {
     // Connect MSI output for hart 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let msi_irq = 3u32;
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        msi_irq,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, msi_irq);
     aclint.connect_msi(0, line);
 
     // Initially low.
@@ -159,15 +144,9 @@ fn test_aclint_msi_output() {
 
     // Write msip[0] = 1.
     aclint.mswi_write(0x0000, 4, 1);
-    assert!(
-        sink.level(msi_irq),
-        "MSI should go high after msip=1"
-    );
+    assert!(sink.level(msi_irq), "MSI should go high after msip=1");
 
     // Clear msip[0].
     aclint.mswi_write(0x0000, 4, 0);
-    assert!(
-        !sink.level(msi_irq),
-        "MSI should go low after msip=0"
-    );
+    assert!(!sink.level(msi_irq), "MSI should go low after msip=0");
 }

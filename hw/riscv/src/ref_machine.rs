@@ -94,10 +94,7 @@ impl MmioOps for PlicMmio {
     }
 
     fn write(&self, offset: u64, size: u32, val: u64) {
-        self.0
-            .lock()
-            .unwrap()
-            .write(offset, size, val);
+        self.0.lock().unwrap().write(offset, size, val);
     }
 }
 
@@ -461,77 +458,56 @@ impl Machine for RefMachine {
         self.aclint_msi_irqs = aclint_msi;
 
         // UART IRQ source 10 → PLIC.
-        let plic_as_sink = Arc::new(PlicIrqSink(
-            Arc::clone(self.plic.as_ref().unwrap()),
-        ));
+        let plic_as_sink =
+            Arc::new(PlicIrqSink(Arc::clone(self.plic.as_ref().unwrap())));
         let uart_irq_line = IrqLine::new(
             Arc::clone(&plic_as_sink) as Arc<dyn IrqSink>,
             UART_IRQ,
         );
-        self.uart_irq = Some(IrqLine::new(
-            plic_as_sink as Arc<dyn IrqSink>,
-            UART_IRQ,
-        ));
+        self.uart_irq =
+            Some(IrqLine::new(plic_as_sink as Arc<dyn IrqSink>, UART_IRQ));
 
         // ---- Chardev ----
-        self.chardev = Some(Mutex::new(
-            CharFrontend::new(Box::new(NullChardev)),
-        ));
+        self.chardev =
+            Some(Mutex::new(CharFrontend::new(Box::new(NullChardev))));
 
         // ---- Attach IRQ + chardev to UART ----
         {
-            let mut u =
-                self.uart.as_ref().unwrap().lock().unwrap();
+            let mut u = self.uart.as_ref().unwrap().lock().unwrap();
             u.attach_irq(uart_irq_line);
             u.attach_chardev(Box::new(NullChardev));
         }
 
         // ---- Connect PLIC context outputs ----
         {
-            let mut p =
-                self.plic.as_ref().unwrap().lock().unwrap();
+            let mut p = self.plic.as_ref().unwrap().lock().unwrap();
             for hart in 0..opts.cpu_count as usize {
                 // M-mode context = 2*hart
                 let mei_line = IrqLine::new(
-                    Arc::clone(&self.cpu_irq_sinks[hart])
-                        as Arc<dyn IrqSink>,
+                    Arc::clone(&self.cpu_irq_sinks[hart]) as Arc<dyn IrqSink>,
                     IRQ_MEI,
                 );
-                p.connect_context_output(
-                    (2 * hart) as u32,
-                    mei_line,
-                );
+                p.connect_context_output((2 * hart) as u32, mei_line);
                 // S-mode context = 2*hart + 1
                 let sei_line = IrqLine::new(
-                    Arc::clone(&self.cpu_irq_sinks[hart])
-                        as Arc<dyn IrqSink>,
+                    Arc::clone(&self.cpu_irq_sinks[hart]) as Arc<dyn IrqSink>,
                     IRQ_SEI,
                 );
-                p.connect_context_output(
-                    (2 * hart + 1) as u32,
-                    sei_line,
-                );
+                p.connect_context_output((2 * hart + 1) as u32, sei_line);
             }
         }
 
         // ---- Connect ACLINT MTI/MSI outputs ----
         {
-            let mut a = self
-                .aclint
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap();
+            let mut a = self.aclint.as_ref().unwrap().lock().unwrap();
             for hart in 0..opts.cpu_count as usize {
                 let mti_line = IrqLine::new(
-                    Arc::clone(&self.cpu_irq_sinks[hart])
-                        as Arc<dyn IrqSink>,
+                    Arc::clone(&self.cpu_irq_sinks[hart]) as Arc<dyn IrqSink>,
                     IRQ_MTI,
                 );
                 a.connect_mti(hart as u32, mti_line);
                 let msi_line = IrqLine::new(
-                    Arc::clone(&self.cpu_irq_sinks[hart])
-                        as Arc<dyn IrqSink>,
+                    Arc::clone(&self.cpu_irq_sinks[hart]) as Arc<dyn IrqSink>,
                     IRQ_MSI,
                 );
                 a.connect_msi(hart as u32, msi_line);

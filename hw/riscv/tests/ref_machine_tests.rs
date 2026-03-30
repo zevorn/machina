@@ -277,11 +277,7 @@ fn test_uart_tx_through_machine() {
         let mut uart = m.uart().lock().unwrap();
         uart.write(0, 0x58); // 'X'
         let lsr = uart.read(5);
-        assert_ne!(
-            lsr & 0x20,
-            0,
-            "THRE should remain set after TX"
-        );
+        assert_ne!(lsr & 0x20, 0, "THRE should remain set after TX");
     }
 }
 
@@ -301,10 +297,7 @@ fn test_uart_rx_irq_to_plic() {
     {
         let mut uart = m.uart().lock().unwrap();
         uart.receive(0x42);
-        assert!(
-            uart.irq_pending(),
-            "UART IRQ should be pending"
-        );
+        assert!(uart.irq_pending(), "UART IRQ should be pending");
     }
 
     // Verify PLIC has pending bit 10 set.
@@ -322,10 +315,7 @@ fn test_uart_rx_irq_to_plic() {
     {
         let mut uart = m.uart().lock().unwrap();
         let _ = uart.read(0);
-        assert!(
-            !uart.irq_pending(),
-            "UART IRQ should be cleared after read"
-        );
+        assert!(!uart.irq_pending(), "UART IRQ should be cleared after read");
     }
 
     // PLIC pending bit should now be clear.

@@ -156,11 +156,7 @@ fn test_uart_tx_to_chardev() {
         fn can_read(&self) -> bool {
             false
         }
-        fn set_handler(
-            &mut self,
-            _h: Option<Box<dyn FnMut(u8) + Send>>,
-        ) {
-        }
+        fn set_handler(&mut self, _h: Option<Box<dyn FnMut(u8) + Send>>) {}
     }
     let shared_buf = Arc::clone(&buf_ref);
     let chardev = SharedChardev { buf: shared_buf };
@@ -169,20 +165,12 @@ fn test_uart_tx_to_chardev() {
     // Write 'A' to THR.
     uart.write(0, 0x41);
     let got = buf_ref.lock().unwrap().clone();
-    assert_eq!(
-        got,
-        vec![0x41],
-        "chardev should receive 'A'"
-    );
+    assert_eq!(got, vec![0x41], "chardev should receive 'A'");
 
     // Write another byte.
     uart.write(0, 0x42);
     let got = buf_ref.lock().unwrap().clone();
-    assert_eq!(
-        got,
-        vec![0x41, 0x42],
-        "chardev should receive both bytes"
-    );
+    assert_eq!(got, vec![0x41, 0x42], "chardev should receive both bytes");
 }
 
 #[test]
@@ -192,27 +180,18 @@ fn test_uart_rx_irq_line() {
     // Create test IRQ sink and attach line.
     let sink = Arc::new(TestIrqSink::new(16));
     let irq_num = 10u32;
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        irq_num,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, irq_num);
     uart.attach_irq(line);
 
     // Enable RX available interrupt.
     uart.write(1, 0x01);
 
     // IRQ line should be low before data arrives.
-    assert!(
-        !sink.level(irq_num),
-        "IRQ should be low before receive"
-    );
+    assert!(!sink.level(irq_num), "IRQ should be low before receive");
 
     // Receive a byte — IRQ should assert.
     uart.receive(0x55);
-    assert!(
-        sink.level(irq_num),
-        "IRQ should be raised after receive"
-    );
+    assert!(sink.level(irq_num), "IRQ should be raised after receive");
 
     // Read the byte — IRQ should deassert.
     let _ = uart.read(0);

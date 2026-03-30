@@ -44,22 +44,14 @@ impl Aclint {
     }
 
     /// Connect an MTI output line for `hart`.
-    pub fn connect_mti(
-        &mut self,
-        hart: u32,
-        irq: IrqLine,
-    ) {
+    pub fn connect_mti(&mut self, hart: u32, irq: IrqLine) {
         if (hart as usize) < self.mti_outputs.len() {
             self.mti_outputs[hart as usize] = Some(irq);
         }
     }
 
     /// Connect an MSI output line for `hart`.
-    pub fn connect_msi(
-        &mut self,
-        hart: u32,
-        irq: IrqLine,
-    ) {
+    pub fn connect_msi(&mut self, hart: u32, irq: IrqLine) {
         if (hart as usize) < self.msi_outputs.len() {
             self.msi_outputs[hart as usize] = Some(irq);
         }
@@ -70,12 +62,9 @@ impl Aclint {
     pub fn tick(&mut self) {
         self.mtime = self.mtime.wrapping_add(1);
         for hart in 0..self.num_harts as usize {
-            let pending =
-                self.mtime >= self.mtimecmp[hart];
+            let pending = self.mtime >= self.mtimecmp[hart];
             self.timer_pending[hart] = pending;
-            if let Some(ref line) =
-                self.mti_outputs[hart]
-            {
+            if let Some(ref line) = self.mti_outputs[hart] {
                 line.set(pending);
             }
         }
@@ -102,20 +91,13 @@ impl Aclint {
         }
     }
 
-    pub fn mswi_write(
-        &mut self,
-        offset: u64,
-        _size: u32,
-        val: u64,
-    ) {
+    pub fn mswi_write(&mut self, offset: u64, _size: u32, val: u64) {
         let hart = (offset / 4) as usize;
         if hart < self.num_harts as usize {
             // Only bit 0 is writable.
             let v = (val as u32) & 1;
             self.msip[hart] = v;
-            if let Some(ref line) =
-                self.msi_outputs[hart]
-            {
+            if let Some(ref line) = self.msi_outputs[hart] {
                 line.set(v != 0);
             }
         }
@@ -136,22 +118,14 @@ impl Aclint {
         }
     }
 
-    pub fn mtimer_write(
-        &mut self,
-        offset: u64,
-        _size: u32,
-        val: u64,
-    ) {
+    pub fn mtimer_write(&mut self, offset: u64, _size: u32, val: u64) {
         if offset == MTIMER_MTIME_OFFSET {
             self.mtime = val;
             // Re-evaluate all harts after mtime change.
             for hart in 0..self.num_harts as usize {
-                let pending =
-                    self.mtime >= self.mtimecmp[hart];
+                let pending = self.mtime >= self.mtimecmp[hart];
                 self.timer_pending[hart] = pending;
-                if let Some(ref line) =
-                    self.mti_outputs[hart]
-                {
+                if let Some(ref line) = self.mti_outputs[hart] {
                     line.set(pending);
                 }
             }
@@ -160,12 +134,9 @@ impl Aclint {
         let hart = (offset / 8) as usize;
         if hart < self.num_harts as usize {
             self.mtimecmp[hart] = val;
-            let pending =
-                self.mtime >= self.mtimecmp[hart];
+            let pending = self.mtime >= self.mtimecmp[hart];
             self.timer_pending[hart] = pending;
-            if let Some(ref line) =
-                self.mti_outputs[hart]
-            {
+            if let Some(ref line) = self.mti_outputs[hart] {
                 line.set(pending);
             }
         }

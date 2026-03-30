@@ -80,10 +80,7 @@ impl Uart16550 {
     }
 
     /// Attach a character device backend.
-    pub fn attach_chardev(
-        &mut self,
-        backend: Box<dyn Chardev + Send>,
-    ) {
+    pub fn attach_chardev(&mut self, backend: Box<dyn Chardev + Send>) {
         self.chardev = Some(backend);
     }
 
@@ -104,13 +101,9 @@ impl Uart16550 {
         let mut iir = IIR_NONE;
 
         // RX data available has higher priority.
-        if (self.ier & IER_RX_AVAIL) != 0
-            && (self.lsr & LSR_DR) != 0
-        {
+        if (self.ier & IER_RX_AVAIL) != 0 && (self.lsr & LSR_DR) != 0 {
             iir = IIR_RX_AVAIL;
-        } else if (self.ier & 0x02) != 0
-            && (self.lsr & LSR_THRE) != 0
-        {
+        } else if (self.ier & 0x02) != 0 && (self.lsr & LSR_THRE) != 0 {
             iir = IIR_THR_EMPTY;
         }
 

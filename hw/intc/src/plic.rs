@@ -46,11 +46,7 @@ impl Plic {
     }
 
     /// Connect an output IRQ line for `ctx`.
-    pub fn connect_context_output(
-        &mut self,
-        ctx: u32,
-        irq: IrqLine,
-    ) {
+    pub fn connect_context_output(&mut self, ctx: u32, irq: IrqLine) {
         if (ctx as usize) < self.context_outputs.len() {
             self.context_outputs[ctx as usize] = Some(irq);
         }
@@ -74,8 +70,7 @@ impl Plic {
                 let word = (irq / 32) as usize;
                 let bit = 1u32 << (irq % 32);
                 let pending = self.pending[word] & bit != 0;
-                let enabled =
-                    self.enable[ctx][word] & bit != 0;
+                let enabled = self.enable[ctx][word] & bit != 0;
                 let pri = self.priority[irq as usize];
                 if pending && enabled && pri > thresh {
                     active = true;
@@ -83,9 +78,7 @@ impl Plic {
                 }
             }
 
-            if let Some(ref line) =
-                self.context_outputs[ctx]
-            {
+            if let Some(ref line) = self.context_outputs[ctx] {
                 line.set(active);
             }
         }
@@ -160,8 +153,7 @@ impl Plic {
         let _ = size;
         // Priority registers.
         if offset < PENDING_BASE {
-            let idx =
-                (offset - PRIORITY_BASE) as usize / 4;
+            let idx = (offset - PRIORITY_BASE) as usize / 4;
             if idx < self.priority.len() {
                 return self.priority[idx] as u64;
             }
@@ -169,8 +161,7 @@ impl Plic {
         }
         // Pending bitmap.
         if offset < ENABLE_BASE {
-            let idx =
-                (offset - PENDING_BASE) as usize / 4;
+            let idx = (offset - PENDING_BASE) as usize / 4;
             if idx < self.pending.len() {
                 return self.pending[idx] as u64;
             }
@@ -180,10 +171,8 @@ impl Plic {
         if offset < CONTEXT_BASE {
             let rel = offset - ENABLE_BASE;
             let ctx = (rel / ENABLE_STRIDE) as usize;
-            let word =
-                ((rel % ENABLE_STRIDE) / 4) as usize;
-            if ctx < self.num_contexts as usize
-                && word < self.enable[ctx].len()
+            let word = ((rel % ENABLE_STRIDE) / 4) as usize;
+            if ctx < self.num_contexts as usize && word < self.enable[ctx].len()
             {
                 return self.enable[ctx][word] as u64;
             }
@@ -202,9 +191,7 @@ impl Plic {
                 // Perform claim: find highest-priority
                 // pending+enabled source, clear pending,
                 // update outputs.
-                let irq = self
-                    .claim_irq(ctx as u32)
-                    .unwrap_or(0);
+                let irq = self.claim_irq(ctx as u32).unwrap_or(0);
                 self.update_outputs();
                 irq as u64
             }
@@ -212,19 +199,13 @@ impl Plic {
         }
     }
 
-    pub fn write(
-        &mut self,
-        offset: u64,
-        size: u32,
-        val: u64,
-    ) {
+    pub fn write(&mut self, offset: u64, size: u32, val: u64) {
         let _ = size;
         let v = val as u32;
 
         // Priority registers.
         if offset < PENDING_BASE {
-            let idx =
-                (offset - PRIORITY_BASE) as usize / 4;
+            let idx = (offset - PRIORITY_BASE) as usize / 4;
             if idx < self.priority.len() {
                 self.priority[idx] = v;
             }
@@ -239,10 +220,8 @@ impl Plic {
         if offset < CONTEXT_BASE {
             let rel = offset - ENABLE_BASE;
             let ctx = (rel / ENABLE_STRIDE) as usize;
-            let word =
-                ((rel % ENABLE_STRIDE) / 4) as usize;
-            if ctx < self.num_contexts as usize
-                && word < self.enable[ctx].len()
+            let word = ((rel % ENABLE_STRIDE) / 4) as usize;
+            if ctx < self.num_contexts as usize && word < self.enable[ctx].len()
             {
                 self.enable[ctx][word] = v;
             }
