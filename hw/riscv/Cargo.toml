@@ -6,4 +6,6 @@ edition = "2021"
 [dependencies]
 machina-core = { path = "../../core" }
 machina-hw-core = { path = "../core" }
+machina-hw-intc = { path = "../intc" }
+machina-hw-char = { path = "../char" }
 machina-memory = { path = "../../memory" }
