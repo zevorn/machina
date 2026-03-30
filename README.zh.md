@@ -1,4 +1,4 @@
-<h1 align="center">Machina</h1>
+<h1 align="center">Machina (/ˈmɑːkɪnə/)</h1>
 <p align="center">
   <a href="README.md">English</a> | 中文
 </p>
@@ -13,20 +13,20 @@
 +-----------+   +----------+   +----------+   +-----------+   +----------+
 |   Guest   |-->| Frontend |-->| IR Build |-->| Optimizer |-->| Backend  |
 |   Binary  |   | (decode, |   | (gen_*)  |   |           |   | (x86-64) |
-|   (RV64)  |   |  trans_*)|   +----------+   +-----------+   +----------+
-+-----------+   +----------+                                       |
-                                                                   v
-                            +------------------------------------------+
-                            |            Execution Engine               |
-                            | TB Cache + MTTCG + Chaining + MMIO       |
-                            +--------------------+---------------------+
-                                                 |
-                                                 v
-                            +------------------------------------------+
-                            |          Full-System Emulation            |
-                            | riscv64-ref: PLIC + ACLINT + UART + FDT |
-                            | Sv39 MMU + SBI Firmware Interface        |
-                            +------------------------------------------+
+|   (RV64)  |   |  trans_*)|   +----------+   +-----------+   +-----+----+
++-----------+   +----------+                                        |
+                                                                    v
+                        +----------------------------------------------+
+                        |               Execution Engine               |
+                        |  TB Cache + MTTCG + Chaining + MMIO          |
+                        +----------------------+-----------------------+
+                                               |
+                                               v
+                        +----------------------------------------------+
+                        |            Full-System Emulation             |
+                        |  riscv64-ref: PLIC + ACLINT + UART + FDT     |
+                        |  Sv39 MMU + SBI Firmware Interface           |
+                        +----------------------------------------------+
 ```
 
 ## Workspace 结构

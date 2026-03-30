@@ -3,13 +3,16 @@
 ## 1. 概述
 
 ```
-Guest Binary → Frontend (decode) → TCG IR → Optimizer → Backend (codegen) → Host Binary
-                                      ↓
-                              TranslationBlock Cache
-                                      ↓
-                              Execution Loop (MTTCG)
-                                      ↓
-                              linux-user (ELF + syscall)
+Guest Binary --> Frontend (decode) --> TCG IR --> Optimizer --> Backend (codegen) --> Host Binary
+                                         |
+                                         v
+                                TranslationBlock Cache
+                                         |
+                                         v
+                                Execution Loop (MTTCG)
+                                         |
+                                         v
+                                Full-System Emulation
 ```
 
 ## 2. Workspace 分层
@@ -286,24 +289,25 @@ struct OpConstraint {
 ### 4.4 x86-64 栈帧布局 (`regs.rs`)
 
 ```
-高地址
-┌─────────────────────┐
-│ return address (8B) │  ← call 指令压入
-├─────────────────────┤
-│ push rbp    (8B)    │  ← CALLEE_SAVED[0]
-│ push rbx    (8B)    │
-│ push r12    (8B)    │
-│ push r13    (8B)    │
-│ push r14    (8B)    │
-│ push r15    (8B)    │  PUSH_SIZE = 56B
-├─────────────────────┤
-│ STATIC_CALL_ARGS    │  128B (outgoing call args)
-│ CPU_TEMP_BUF        │  1024B (spill slots)
-│                     │  STACK_ADDEND = FRAME_SIZE - PUSH_SIZE
-├─────────────────────┤
-│                     │  ← RSP (16-byte aligned)
-└─────────────────────┘
-低地址
+High address
++---------------------+
+| return address (8B) |  <-- call pushes this
++---------------------+
+| push rbp    (8B)    |  <-- CALLEE_SAVED[0]
+| push rbx    (8B)    |
+| push r12    (8B)    |
+| push r13    (8B)    |
+| push r14    (8B)    |
+| push r15    (8B)    |  PUSH_SIZE = 56B
++---------------------+
+| STATIC_CALL_ARGS    |  128B (outgoing call args)
+| CPU_TEMP_BUF        |  1024B (spill slots)
+|                     |  STACK_ADDEND = FRAME_SIZE - PUSH_SIZE
++---------------------+
+|                     |  <-- RSP (16-byte aligned)
++---------------------+
+Low address
+```
 ```
 
 - `FRAME_SIZE` 编译期计算并 16 字节对齐，满足 System V ABI 要求
@@ -434,17 +438,18 @@ SUB 的破坏性语义、SHL 的 RCX 要求）全部通过 `TCGArgConstraint`
 machina 的 `regalloc_op()` 对齐这一架构：
 
 ```
-                    ┌──────────────┐
-                    │ OpConstraint │  ← backend.op_constraint(opc)
-                    └──────┬───────┘
-                           │
-  ┌────────────────────────▼────────────────────────┐
-  │              regalloc_op() — 通用路径             │
-  │                                                  │
-  │  1. 按约束加载输入  →  2. fixup  →  3. 释放死输入 │
-  │  4. 按约束分配输出  →  5. emit   →  6. 释放死输出 │
-  │                        7. sync globals           │
-  └──────────────────────────────────────────────────┘
+                    +--------------+
+                    | OpConstraint |  <-- backend.op_constraint(opc)
+                    +------+-------+
+                           |
+                           v
+  +--------------------------------------------------+
+  |           regalloc_op() -- generic path           |
+  |                                                   |
+  |  1. load inputs   -> 2. fixup -> 3. free dead in  |
+  |  4. alloc outputs -> 5. emit  -> 6. free dead out |
+  |                       7. sync globals             |
+  +---------------------------------------------------+
 ```
 
 这意味着新增 opcode 时只需在约束表中添加一行，分配器和 codegen
@@ -472,13 +477,13 @@ struct RegAllocState {
 **Temp 状态机**：每个 `Temp` 有 `val_type` 字段追踪其当前位置：
 
 ```
-                  temp_load_to()
-    ┌──────┐    ┌──────────────┐    ┌─────┐
-    │ Dead │───→│ Const / Mem  │───→│ Reg │
-    └──────┘    └──────────────┘    └──┬──┘
-       ↑                               │
-       └───────── temp_dead() ─────────┘
-                                  (局部 temp)
+                 temp_load_to()
+    +------+    +--------------+    +-----+
+    | Dead |--->| Const / Mem  |--->| Reg |
+    +------+    +--------------+    +--+--+
+       ^                               |
+       +--------- temp_dead() ---------+
+                                 (local temp)
 ```
 
 - **Dead**：未分配，不占用任何资源

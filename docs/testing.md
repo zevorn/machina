@@ -9,22 +9,19 @@ machina 采用分层测试策略，从底层数据结构到完整的用户态模
 **测试金字塔**：
 
 ```
-            ┌──────────────┐
-            │  Guest 程序   │  linux-user 端到端
-            │  (18 tests)  │  ELF 加载 → 执行 → 输出
-            ├──────────────┤
-            │   Difftest   │  machina vs QEMU
-            │  (35 tests)  │  指令级差分对比
-            ├──────────────┤
-            │  前端指令测试  │  decode → IR → codegen → 执行
-            │  (91 tests)  │  RV32I/RV64I/RVC/RV32F
-            ├──────────────┤
-            │   集成测试    │  IR → liveness → regalloc
-            │ (105 tests)  │  → codegen → 执行
-       ┌────┴──────────────┴────┐
-       │       单元测试          │  core(192) + backend(256)
-       │      (567 tests)       │  + decode(93) + exec(26)
-       └────────────────────────┘
+            +--------------+
+            |   Difftest   |  machina vs QEMU
+            |  (35 tests)  |
+            +--------------+
+            |  Frontend    |  decode -> IR -> codegen -> execute
+            |  (91 tests)  |  RV32I/RV64I/RVC/RV32F
+            +--------------+
+            | Integration  |  IR -> liveness -> regalloc
+            | (105 tests)  |  -> codegen -> execute
+       +----+--------------+----+
+       |      Unit Tests        |  core(192) + backend(256)
+       |     (567 tests)        |  + decode(93) + exec(26)
+       +------------------------+
 ```
 
 **总计：816 个测试**。
@@ -356,39 +353,38 @@ machina 的翻译是正确的。
 ### 7.1 整体架构
 
 ```
-                    ┌─────────────────────┐
-                    │   Test Case 定义     │
-                    │  (insn + init regs)  │
-                    └────────┬────────────┘
-                             │
-              ┌──────────────┴──────────────┐
-              ▼                             ▼
-     ┌────────────────┐           ┌─────────────────┐
-     │   machina 侧    │           │    QEMU 侧      │
-     │                │           │                 │
-     │ 1. 编码指令     │           │ 1. 生成 .S 汇编  │
-     │ 2. translator   │           │ 2. gcc 交叉编译  │
-     │    _loop 解码   │           │ 3. qemu-riscv64  │
-     │ 3. IR 生成      │           │    执行          │
-     │ 4. liveness     │           │ 4. 解析 stdout   │
-     │ 5. regalloc     │           │    (256 字节     │
-     │ 6. x86-64       │           │     寄存器转储)  │
-     │    codegen      │           │                 │
-     │ 7. 执行         │           │                 │
-     └───────┬────────┘           └────────┬────────┘
-             │                             │
-             ▼                             ▼
-     ┌────────────────┐           ┌─────────────────┐
-     │  RiscvCpu 状态  │           │  [u64; 32] 数组  │
-     │  .gpr[0..32]   │           │  x0..x31 值      │
-     └───────┬────────┘           └────────┬────────┘
-             │                             │
-             └──────────────┬──────────────┘
-                            ▼
-                   ┌─────────────────┐
-                   │  assert_eq!()   │
-                   │  比较指定寄存器  │
-                   └─────────────────┘
+                    +---------------------+
+                    |   Test Case         |
+                    |  (insn + init regs) |
+                    +---------+-----------+
+                              |
+              +---------------+---------------+
+              v                               v
+     +----------------+             +-----------------+
+     |  machina side  |             |   QEMU side     |
+     |                |             |                 |
+     | 1. encode insn |             | 1. gen .S asm   |
+     | 2. translator  |             | 2. gcc cross    |
+     |    _loop       |             | 3. qemu-riscv64 |
+     | 3. IR gen      |             |    execute      |
+     | 4. liveness    |             | 4. parse stdout |
+     | 5. regalloc    |             |    (256 bytes   |
+     | 6. x86-64      |             |     reg dump)   |
+     |    codegen     |             |                 |
+     | 7. execute     |             |                 |
+     +-------+--------+             +--------+--------+
+              |                               |
+              v                               v
+     +----------------+             +-----------------+
+     | RiscvCpu state |             | [u64; 32] array |
+     | .gpr[0..32]    |             | x0..x31 values  |
+     +-------+--------+             +--------+--------+
+              |                               |
+              +--------------+----------------+
+                             v
+                    +-----------------+
+                    |  assert_eq!()   |
+                    +-----------------+
 ```
 
 ### 7.2 QEMU 侧原理
@@ -433,21 +429,21 @@ save_area: .space 256       # 32 × 8 字节
 编译与执行流程：
 
 ```
-gen_alu_asm()          生成 .S 源码
-    │
-    ▼
-riscv64-linux-gnu-gcc  交叉编译
-  -nostdlib -static      无 libc，纯系统调用
-  -o /tmp/xxx.elf        输出静态 ELF
-    │
-    ▼
-qemu-riscv64 xxx.elf   用户态模拟执行
-    │
-    ▼
-stdout (256 bytes)     32 个 little-endian u64
-    │
-    ▼
-parse → [u64; 32]     解析为寄存器数组
+gen_alu_asm()          gen .S source
+    |
+    v
+riscv64-linux-gnu-gcc  cross compile
+  -nostdlib -static      no libc, raw syscall
+  -o /tmp/xxx.elf        static ELF output
+    |
+    v
+qemu-riscv64 xxx.elf   user-mode execute
+    |
+    v
+stdout (256 bytes)     32 little-endian u64
+    |
+    v
+parse -> [u64; 32]    register array
 ```
 
 临时文件使用 `pid_tid` 命名避免并行测试冲突，执行完毕后
