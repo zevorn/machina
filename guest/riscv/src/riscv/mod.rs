@@ -7,6 +7,8 @@ pub mod ext;
 mod fpu;
 #[allow(dead_code)]
 mod insn_decode;
+pub mod mmu;
+pub mod pmp;
 mod trans;
 
 use crate::{DisasContextBase, DisasJumpType, TranslatorOps};
