@@ -158,6 +158,7 @@ fn run_machine_cycle(
         store_helper: machina_mem_write as *const () as u64,
         fault_cause_offset: fault_cause_offset(),
         fault_pc_offset: fault_pc_offset(),
+        dirty_offset: tlb_offsets::DIRTY,
         tb_ret_addr: 0,
     });
     let env = ExecEnv::new(backend);

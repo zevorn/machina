@@ -1202,6 +1202,8 @@ pub struct SoftMmuConfig {
     /// Offset of `fault_pc` within env (for precise
     /// fault mepc).
     pub fault_pc_offset: usize,
+    /// Offset of `dirty` flag within TlbEntry.
+    pub dirty_offset: usize,
     /// Epilogue offset for exiting TB on helper fault.
     pub tb_ret_addr: u64,
 }
@@ -1556,6 +1558,10 @@ impl X86_64CodeGen {
             3 => emit_store(buf, true, Reg::R11, Reg::Rax, 0),
             _ => unreachable!(),
         }
+        // Mark TLB entry dirty for fence.i tracking.
+        // R10 still holds the entry pointer.
+        emit_mov_ri(buf, false, Reg::R11, 1);
+        emit_store_byte(buf, Reg::R11, Reg::R10, cfg.dirty_offset as i32);
         // Restore scratch regs after fast-path store.
         emit_load(buf, true, Reg::R10, Reg::Rsp, Self::TLB_SAVE_R10);
         emit_load(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);

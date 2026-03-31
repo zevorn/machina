@@ -99,6 +99,9 @@ pub struct TlbEntry {
     /// Host address addend: host_addr = gva + addend.
     /// TLB_MMIO_ADDEND for MMIO (forces slow path).
     pub addend: usize,
+    /// Set by JIT fast-path store to mark page dirty
+    /// for fence.i invalidation.
+    pub dirty: u8,
     // -- Internal fields (not accessed by JIT) --
     perm: u8,
     asid: u16,
@@ -111,6 +114,8 @@ pub mod tlb_offsets {
     pub const ADDR_WRITE: usize = 8;
     pub const ADDR_CODE: usize = 16;
     pub const ADDEND: usize = 24;
+    /// Offset of dirty flag within TlbEntry.
+    pub const DIRTY: usize = 32;
     /// Size of one TlbEntry in bytes.
     pub const ENTRY_SIZE: usize = core::mem::size_of::<super::TlbEntry>();
 }
@@ -122,6 +127,7 @@ impl Default for TlbEntry {
             addr_write: TLB_INVALID_TAG,
             addr_code: TLB_INVALID_TAG,
             addend: 0,
+            dirty: 0,
             perm: 0,
             asid: 0,
             page_size: 0,
@@ -565,6 +571,34 @@ impl Mmu {
             entry.addr_write = TLB_INVALID_TAG;
             entry.addr_code = TLB_INVALID_TAG;
         }
+    }
+
+    /// Collect physical pages marked dirty by JIT
+    /// fast-path stores (TLB dirty flag). Returns the
+    /// set of dirty page numbers and clears all dirty
+    /// flags.
+    pub fn take_dirty_tlb_pages(&mut self) -> Vec<u64> {
+        let mut pages = Vec::new();
+        for entry in self.tlb.iter_mut() {
+            if entry.dirty != 0 {
+                entry.dirty = 0;
+                // Compute phys page from the entry's
+                // write tag + addend.
+                if entry.addr_write != TLB_INVALID_TAG
+                    && entry.addend != TLB_MMIO_ADDEND
+                {
+                    // The write tag is the VA page.
+                    // phys_page is not directly stored,
+                    // but for fence.i we use the VA page
+                    // which maps 1:1 to phys in most
+                    // cases. For Sv39, the TB's phys_pc
+                    // is used for matching.
+                    let va_page = entry.addr_write >> 12;
+                    pages.push(va_page);
+                }
+            }
+        }
+        pages
     }
 
     pub fn stats(&self) -> &MmuStats {

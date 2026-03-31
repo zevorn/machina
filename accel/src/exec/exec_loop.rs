@@ -241,10 +241,9 @@ where
         // Deliver latched memory faults from JIT helpers.
         // Must precede interrupt check: faults have higher
         // priority and must be delivered precisely.
-        cpu.check_mem_fault();
-
-        // Check for pending interrupts after each TB exit.
-        if cpu.pending_interrupt() {
+        // If a fault was delivered, skip interrupt check
+        // this iteration to preserve priority.
+        if !cpu.check_mem_fault() && cpu.pending_interrupt() {
             cpu.handle_interrupt();
         }
 

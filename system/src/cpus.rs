@@ -201,6 +201,10 @@ impl GuestCpu for FullSystemCpu {
     fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
         LAST_TB_PC.store(pc, Ordering::Relaxed);
 
+        // Clear fault_pc so fetch faults don't inherit
+        // a stale value from a prior data instruction.
+        self.cpu.fault_pc = 0;
+
         // Translate virtual PC to physical PC via MMU.
         let phys_pc = self.translate_pc(pc);
         if phys_pc == u64::MAX {
@@ -219,7 +223,13 @@ impl GuestCpu for FullSystemCpu {
             return 0;
         }
 
-        let avail = (self.ram_size - phys_offset) / 4;
+        // TB must not cross physical page boundary
+        // (AC-10). Limit avail to remaining bytes in
+        // the current 4K page.
+        let page_remain = 4096 - (phys_pc & 0xFFF);
+        let avail_bytes = page_remain.min(self.ram_size - phys_offset);
+        // Allow 2-byte (compressed) instructions.
+        let avail = avail_bytes / 2;
         let limit = max_insns.min(avail as u32);
         if limit == 0 {
             return 0;
@@ -389,7 +399,16 @@ impl GuestCpu for FullSystemCpu {
     }
 
     fn take_dirty_pages(&mut self) -> Vec<u64> {
-        std::mem::take(&mut self.cpu.dirty_pages)
+        // Combine helper-tracked dirty pages with
+        // TLB-tracked dirty pages (JIT fast-path).
+        let mut pages = std::mem::take(&mut self.cpu.dirty_pages);
+        let tlb_pages = self.cpu.mmu.take_dirty_tlb_pages();
+        for p in tlb_pages {
+            if !pages.contains(&p) {
+                pages.push(p);
+            }
+        }
+        pages
     }
 
     fn wait_for_interrupt(&self) -> bool {
