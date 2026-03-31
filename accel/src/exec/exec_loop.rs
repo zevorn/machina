@@ -94,6 +94,10 @@ where
                 let slot = v;
                 per_cpu.stats.chain_exit[slot] += 1;
 
+                if cpu.check_mem_fault() {
+                    continue;
+                }
+
                 let pc = cpu.get_pc();
                 let flags = cpu.get_flags();
                 let dst = match tb_find(shared, per_cpu, cpu, pc, flags) {
@@ -111,6 +115,15 @@ where
             }
             v if v == TB_EXIT_NOCHAIN as usize => {
                 per_cpu.stats.nochain_exit += 1;
+
+                // Check for latched memory fault BEFORE
+                // looking up the next TB. This ensures
+                // fault_pc is used for mepc before any
+                // tb_find advances the PC (AC-4).
+                if cpu.check_mem_fault() {
+                    continue;
+                }
+
                 let pc = cpu.get_pc();
                 let flags = cpu.get_flags();
 

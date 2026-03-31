@@ -428,11 +428,12 @@ fn test_fullsys_precise_fault_mepc() {
     // load fault was delivered.
     let mepc = cpu.cpu.gpr[5];
     // mepc should be within the first TB's code range.
-    // Verify mepc is within the test code area.
-    // Precise value depends on exec loop fault timing.
-    assert!(
-        mepc >= RAM_BASE && mepc <= RAM_BASE + 0x200,
-        "mepc should be in code range, got {:#x}",
+    // mepc should point to the faulting LD instruction
+    // (RAM_BASE + 4, after the auipc).
+    assert_eq!(
+        mepc,
+        RAM_BASE + 4,
+        "mepc should point to faulting LD, got {:#x}",
         mepc,
     );
 
