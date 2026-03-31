@@ -20,13 +20,17 @@ use machina_memory::address_space::AddressSpace;
 use machina_memory::ram::RamBlock;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
+use crate::sifive_test::SifiveTest;
+
 // QEMU virt memory map base addresses.
+const SIFIVE_TEST_BASE: u64 = 0x0010_0000;
 const PLIC_BASE: u64 = 0x0C00_0000;
 const ACLINT_BASE: u64 = 0x0200_0000;
 const UART0_BASE: u64 = 0x1000_0000;
 pub const RAM_BASE: u64 = 0x8000_0000;
 
 // Region sizes.
+const SIFIVE_TEST_SIZE: u64 = 0x1000;
 const PLIC_SIZE: u64 = 0x0400_0000;
 const ACLINT_SIZE: u64 = 0x0001_0000;
 const UART0_SIZE: u64 = 0x100;
@@ -83,6 +87,20 @@ const IRQ_MSI: u32 = 3;
 const IRQ_MTI: u32 = 7;
 const IRQ_MEI: u32 = 11;
 const IRQ_SEI: u32 = 9;
+
+// ---- MMIO adapter: SiFive Test ----
+
+struct SifiveTestMmio(Arc<SifiveTest>);
+
+impl MmioOps for SifiveTestMmio {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        self.0.read(offset, size)
+    }
+
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        self.0.write(offset, size, val);
+    }
+}
 
 // ---- MMIO adapter: PLIC ----
 
@@ -148,6 +166,7 @@ pub struct RefMachine {
     plic: Option<Arc<Mutex<Plic>>>,
     aclint: Option<Arc<Mutex<Aclint>>>,
     uart: Option<Arc<Mutex<Uart16550>>>,
+    sifive_test: Option<Arc<SifiveTest>>,
     fdt_blob: Option<Vec<u8>>,
     // Per-hart RiscvCpu instances. None after take_cpu().
     pub(crate) cpus: Arc<Mutex<Vec<Option<RiscvCpu>>>>,
@@ -173,6 +192,7 @@ impl RefMachine {
             plic: None,
             aclint: None,
             uart: None,
+            sifive_test: None,
             fdt_blob: None,
             cpus: Arc::new(Mutex::new(Vec::new())),
             shared_mip: Arc::new(AtomicU64::new(0)),
@@ -199,6 +219,10 @@ impl RefMachine {
 
     pub fn uart(&self) -> &Arc<Mutex<Uart16550>> {
         self.uart.as_ref().expect("machine not initialized")
+    }
+
+    pub fn sifive_test(&self) -> &Arc<SifiveTest> {
+        self.sifive_test.as_ref().expect("machine not initialized")
     }
 
     pub fn ram_block(&self) -> &Arc<RamBlock> {
@@ -385,6 +409,15 @@ impl RefMachine {
         fdt.property_u32_list("interrupts-extended", &clint_ext);
         fdt.end_node();
 
+        // /soc/test@100000
+        fdt.begin_node("test@100000");
+        fdt.property_string("compatible", "sifive,test0");
+        fdt.property_u32_list(
+            "reg",
+            &[0, SIFIVE_TEST_BASE as u32, 0, SIFIVE_TEST_SIZE as u32],
+        );
+        fdt.end_node();
+
         // /soc/serial@10000000
         fdt.begin_node("serial@10000000");
         fdt.property_string("compatible", "ns16550a");
@@ -476,6 +509,16 @@ impl Machine for RefMachine {
         root.add_subregion(uart_region, GPA::new(UART0_BASE));
         self.uart = Some(uart);
 
+        // SiFive Test (system reset/shutdown).
+        let sifive_test = Arc::new(SifiveTest::new());
+        let st_region = MemoryRegion::io(
+            "sifive_test",
+            SIFIVE_TEST_SIZE,
+            Box::new(SifiveTestMmio(Arc::clone(&sifive_test))),
+        );
+        root.add_subregion(st_region, GPA::new(SIFIVE_TEST_BASE));
+        self.sifive_test = Some(sifive_test);
+
         self.address_space = Some(AddressSpace::new(root));
 
         // ---- IRQ wiring ----
@@ -498,7 +541,16 @@ impl Machine for RefMachine {
             } else {
                 Box::new(NullChardev)
             };
-            let fe = CharFrontend::new(backend);
+            let mut fe = CharFrontend::new(backend);
+
+            // Wire backend input -> UART receive.
+            let uart_for_rx = Arc::clone(self.uart.as_ref().unwrap());
+            let rx_cb: Arc<Mutex<dyn FnMut(u8) + Send>> =
+                Arc::new(Mutex::new(move |byte: u8| {
+                    uart_for_rx.lock().unwrap().receive(byte);
+                }));
+            fe.start_input(rx_cb);
+
             let mut u = self.uart.as_ref().unwrap().lock().unwrap();
             u.attach_irq(uart_irq_line);
             u.attach_chardev(fe);
@@ -535,6 +587,8 @@ impl Machine for RefMachine {
             let mip = &self.shared_mip;
             let wk = &self.wfi_waker;
             let mut a = self.aclint.as_ref().unwrap().lock().unwrap();
+            // Connect WfiWaker for timer-driven WFI wakeup.
+            a.connect_wfi_waker(Arc::clone(wk));
             for hart in 0..opts.cpu_count as usize {
                 let _ = hart;
                 let mti_sink = Arc::new(RiscvCpuIrqSink::new(

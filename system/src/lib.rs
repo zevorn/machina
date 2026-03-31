@@ -17,6 +17,7 @@ use machina_core::wfi::WfiWaker;
 pub struct CpuManager {
     running: Arc<AtomicBool>,
     wfi_waker: Option<Arc<WfiWaker>>,
+    cpus: Vec<FullSystemCpu>,
 }
 
 impl CpuManager {
@@ -24,16 +25,19 @@ impl CpuManager {
         Self {
             running: Arc::new(AtomicBool::new(true)),
             wfi_waker: None,
+            cpus: Vec::new(),
         }
     }
 
-    /// Set the WFI waker so stop() can break WFI wait.
     pub fn set_wfi_waker(&mut self, wk: Arc<WfiWaker>) {
         self.wfi_waker = Some(wk);
     }
 
-    /// Stop execution: flip running flag and wake any
-    /// CPU halted in WFI.
+    /// Add a CPU to be managed. Ownership is transferred.
+    pub fn add_cpu(&mut self, cpu: FullSystemCpu) {
+        self.cpus.push(cpu);
+    }
+
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(ref wk) = self.wfi_waker {
@@ -45,21 +49,21 @@ impl CpuManager {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Run the execution loop for a single CPU.
-    /// Blocks until the CPU exits.
+    /// Run all owned CPUs. For single-CPU, runs on the
+    /// current thread. Blocks until execution exits.
     ///
     /// # Safety
-    /// `cpu.env_ptr()` must return a valid pointer to
-    /// the CPU struct matching translation globals.
-    pub unsafe fn run_cpu<B, C>(
-        &self,
-        cpu: &mut C,
-        shared: &SharedState<B>,
-    ) -> ExitReason
+    /// Each CPU's `env_ptr()` must return a valid pointer
+    /// to its RiscvCpu struct matching translation globals.
+    pub unsafe fn run<B>(&mut self, shared: &SharedState<B>) -> ExitReason
     where
         B: HostCodeGen,
-        C: GuestCpu<IrContext = Context>,
     {
+        if self.cpus.is_empty() {
+            return ExitReason::Exit(0);
+        }
+        // Single-CPU: run on current thread.
+        let cpu = &mut self.cpus[0];
         let mut per_cpu = PerCpuState::new();
         cpu_exec_loop(shared, &mut per_cpu, cpu)
     }
@@ -96,21 +100,14 @@ mod tests {
         mgr.set_wfi_waker(wk.clone());
         mgr.stop();
         assert!(!mgr.is_running());
-        // Waker should unblock any waiting thread.
-        assert!(!wk.wait()); // returns false (stopped)
+        assert!(!wk.wait());
     }
 
     #[test]
     fn test_wfi_stop_unblocks_concurrent_wait() {
-        // Verify stop() can unblock a thread that is
-        // already blocked in wait().
         let wk = Arc::new(WfiWaker::new());
         let wk2 = wk.clone();
-        let handle = std::thread::spawn(move || {
-            // This will block until stop() is called.
-            wk2.wait()
-        });
-        // Give the thread time to enter wait().
+        let handle = std::thread::spawn(move || wk2.wait());
         std::thread::sleep(std::time::Duration::from_millis(50));
         wk.stop();
         let result = handle.join().unwrap();

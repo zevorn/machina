@@ -1,28 +1,28 @@
 // WFI wakeup primitive: Condvar-based notification for
-// halted CPU wakeup by device IRQ or manager stop.
+// halted CPU wakeup by device IRQ, timer deadline, or
+// manager stop.
 //
 // All state is protected by a single mutex to prevent
 // lost-wakeup races between wake/stop and wait.
 
 use std::sync::{Condvar, Mutex};
+use std::time::Instant;
 
-/// Internal state guarded by the mutex.
 struct WfiState {
-    /// Set by wake() when device IRQ arrives.
     irq_pending: bool,
-    /// Set by stop() for manager shutdown.
     stopped: bool,
+    /// Nearest timer deadline (if any). wait() uses
+    /// condvar::wait_timeout when this is set.
+    deadline: Option<Instant>,
 }
 
 /// Wakeup signal for WFI (Wait For Interrupt).
 ///
 /// - Device IRQ sinks call `wake()` to unblock WFI.
-/// - CpuManager calls `stop()` to force-unblock WFI
-///   for safe shutdown.
-/// - `wait()` blocks until either condition is met.
-///
-/// All three methods acquire the same mutex, so there
-/// is no window for lost wakeups.
+/// - Timer code calls `set_deadline()` + `wake()` when
+///   mtimecmp changes.
+/// - CpuManager calls `stop()` to force-unblock WFI.
+/// - `wait()` blocks until IRQ, deadline, or stop.
 pub struct WfiWaker {
     state: Mutex<WfiState>,
     cv: Condvar,
@@ -34,6 +34,7 @@ impl WfiWaker {
             state: Mutex::new(WfiState {
                 irq_pending: false,
                 stopped: false,
+                deadline: None,
             }),
             cv: Condvar::new(),
         }
@@ -53,8 +54,25 @@ impl WfiWaker {
         self.cv.notify_all();
     }
 
-    /// Block until woken by `wake()` or `stop()`.
-    /// Returns true if woken by IRQ, false if stopped.
+    /// Set the nearest timer deadline. The next wait()
+    /// call will use wait_timeout with this deadline.
+    /// Call wake() after this to re-evaluate an ongoing
+    /// wait.
+    pub fn set_deadline(&self, deadline: Instant) {
+        let mut s = self.state.lock().unwrap();
+        s.deadline = Some(deadline);
+    }
+
+    /// Clear the timer deadline.
+    pub fn clear_deadline(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.deadline = None;
+    }
+
+    /// Block until woken by `wake()`, `stop()`, or timer
+    /// deadline expiry.
+    /// Returns true if woken by IRQ or timer, false if
+    /// stopped.
     pub fn wait(&self) -> bool {
         let mut s = self.state.lock().unwrap();
         loop {
@@ -65,7 +83,24 @@ impl WfiWaker {
             if s.stopped {
                 return false;
             }
-            s = self.cv.wait(s).unwrap();
+            if let Some(deadline) = s.deadline {
+                let now = Instant::now();
+                if now >= deadline {
+                    // Deadline already passed.
+                    s.deadline = None;
+                    return true;
+                }
+                let remaining = deadline - now;
+                let (new_s, result) =
+                    self.cv.wait_timeout(s, remaining).unwrap();
+                s = new_s;
+                if result.timed_out() {
+                    s.deadline = None;
+                    return true;
+                }
+            } else {
+                s = self.cv.wait(s).unwrap();
+            }
         }
     }
 }

@@ -112,7 +112,6 @@ fn main() {
         }
     };
 
-    // Machine selection.
     if cli.machine == "?" {
         eprintln!("Available machines:");
         eprintln!("  riscv64-ref    RISC-V reference machine");
@@ -125,8 +124,9 @@ fn main() {
 
     let mut machine = RefMachine::new();
 
+    let ram_size = cli.ram_mib * 1024 * 1024;
     let opts = MachineOpts {
-        ram_size: cli.ram_mib * 1024 * 1024,
+        ram_size,
         cpu_count: 1,
         kernel: cli.kernel.clone(),
         bios: cli.bios.clone(),
@@ -150,49 +150,44 @@ fn main() {
         cli.ram_mib
     );
 
-    // Create JIT backend with MMIO helpers for
-    // full-system memory access.
+    // JIT backend with MMIO helpers.
     let mut backend = X86_64CodeGen::new();
     backend.mmio = Some(MmioConfig {
         ram_base: 0x8000_0000,
+        ram_end: 0x8000_0000 + ram_size,
         load_helper: machina_mem_read as *const () as u64,
         store_helper: machina_mem_write as *const () as u64,
     });
     let env = ExecEnv::new(backend);
     let shared = env.shared.clone();
 
-    // Take CPU0 from machine for execution. After this,
-    // machine.cpus[0] is None — ownership is explicitly
-    // transferred to FullSystemCpu for JIT execution.
-    // Device IRQ delivery uses SharedMip (not the vector).
+    // Take CPU0 from machine for execution.
     let shared_mip = machine.shared_mip();
     let cpu0 = machine.take_cpu(0).expect("cpu0 must exist after boot");
 
     let ram_ptr = machine.ram_ptr();
-    let ram_size = machine.ram_size();
-
     let wfi_waker = machine.wfi_waker();
-    let mut cpu_mgr = CpuManager::new();
-    cpu_mgr.set_wfi_waker(wfi_waker.clone());
-    let mut fs_cpu = unsafe {
-        FullSystemCpu::new(cpu0, ram_ptr, ram_size, shared_mip, wfi_waker)
+    let as_ptr = machine.address_space()
+        as *const machina_memory::address_space::AddressSpace;
+
+    let fs_cpu = unsafe {
+        FullSystemCpu::new(
+            cpu0,
+            ram_ptr,
+            ram_size,
+            shared_mip,
+            wfi_waker.clone(),
+            as_ptr,
+        )
     };
 
-    // Set machine AddressSpace for MMIO dispatch from
-    // JIT helpers.
-    machina_system::cpus::set_machine_address_space(
-        machine.address_space(),
-        ram_size,
-    );
+    let mut cpu_mgr = CpuManager::new();
+    cpu_mgr.set_wfi_waker(wfi_waker);
+    cpu_mgr.add_cpu(fs_cpu);
 
-    eprintln!(
-        "machina: cpu0 pc=0x{:x} priv={}, \
-         entering execution loop",
-        fs_cpu.cpu.pc, fs_cpu.cpu.priv_level as u8
-    );
+    eprintln!("machina: entering execution loop");
 
-    // Block in the execution loop.
-    let exit = unsafe { cpu_mgr.run_cpu(&mut fs_cpu, &shared) };
+    let exit = unsafe { cpu_mgr.run(&shared) };
 
     eprintln!("machina: execution exited: {:?}", exit);
 }

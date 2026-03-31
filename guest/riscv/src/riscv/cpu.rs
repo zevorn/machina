@@ -63,6 +63,14 @@ pub struct RiscvCpu {
     pub priv_level: PrivLevel,
     /// Full CSR register file (M/S/U).
     pub csr: CsrFile,
+
+    /// Pointer to the machine's AddressSpace for MMIO
+    /// dispatch from JIT helpers. Cast from *const
+    /// AddressSpace. Zero means not initialized.
+    pub as_ptr: u64,
+    /// End of the RAM window (ram_base + ram_size).
+    /// JIT helpers use this to decide RAM vs MMIO.
+    pub ram_end: u64,
 }
 
 // Field offsets (bytes) from the start of RiscvCpu.
@@ -139,6 +147,8 @@ impl RiscvCpu {
             halted: AtomicBool::new(false),
             priv_level: PrivLevel::Machine,
             csr: CsrFile::new(),
+            as_ptr: 0,
+            ram_end: 0,
         }
     }
 

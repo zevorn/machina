@@ -31,26 +31,43 @@ impl IrqSink for TestIrqSink {
 }
 
 #[test]
-fn test_aclint_mtime_read_write() {
+fn test_aclint_mtime_wall_clock() {
+    let aclint = Aclint::new(2);
+
+    let t0 = aclint.read(0xBFF8, 8);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let t1 = aclint.read(0xBFF8, 8);
+
+    // 100ms at 10 MHz = ~1_000_000 ticks.
+    let diff = t1 - t0;
+    assert!(
+        diff > 500_000 && diff < 2_000_000,
+        "mtime diff {} not in expected range for 100ms",
+        diff
+    );
+}
+
+#[test]
+fn test_aclint_mtime_write_resets_epoch() {
     let mut aclint = Aclint::new(2);
 
-    // mtime at offset 0xBFF8, initially 0.
-    assert_eq!(aclint.read(0xBFF8, 8), 0);
-
-    // Write mtime.
-    aclint.write(0xBFF8, 8, 1000);
-    assert_eq!(aclint.read(0xBFF8, 8), 1000);
+    aclint.write(0xBFF8, 8, 1_000_000);
+    let t = aclint.read(0xBFF8, 8);
+    // Should be close to 1_000_000 (just written).
+    assert!(
+        t >= 1_000_000 && t < 1_100_000,
+        "mtime {} not near written value 1_000_000",
+        t
+    );
 }
 
 #[test]
 fn test_aclint_mtimecmp_set() {
     let mut aclint = Aclint::new(2);
 
-    // mtimecmp[0] at offset 0x4000.
     aclint.write(0x4000, 8, 500);
     assert_eq!(aclint.read(0x4000, 8), 500);
 
-    // mtimecmp[1] at offset 0x4008.
     aclint.write(0x4008, 8, 1000);
     assert_eq!(aclint.read(0x4008, 8), 1000);
 }
@@ -59,11 +76,9 @@ fn test_aclint_mtimecmp_set() {
 fn test_aclint_msip_set_clear() {
     let mut aclint = Aclint::new(2);
 
-    // msip[0] at offset 0x0000.
     aclint.write(0x0000, 4, 1);
     assert_eq!(aclint.read(0x0000, 4), 1);
 
-    // Clear.
     aclint.write(0x0000, 4, 0);
     assert_eq!(aclint.read(0x0000, 4), 0);
 
@@ -76,53 +91,49 @@ fn test_aclint_msip_set_clear() {
 fn test_aclint_timer_compare() {
     let mut aclint = Aclint::new(2);
 
-    // Set mtimecmp[0] = 5 at offset 0x4000.
-    aclint.write(0x4000, 8, 5);
+    // Set mtimecmp[0] = 100.
+    aclint.write(0x4000, 8, 100);
 
-    // Initially no pending.
+    // Set mtime to 50 (below mtimecmp).
+    aclint.write(0xBFF8, 8, 50);
     assert!(!aclint.timer_irq_pending(0));
 
-    // Tick 4 times -> mtime = 4, still < 5.
-    for _ in 0..4 {
-        aclint.tick();
-    }
-    assert!(!aclint.timer_irq_pending(0));
-
-    // Tick once more -> mtime = 5, now >= mtimecmp.
-    aclint.tick();
+    // Set mtime to 100 (at threshold).
+    aclint.write(0xBFF8, 8, 100);
     assert!(aclint.timer_irq_pending(0));
 
-    // Hart 1 has mtimecmp = u64::MAX, still not pending.
+    // Hart 1 has mtimecmp = u64::MAX, not pending.
     assert!(!aclint.timer_irq_pending(1));
 }
 
 #[test]
-fn test_aclint_tick_mti() {
+fn test_aclint_mti_output() {
     let mut aclint = Aclint::new(2);
 
-    // Connect MTI output for hart 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let mti_irq = 7u32;
     let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti_irq);
     aclint.connect_mti(0, line);
 
-    // Set mtimecmp[0] = 3 at offset 0x4000.
-    aclint.write(0x4000, 8, 3);
-
-    // MTI should be low.
-    assert!(!sink.level(mti_irq), "MTI should be low before threshold");
-
-    // Tick twice: mtime = 2, still < 3.
-    aclint.tick();
-    aclint.tick();
-    assert!(!sink.level(mti_irq), "MTI should be low at mtime=2");
-
-    // Tick once more: mtime = 3, now >= mtimecmp.
-    aclint.tick();
-    assert!(sink.level(mti_irq), "MTI should be high at mtime=3");
-
-    // Raise mtimecmp to clear: set mtimecmp[0] = 100.
+    // Set mtimecmp[0] = 100.
     aclint.write(0x4000, 8, 100);
+
+    // Set mtime = 50 -> MTI low.
+    aclint.write(0xBFF8, 8, 50);
+    assert!(
+        !sink.level(mti_irq),
+        "MTI should be low when mtime < mtimecmp"
+    );
+
+    // Set mtime = 100 -> MTI high.
+    aclint.write(0xBFF8, 8, 100);
+    assert!(
+        sink.level(mti_irq),
+        "MTI should be high when mtime >= mtimecmp"
+    );
+
+    // Raise mtimecmp to 200 -> MTI low.
+    aclint.write(0x4000, 8, 200);
     assert!(
         !sink.level(mti_irq),
         "MTI should go low after raising mtimecmp"
@@ -133,20 +144,16 @@ fn test_aclint_tick_mti() {
 fn test_aclint_msi_output() {
     let mut aclint = Aclint::new(2);
 
-    // Connect MSI output for hart 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let msi_irq = 3u32;
     let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, msi_irq);
     aclint.connect_msi(0, line);
 
-    // Initially low.
     assert!(!sink.level(msi_irq), "MSI should be low");
 
-    // Write msip[0] = 1 at offset 0x0000.
     aclint.write(0x0000, 4, 1);
     assert!(sink.level(msi_irq), "MSI should go high after msip=1");
 
-    // Clear msip[0].
     aclint.write(0x0000, 4, 0);
     assert!(!sink.level(msi_irq), "MSI should go low after msip=0");
 }
@@ -155,15 +162,17 @@ fn test_aclint_msi_output() {
 fn test_aclint_clint_layout() {
     let mut aclint = Aclint::new(2);
 
-    // msip[0] at offset 0x0000.
     aclint.write(0x0000, 4, 1);
     assert_eq!(aclint.read(0x0000, 4), 1);
 
-    // mtimecmp[0] at offset 0x4000.
     aclint.write(0x4000, 8, 42);
     assert_eq!(aclint.read(0x4000, 8), 42);
 
-    // mtime at offset 0xBFF8.
     aclint.write(0xBFF8, 8, 999);
-    assert_eq!(aclint.read(0xBFF8, 8), 999);
+    let t = aclint.read(0xBFF8, 8);
+    assert!(
+        t >= 999 && t < 999 + 100_000,
+        "mtime {} not near written value 999",
+        t
+    );
 }

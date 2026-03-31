@@ -1178,6 +1178,10 @@ pub struct MmioConfig {
     /// Start of the RAM region in guest physical address
     /// space (e.g. 0x8000_0000 for RISC-V virt machine).
     pub ram_base: u64,
+    /// End of the RAM region (ram_base + ram_size).
+    /// Addresses in [ram_base, ram_end) use the inline
+    /// fast path; all others go through the helper.
+    pub ram_end: u64,
     /// Address of `machina_mem_read(env, addr, size)->u64`.
     pub load_helper: u64,
     /// Address of `machina_mem_write(env, addr, val, size)`.
@@ -1277,18 +1281,19 @@ impl X86_64CodeGen {
 
     /// Emit QemuLd with inline MMIO check.
     ///
-    /// Layout:
+    /// Layout (fast path first for branch prediction):
     /// ```text
     ///   cmp addr_reg, ram_base
-    ///   jae fast_path
+    ///   jb slow_path
+    ///   cmp addr_reg, ram_end
+    ///   jae slow_path
+    ///   <inline [R14+addr] load>   (fast path)
+    ///   jmp done
+    /// slow_path:
     ///   <save regs>
     ///   <call load_helper(env, addr, size)>
-    ///   <save result to scratch>
     ///   <restore regs>
-    ///   mov dst, [rsp+scratch]
-    ///   jmp done
-    /// fast_path:
-    ///   <inline [R14+addr] load>
+    ///   mov dst, result
     /// done:
     /// ```
     pub(crate) fn emit_qemu_ld_mmio(
@@ -1301,86 +1306,23 @@ impl X86_64CodeGen {
     ) {
         let size = memop & 0x3;
         let sign = memop & 4 != 0;
-        // Convert size code to byte count: 1 << size
         let size_bytes: u32 = 1 << size;
 
-        // CMP addr, ram_base (unsigned 64-bit compare)
-        if cfg.ram_base <= i32::MAX as u64 {
-            emit_arith_ri(buf, ArithOp::Cmp, true, addr, cfg.ram_base as i32);
-        } else {
-            // Load ram_base into scratch, then CMP
-            emit_store(buf, true, Reg::R11, Reg::Rsp, Self::MMIO_SCRATCH);
-            emit_mov_ri(buf, true, Reg::R11, cfg.ram_base);
-            emit_arith_rr(buf, ArithOp::Cmp, true, addr, Reg::R11);
-            emit_load(buf, true, Reg::R11, Reg::Rsp, Self::MMIO_SCRATCH);
-        }
+        // CMP addr, ram_base
+        Self::emit_cmp_addr_imm(buf, addr, cfg.ram_base);
+        // JB slow_path (addr < ram_base)
+        emit_opc(buf, OPC_JCC_long + (X86Cond::Jb as u32), 0, 0);
+        let jb_disp_off = buf.offset();
+        buf.emit_u32(0);
 
-        // JAE fast_path (skip slow path if addr >= ram_base)
+        // CMP addr, ram_end
+        Self::emit_cmp_addr_imm(buf, addr, cfg.ram_end);
+        // JAE slow_path (addr >= ram_end)
         emit_opc(buf, OPC_JCC_long + (X86Cond::Jae as u32), 0, 0);
         let jae_disp_off = buf.offset();
-        buf.emit_u32(0); // placeholder
-
-        // ---- slow path: call helper ----
-        Self::emit_save_caller_regs(buf);
-
-        // Save addr to scratch slot before arg setup
-        emit_store(buf, true, addr, Reg::Rsp, Self::MMIO_SCRATCH);
-
-        // Setup args: rdi=env, rsi=addr, edx=size
-        emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);
-        emit_load(buf, true, Reg::Rsi, Reg::Rsp, Self::MMIO_SCRATCH);
-        emit_mov_ri(buf, false, Reg::Rdx, size_bytes as u64);
-
-        // Call load_helper
-        emit_mov_ri(buf, true, Reg::R11, cfg.load_helper);
-        emit_call_reg(buf, Reg::R11);
-
-        // Save result (rax) to scratch slot
-        emit_store(buf, true, Reg::Rax, Reg::Rsp, Self::MMIO_SCRATCH);
-
-        // Restore all caller-saved regs
-        Self::emit_restore_caller_regs(buf);
-
-        // Load result into dst
-        emit_load(buf, true, dst, Reg::Rsp, Self::MMIO_SCRATCH);
-
-        // Sign-extend if needed (helper returns zero-extended)
-        if sign {
-            match size {
-                0 => {
-                    let opc = if rexw {
-                        OPC_MOVSBL | P_REXW
-                    } else {
-                        OPC_MOVSBL
-                    };
-                    emit_movsx(buf, opc, dst, dst);
-                }
-                1 => {
-                    let opc = if rexw {
-                        OPC_MOVSWL | P_REXW
-                    } else {
-                        OPC_MOVSWL
-                    };
-                    emit_movsx(buf, opc, dst, dst);
-                }
-                2 => {
-                    emit_movsx(buf, OPC_MOVSLQ, dst, dst);
-                }
-                _ => {} // 64-bit: no sign-extend needed
-            }
-        }
-
-        // JMP done (skip fast path)
-        buf.emit_u8(OPC_JMP_long as u8);
-        let jmp_disp_off = buf.offset();
-        buf.emit_u32(0); // placeholder
+        buf.emit_u32(0);
 
         // ---- fast path: inline [R14+addr] ----
-        let fast_path = buf.offset();
-        // Patch JAE displacement
-        let jae_disp = (fast_path as i64) - (jae_disp_off as i64 + 4);
-        buf.patch_u32(jae_disp_off, jae_disp as u32);
-
         let gb = Reg::R14;
         match (size, sign) {
             (0, false) => {
@@ -1417,6 +1359,59 @@ impl X86_64CodeGen {
             _ => unreachable!(),
         }
 
+        // JMP done (skip slow path)
+        buf.emit_u8(OPC_JMP_long as u8);
+        let jmp_disp_off = buf.offset();
+        buf.emit_u32(0);
+
+        // ---- slow path: call helper ----
+        let slow_path = buf.offset();
+        let jb_disp = (slow_path as i64) - (jb_disp_off as i64 + 4);
+        buf.patch_u32(jb_disp_off, jb_disp as u32);
+        let jae_disp = (slow_path as i64) - (jae_disp_off as i64 + 4);
+        buf.patch_u32(jae_disp_off, jae_disp as u32);
+
+        Self::emit_save_caller_regs(buf);
+
+        emit_store(buf, true, addr, Reg::Rsp, Self::MMIO_SCRATCH);
+
+        // rdi=env, rsi=addr, edx=size
+        emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);
+        emit_load(buf, true, Reg::Rsi, Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_mov_ri(buf, false, Reg::Rdx, size_bytes as u64);
+
+        emit_mov_ri(buf, true, Reg::R11, cfg.load_helper);
+        emit_call_reg(buf, Reg::R11);
+
+        emit_store(buf, true, Reg::Rax, Reg::Rsp, Self::MMIO_SCRATCH);
+        Self::emit_restore_caller_regs(buf);
+        emit_load(buf, true, dst, Reg::Rsp, Self::MMIO_SCRATCH);
+
+        if sign {
+            match size {
+                0 => {
+                    let opc = if rexw {
+                        OPC_MOVSBL | P_REXW
+                    } else {
+                        OPC_MOVSBL
+                    };
+                    emit_movsx(buf, opc, dst, dst);
+                }
+                1 => {
+                    let opc = if rexw {
+                        OPC_MOVSWL | P_REXW
+                    } else {
+                        OPC_MOVSWL
+                    };
+                    emit_movsx(buf, opc, dst, dst);
+                }
+                2 => {
+                    emit_movsx(buf, OPC_MOVSLQ, dst, dst);
+                }
+                _ => {}
+            }
+        }
+
         // done:
         let done = buf.offset();
         let jmp_disp = (done as i64) - (jmp_disp_off as i64 + 4);
@@ -1425,8 +1420,8 @@ impl X86_64CodeGen {
 
     /// Emit QemuSt with inline MMIO check.
     ///
-    /// Layout mirrors `emit_qemu_ld_mmio` but calls
-    /// store_helper instead of load_helper.
+    /// Layout mirrors `emit_qemu_ld_mmio`: fast path
+    /// first (fall-through), slow path after.
     pub(crate) fn emit_qemu_st_mmio(
         buf: &mut CodeBuffer,
         cfg: &MmioConfig,
@@ -1437,51 +1432,19 @@ impl X86_64CodeGen {
         let size = memop & 0x3;
         let size_bytes: u32 = 1 << size;
 
-        // CMP addr, ram_base (unsigned 64-bit compare)
-        if cfg.ram_base <= i32::MAX as u64 {
-            emit_arith_ri(buf, ArithOp::Cmp, true, addr, cfg.ram_base as i32);
-        } else {
-            emit_store(buf, true, Reg::R11, Reg::Rsp, Self::MMIO_SCRATCH);
-            emit_mov_ri(buf, true, Reg::R11, cfg.ram_base);
-            emit_arith_rr(buf, ArithOp::Cmp, true, addr, Reg::R11);
-            emit_load(buf, true, Reg::R11, Reg::Rsp, Self::MMIO_SCRATCH);
-        }
+        // CMP addr, ram_base
+        Self::emit_cmp_addr_imm(buf, addr, cfg.ram_base);
+        emit_opc(buf, OPC_JCC_long + (X86Cond::Jb as u32), 0, 0);
+        let jb_disp_off = buf.offset();
+        buf.emit_u32(0);
 
-        // JAE fast_path
+        // CMP addr, ram_end
+        Self::emit_cmp_addr_imm(buf, addr, cfg.ram_end);
         emit_opc(buf, OPC_JCC_long + (X86Cond::Jae as u32), 0, 0);
         let jae_disp_off = buf.offset();
         buf.emit_u32(0);
 
-        // ---- slow path: call helper ----
-        Self::emit_save_caller_regs(buf);
-
-        // Save addr and val to scratch slots
-        emit_store(buf, true, addr, Reg::Rsp, Self::MMIO_SCRATCH);
-        emit_store(buf, true, val, Reg::Rsp, Self::MMIO_SCRATCH + 8);
-
-        // Setup: rdi=env, rsi=addr, rdx=val, ecx=size
-        emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);
-        emit_load(buf, true, Reg::Rsi, Reg::Rsp, Self::MMIO_SCRATCH);
-        emit_load(buf, true, Reg::Rdx, Reg::Rsp, Self::MMIO_SCRATCH + 8);
-        emit_mov_ri(buf, false, Reg::Rcx, size_bytes as u64);
-
-        // Call store_helper
-        emit_mov_ri(buf, true, Reg::R11, cfg.store_helper);
-        emit_call_reg(buf, Reg::R11);
-
-        // Restore all caller-saved regs
-        Self::emit_restore_caller_regs(buf);
-
-        // JMP done
-        buf.emit_u8(OPC_JMP_long as u8);
-        let jmp_disp_off = buf.offset();
-        buf.emit_u32(0);
-
         // ---- fast path: inline [R14+addr] ----
-        let fast_path = buf.offset();
-        let jae_disp = (fast_path as i64) - (jae_disp_off as i64 + 4);
-        buf.patch_u32(jae_disp_off, jae_disp as u32);
-
         let gb = Reg::R14;
         match size {
             0 => emit_store_byte_sib(buf, val, gb, addr),
@@ -1495,10 +1458,50 @@ impl X86_64CodeGen {
             _ => unreachable!(),
         }
 
+        // JMP done
+        buf.emit_u8(OPC_JMP_long as u8);
+        let jmp_disp_off = buf.offset();
+        buf.emit_u32(0);
+
+        // ---- slow path: call helper ----
+        let slow_path = buf.offset();
+        let jb_disp = (slow_path as i64) - (jb_disp_off as i64 + 4);
+        buf.patch_u32(jb_disp_off, jb_disp as u32);
+        let jae_disp = (slow_path as i64) - (jae_disp_off as i64 + 4);
+        buf.patch_u32(jae_disp_off, jae_disp as u32);
+
+        Self::emit_save_caller_regs(buf);
+
+        emit_store(buf, true, addr, Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_store(buf, true, val, Reg::Rsp, Self::MMIO_SCRATCH + 8);
+
+        // rdi=env, rsi=addr, rdx=val, ecx=size
+        emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);
+        emit_load(buf, true, Reg::Rsi, Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_load(buf, true, Reg::Rdx, Reg::Rsp, Self::MMIO_SCRATCH + 8);
+        emit_mov_ri(buf, false, Reg::Rcx, size_bytes as u64);
+
+        emit_mov_ri(buf, true, Reg::R11, cfg.store_helper);
+        emit_call_reg(buf, Reg::R11);
+
+        Self::emit_restore_caller_regs(buf);
+
         // done:
         let done = buf.offset();
         let jmp_disp = (done as i64) - (jmp_disp_off as i64 + 4);
         buf.patch_u32(jmp_disp_off, jmp_disp as u32);
+    }
+
+    /// Helper: emit CMP addr_reg, imm64.
+    fn emit_cmp_addr_imm(buf: &mut CodeBuffer, addr: Reg, imm: u64) {
+        if imm <= i32::MAX as u64 {
+            emit_arith_ri(buf, ArithOp::Cmp, true, addr, imm as i32);
+        } else {
+            emit_store(buf, true, Reg::R11, Reg::Rsp, Self::MMIO_SCRATCH);
+            emit_mov_ri(buf, true, Reg::R11, imm);
+            emit_arith_rr(buf, ArithOp::Cmp, true, addr, Reg::R11);
+            emit_load(buf, true, Reg::R11, Reg::Rsp, Self::MMIO_SCRATCH);
+        }
     }
 }
 

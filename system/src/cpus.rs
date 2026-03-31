@@ -23,11 +23,8 @@ const NUM_GPRS: usize = 32;
 const RAM_BASE: u64 = 0x8000_0000;
 
 /// Shared mip register for IRQ delivery from devices.
-/// Devices write to this atomically; the exec loop reads
-/// it in pending_interrupt() and syncs to the CPU's CSR.
 pub type SharedMip = Arc<AtomicU64>;
 
-/// Create a new shared mip register.
 pub fn new_shared_mip() -> SharedMip {
     Arc::new(AtomicU64::new(0))
 }
@@ -52,15 +49,20 @@ impl FullSystemCpu {
     /// # Safety
     /// `ram_ptr` must point to valid mmap'd memory of
     /// `ram_size` bytes backing guest RAM at RAM_BASE.
+    /// `as_ref` must point to an AddressSpace that
+    /// outlives FullSystemCpu.
     pub unsafe fn new(
         mut cpu: RiscvCpu,
         ram_ptr: *const u8,
         ram_size: u64,
         shared_mip: SharedMip,
         wfi_waker: Arc<WfiWaker>,
+        as_ptr: *const machina_memory::address_space::AddressSpace,
     ) -> Self {
         cpu.guest_base =
             (ram_ptr as usize).wrapping_sub(RAM_BASE as usize) as u64;
+        cpu.as_ptr = as_ptr as u64;
+        cpu.ram_end = RAM_BASE + ram_size;
         Self {
             cpu,
             ram_ptr,
@@ -70,12 +72,10 @@ impl FullSystemCpu {
         }
     }
 
-    /// Get a clone of the shared mip for IRQ sinks.
     pub fn shared_mip(&self) -> SharedMip {
         self.shared_mip.clone()
     }
 
-    /// Get a clone of the WFI waker for IRQ sinks.
     pub fn wfi_waker(&self) -> Arc<WfiWaker> {
         self.wfi_waker.clone()
     }
@@ -145,9 +145,6 @@ impl GuestCpu for FullSystemCpu {
     // -- Full-system hooks --
 
     fn pending_interrupt(&self) -> bool {
-        // Combine software mip (CPU-set bits like SSIP)
-        // with device mip (PLIC/ACLINT-driven bits).
-        // Don't modify csr.mip — just check.
         let dev_mip = self.shared_mip.load(Ordering::Relaxed);
         let effective = self.cpu.csr.mip | dev_mip;
         effective & self.cpu.csr.mie != 0
@@ -166,18 +163,10 @@ impl GuestCpu for FullSystemCpu {
     }
 
     fn handle_interrupt(&mut self) {
-        // Merge device bits into csr.mip temporarily
-        // for the interrupt handler, then restore the
-        // software-only mip. Device bit presence is
-        // always re-evaluated from shared_mip on the
-        // next pending_interrupt() call.
         let dev_mip = self.shared_mip.load(Ordering::Relaxed);
         let saved = self.cpu.csr.mip;
         self.cpu.csr.mip = saved | dev_mip;
         self.cpu.handle_interrupt();
-        // Restore software-only bits. The handler may
-        // have cleared some bits (e.g., SSIP); preserve
-        // those clears but remove device bits.
         self.cpu.csr.mip &= !dev_mip;
     }
 
@@ -215,77 +204,53 @@ impl GuestCpu for FullSystemCpu {
     fn tlb_flush_page(&mut self, _vpn: u64) {}
 
     fn wait_for_interrupt(&self) -> bool {
-        // Block indefinitely on condvar until a device
-        // IRQ arrives. The IRQ sink calls wake() after
-        // updating SharedMip.
         self.wfi_waker.wait()
     }
 }
 
-// ---- JIT memory helpers for MMIO-safe access ----
+// ---- JIT memory helpers ----
 //
 // Called from JIT-generated code when a guest memory
-// address falls outside the RAM region. The fast path
-// (addr >= RAM_BASE) stays inline in the JIT; only
-// non-RAM accesses land here.
+// address falls outside the RAM window. The fast path
+// (ram_base <= addr < ram_end) stays inline in the JIT;
+// only out-of-window accesses land here.
 //
-// Signature must be `extern "C"` and `#[no_mangle]` so
-// the JIT can call them by raw function pointer.
+// These helpers read AddressSpace pointer and RAM bounds
+// directly from the RiscvCpu struct (via env pointer),
+// eliminating any process-global state.
 
-use machina_guest_riscv::riscv::cpu::GUEST_BASE_OFFSET;
 use machina_core::address::GPA;
 use machina_memory::address_space::AddressSpace;
 
-// Static pointer to the machine's AddressSpace for MMIO
-// dispatch from JIT helpers. Set before exec loop entry,
-// valid for the duration of execution. Single-machine,
-// single-thread assumption.
-static MACHINE_AS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-static RAM_END: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Set the machine AddressSpace for MMIO dispatch.
-/// Must be called before entering the exec loop.
-pub fn set_machine_address_space(
-    as_: &AddressSpace,
-    ram_size: u64,
-) {
-    MACHINE_AS.store(
-        as_ as *const AddressSpace as usize,
-        std::sync::atomic::Ordering::SeqCst,
-    );
-    RAM_END.store(
-        RAM_BASE + ram_size,
-        std::sync::atomic::Ordering::SeqCst,
-    );
+/// Byte offset of `as_ptr` within RiscvCpu.
+fn as_ptr_offset() -> usize {
+    // as_ptr is at: offset_of(RiscvCpu, as_ptr)
+    // We compute it by taking the address diff.
+    let dummy = RiscvCpu::new();
+    let base = &dummy as *const RiscvCpu as usize;
+    let field = &dummy.as_ptr as *const u64 as usize;
+    field - base
 }
 
-fn get_as() -> Option<&'static AddressSpace> {
-    let p = MACHINE_AS
-        .load(std::sync::atomic::Ordering::SeqCst);
-    if p == 0 {
-        None
-    } else {
-        Some(unsafe { &*(p as *const AddressSpace) })
-    }
+/// Byte offset of `ram_end` within RiscvCpu.
+fn ram_end_offset() -> usize {
+    let dummy = RiscvCpu::new();
+    let base = &dummy as *const RiscvCpu as usize;
+    let field = &dummy.ram_end as *const u64 as usize;
+    field - base
 }
 
-/// Read 1/2/4/8 bytes from guest address.
-/// RAM fast path for addresses in [RAM_BASE, RAM_END).
-/// All other addresses go through AddressSpace MMIO.
 #[no_mangle]
 pub unsafe extern "C" fn machina_mem_read(
     env: *mut u8,
     addr: u64,
     size: u32,
 ) -> u64 {
-    let end = RAM_END
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let end = *(env.add(ram_end_offset()) as *const u64);
     if addr >= RAM_BASE && addr < end {
-        let gb = *(env.add(
-            GUEST_BASE_OFFSET as usize,
-        ) as *const u64);
+        let gb_off =
+            machina_guest_riscv::riscv::cpu::GUEST_BASE_OFFSET as usize;
+        let gb = *(env.add(gb_off) as *const u64);
         let ptr = (gb + addr) as *const u8;
         match size {
             1 => *ptr as u64,
@@ -294,16 +259,17 @@ pub unsafe extern "C" fn machina_mem_read(
             8 => *(ptr as *const u64),
             _ => 0,
         }
-    } else if let Some(as_) = get_as() {
-        as_.read(GPA::new(addr), size)
     } else {
-        0
+        let asp = *(env.add(as_ptr_offset()) as *const u64);
+        if asp != 0 {
+            let as_ = &*(asp as *const AddressSpace);
+            as_.read(GPA::new(addr), size)
+        } else {
+            0
+        }
     }
 }
 
-/// Write 1/2/4/8 bytes to guest address.
-/// RAM fast path for [RAM_BASE, RAM_END).
-/// All other addresses go through AddressSpace MMIO.
 #[no_mangle]
 pub unsafe extern "C" fn machina_mem_write(
     env: *mut u8,
@@ -311,12 +277,11 @@ pub unsafe extern "C" fn machina_mem_write(
     val: u64,
     size: u32,
 ) {
-    let end = RAM_END
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let end = *(env.add(ram_end_offset()) as *const u64);
     if addr >= RAM_BASE && addr < end {
-        let gb = *(env.add(
-            GUEST_BASE_OFFSET as usize,
-        ) as *const u64);
+        let gb_off =
+            machina_guest_riscv::riscv::cpu::GUEST_BASE_OFFSET as usize;
+        let gb = *(env.add(gb_off) as *const u64);
         let ptr = (gb + addr) as *mut u8;
         match size {
             1 => *ptr = val as u8,
@@ -325,7 +290,11 @@ pub unsafe extern "C" fn machina_mem_write(
             8 => *(ptr as *mut u64) = val,
             _ => {}
         }
-    } else if let Some(as_) = get_as() {
-        as_.write(GPA::new(addr), size, val);
+    } else {
+        let asp = *(env.add(as_ptr_offset()) as *const u64);
+        if asp != 0 {
+            let as_ = &*(asp as *const AddressSpace);
+            as_.write(GPA::new(addr), size, val);
+        }
     }
 }

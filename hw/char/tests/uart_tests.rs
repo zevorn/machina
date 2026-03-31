@@ -156,7 +156,6 @@ fn test_uart_tx_to_chardev() {
         fn can_read(&self) -> bool {
             false
         }
-        fn set_handler(&mut self, _h: Option<Box<dyn FnMut(u8) + Send>>) {}
     }
     let shared_buf = Arc::clone(&buf_ref);
     let chardev = SharedChardev { buf: shared_buf };
