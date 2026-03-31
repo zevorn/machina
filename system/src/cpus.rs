@@ -388,6 +388,10 @@ impl GuestCpu for FullSystemCpu {
         self.cpu.last_phys_pc
     }
 
+    fn take_dirty_pages(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.cpu.dirty_pages)
+    }
+
     fn wait_for_interrupt(&self) -> bool {
         self.wfi_waker.wait()
     }
@@ -636,6 +640,12 @@ unsafe fn write_phys_sized(cpu: *mut RiscvCpu, pa: u64, val: u64, size: u32) {
             4 => (ptr as *mut u32).write_unaligned(val as u32),
             8 => (ptr as *mut u64).write_unaligned(val),
             _ => {}
+        }
+        // Track dirty page for fence.i invalidation.
+        let page = pa >> 12;
+        let cpu_mut = &mut *cpu;
+        if !cpu_mut.dirty_pages.contains(&page) {
+            cpu_mut.dirty_pages.push(page);
         }
     } else {
         let asp = cpu_ref.as_ptr;

@@ -98,6 +98,10 @@ pub struct RiscvCpu {
     /// before each qemu_ld/qemu_st so that helper-latched
     /// faults have the correct mepc.
     pub fault_pc: u64,
+
+    /// Physical pages written since last fence.i. Used
+    /// for page-granularity TB invalidation.
+    pub dirty_pages: Vec<u64>,
 }
 
 // Field offsets (bytes) from the start of RiscvCpu.
@@ -183,6 +187,7 @@ impl RiscvCpu {
             tb_flush_pending: false,
             last_phys_pc: 0,
             fault_pc: 0,
+            dirty_pages: Vec::new(),
         }
     }
 

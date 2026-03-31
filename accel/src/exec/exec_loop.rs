@@ -165,12 +165,25 @@ where
             }
             v if v == EXCP_FENCE_I as usize => {
                 per_cpu.stats.real_exit += 1;
-                // fence.i: invalidate all TBs (conservative
-                // full flush; phys-page granularity added in
-                // task14 after phys_pc is populated).
-                shared
-                    .tb_store
-                    .invalidate_all(shared.code_buf(), &shared.backend);
+                // fence.i: invalidate TBs by dirty
+                // physical page for instruction cache
+                // coherence.
+                let dirty = cpu.take_dirty_pages();
+                if dirty.is_empty() {
+                    // No stores tracked: conservative
+                    // full flush as fallback.
+                    shared
+                        .tb_store
+                        .invalidate_all(shared.code_buf(), &shared.backend);
+                } else {
+                    for page in &dirty {
+                        shared.tb_store.invalidate_phys_page(
+                            *page,
+                            shared.code_buf(),
+                            &shared.backend,
+                        );
+                    }
+                }
                 per_cpu.jump_cache.invalidate();
                 next_tb_hint = None;
             }

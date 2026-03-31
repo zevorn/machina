@@ -71,6 +71,12 @@ pub trait GuestCpu {
         0
     }
 
+    /// Take the set of dirty physical pages (for
+    /// fence.i page-granularity TB invalidation).
+    fn take_dirty_pages(&mut self) -> Vec<u64> {
+        Vec::new()
+    }
+
     /// Wait for an interrupt to arrive (WFI semantics).
     /// Returns true if an interrupt arrived, false if
     /// timed out or not implemented.

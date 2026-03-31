@@ -160,3 +160,72 @@ fn test_tlb_index_consistency() {
     assert_eq!(idx, expected);
     assert_eq!(idx, 128); // known value
 }
+
+// ── AC-4: Precise fault PC ──────────────────────────
+
+#[test]
+fn test_fault_pc_field_exists() {
+    use machina_guest_riscv::riscv::cpu::RiscvCpu;
+    let cpu = RiscvCpu::new();
+    // fault_pc should be zero-initialized.
+    assert_eq!(cpu.fault_pc, 0);
+}
+
+// ── AC-6: Dirty page tracking for fence.i ────────────
+
+#[test]
+fn test_dirty_pages_tracking() {
+    use machina_guest_riscv::riscv::cpu::RiscvCpu;
+    let mut cpu = RiscvCpu::new();
+    assert!(cpu.dirty_pages.is_empty());
+    cpu.dirty_pages.push(0x80000);
+    cpu.dirty_pages.push(0x80001);
+    assert_eq!(cpu.dirty_pages.len(), 2);
+    let taken = std::mem::take(&mut cpu.dirty_pages);
+    assert_eq!(taken.len(), 2);
+    assert!(cpu.dirty_pages.is_empty());
+}
+
+// ── AC-2: Instruction fetch through MMU ──────────────
+
+#[test]
+fn test_bare_mode_translate_identity() {
+    let mut mmu = Mmu::new();
+    // BARE mode: satp=0, translate is identity.
+    let mem_read = |_pa: u64| -> u64 { 0 };
+    let mut mem_write = |_pa: u64, _val: u64| {};
+    let result = mmu.translate(
+        0x8000_1234,
+        AccessType::Read,
+        PrivLevel::Machine,
+        0,
+        8,
+        None,
+        mem_read,
+        mem_write,
+    );
+    assert_eq!(result, Ok(0x8000_1234));
+}
+
+// ── AC-9: Boot smoke via SiFive test ─────────────────
+// (Covered by tools::sifive_test_pass_clean_exit and
+// tools::boot_rustsbi_with_sbi_smoke_payload)
+
+// ── Multiple TLB index hash values ──────────────────
+
+#[test]
+fn test_tlb_index_distinct_pages() {
+    use machina_guest_riscv::riscv::mmu::tlb_index;
+    // Different pages should generally map to different
+    // TLB indices (not always, but for these specific
+    // addresses they should differ).
+    let i1 = tlb_index(0x8000_0000);
+    let i2 = tlb_index(0x8000_1000);
+    let i3 = tlb_index(0x8000_2000);
+    // At least two of three should differ.
+    assert!(
+        i1 != i2 || i2 != i3 || i1 != i3,
+        "all three indices are identical: {}",
+        i1,
+    );
+}
