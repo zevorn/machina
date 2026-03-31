@@ -102,14 +102,14 @@ fn test_load_elf_simple() {
     elf[24..32].copy_from_slice(&entry.to_le_bytes());
     // e_phoff = 64 (immediately after ehdr)
     elf[32..40].copy_from_slice(&64u64.to_le_bytes());
-    // e_shoff = 0
-    // e_flags = 0
-    // e_ehsize = 64
-    elf[40..42].copy_from_slice(&64u16.to_le_bytes());
-    // e_phentsize = 56
-    elf[42..44].copy_from_slice(&56u16.to_le_bytes());
-    // e_phnum = 1
-    elf[44..46].copy_from_slice(&1u16.to_le_bytes());
+    // e_shoff (40..48) = 0
+    // e_flags (48..52) = 0
+    // e_ehsize (52..54) = 64
+    elf[52..54].copy_from_slice(&64u16.to_le_bytes());
+    // e_phentsize (54..56) = 56
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+    // e_phnum (56..58) = 1
+    elf[56..58].copy_from_slice(&1u16.to_le_bytes());
 
     // -- Program header (56 bytes at offset 64) --
     let ph = 64usize;

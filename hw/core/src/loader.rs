@@ -79,9 +79,10 @@ pub fn load_elf(data: &[u8], as_: &AddressSpace) -> Result<LoadInfo, String> {
 
     let e_entry = u64::from_le_bytes(data[24..32].try_into().unwrap());
     let e_phoff = u64::from_le_bytes(data[32..40].try_into().unwrap()) as usize;
+    // e_shoff(40..48), e_flags(48..52), e_ehsize(52..54)
     let e_phentsize =
-        u16::from_le_bytes(data[42..44].try_into().unwrap()) as usize;
-    let e_phnum = u16::from_le_bytes(data[44..46].try_into().unwrap()) as usize;
+        u16::from_le_bytes(data[54..56].try_into().unwrap()) as usize;
+    let e_phnum = u16::from_le_bytes(data[56..58].try_into().unwrap()) as usize;
 
     if e_phentsize < ELF64_PHDR_SIZE {
         return Err(format!("phentsize {e_phentsize} < {ELF64_PHDR_SIZE}"));
