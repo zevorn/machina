@@ -260,64 +260,123 @@ fn jal(rd: u32, offset: i32) -> u32 {
 /// Phase 2: Overwrite the code at 0x100 with x1 = 99,
 ///          execute fence.i, jump to 0x100, ecall.
 ///          Should get x1 = 99 (retranslated).
+/// SW rs2, offset(rs1) (32-bit store)
+fn sw(rs2: u32, rs1: u32, offset: i32) -> u32 {
+    let imm = (offset as u32) & 0xFFF;
+    let imm_hi = (imm >> 5) & 0x7F;
+    let imm_lo = imm & 0x1F;
+    (imm_hi << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (0b010 << 12)
+        | (imm_lo << 7)
+        | 0x23
+}
+
 #[test]
 fn test_fullsys_fence_i_retranslation() {
     let ram_size: u64 = 1024 * 1024;
 
-    // Phase 1 code at offset 0: jump to 0x100 (skip).
-    // Phase 1 code at offset 0x100: addi x1,0,42; ecall
-    // Phase 2 entry at offset 0x200: overwrite 0x100
-    // with "addi x1,0,99", then fence.i, jump to 0x100.
-    let mut code = vec![0u8; 0x400];
+    // Phase 1: jump to 0x1000, execute addi x1,0,42; ecall.
+    // Phase 2: use guest SD to overwrite code at 0x1000
+    //   with addi x1,0,99; ecall, then fence.i, jump back.
+    // Using 0x1000 (page-aligned) so dirty page tracking
+    // records a specific physical page.
+    let mut code = vec![0u8; 0x2000];
 
-    // Offset 0x000: Phase 1 entry — jump to 0x100.
-    let phase1_entry = encode(&[jal(0, 0x100)]);
-    code[0..4].copy_from_slice(&phase1_entry);
+    // Offset 0x000: Phase 1 entry.
+    let phase1 = encode(&[jal(0, 0x1000)]);
+    code[0..4].copy_from_slice(&phase1);
 
-    // Offset 0x100: addi x1, x0, 42; ecall
-    let target_code_v1 = encode(&[addi(1, 0, 42), ecall()]);
-    code[0x100..0x108].copy_from_slice(&target_code_v1);
+    // Offset 0x1000: addi x1, x0, 42; ecall (original)
+    let v1 = encode(&[addi(1, 0, 42), ecall()]);
+    code[0x1000..0x1000 + v1.len()].copy_from_slice(&v1);
 
-    let (mut env, mut cpu, _as, ram) = setup_fullsys(ram_size, &code);
+    // Phase 2 code at 0x200: use guest stores to
+    // overwrite code at 0x1000 with new instructions.
+    // The new instructions: addi x1,0,99 and ecall.
+    let new_insn_0 = addi(1, 0, 99);
+    let new_insn_1 = ecall();
+
+    // Phase 2 sequence:
+    //   auipc x3, 0      → x3 = PC (0x80000200)
+    //   lui x4, (new_insn_0 >> 12)
+    //   addi x4, x4, (new_insn_0 & 0xFFF)
+    //   sw x4, 0x1000-0x200(x3) → store at 0x80001000
+    //   lui x4, (new_insn_1 >> 12)
+    //   addi x4, x4, (new_insn_1 & 0xFFF)
+    //   sw x4, 0x1004-0x200(x3) → store at 0x80001004
+    //   fence.i
+    //   jal to 0x1000
+
+    fn auipc(rd: u32, imm20: u32) -> u32 {
+        (imm20 << 12) | (rd << 7) | 0x17
+    }
+
+    // Build the new insn value in x4 using LUI+ADDI.
+    // For new_insn_0 = addi(1,0,99):
+    let hi0 = (new_insn_0 >> 12) & 0xFFFFF;
+    let lo0 = (new_insn_0 & 0xFFF) as i32;
+    // Adjust for sign extension.
+    let (hi0, lo0) = if lo0 >= 0x800 {
+        (hi0 + 1, lo0 - 0x1000)
+    } else {
+        (hi0, lo0)
+    };
+
+    let hi1 = (new_insn_1 >> 12) & 0xFFFFF;
+    let lo1 = (new_insn_1 & 0xFFF) as i32;
+    let (hi1, lo1) = if lo1 >= 0x800 {
+        (hi1 + 1, lo1 - 0x1000)
+    } else {
+        (hi1, lo1)
+    };
+
+    // Phase 2: compute target address, store, fence.i,
+    // jump. Use x3 as base for 0x80001000.
+    // 10 instructions starting at 0x200.
+    let phase2 = encode(&[
+        auipc(3, 0),       // x3 = PC = 0x80000200
+        addi(3, 3, 0xE00), // x3 += 0xE00 → ERR: >12bit!
+    ]);
+    // Actually, ADDI imm is 12-bit signed (-2048..2047).
+    // 0xE00 = 3584 > 2047. Need two ADDIs or LUI approach.
+    // Use: auipc x3,1 → x3 = 0x80001200, then addi x3,x3,-0x200 → x3 = 0x80001000
+    // auipc(3,1): x3 = PC + 0x1000 = 0x80000200 + 0x1000 = 0x80001200
+    // addi(3,3,-0x200): x3 = 0x80001200 - 0x200 = 0x80001000
+    let phase2 = encode(&[
+        auipc(3, 1),        // x3 = PC + 0x1000 = 0x80001200
+        addi(3, 3, -0x200), // x3 = 0x80001000
+        lui(4, hi0),
+        addi(4, 4, lo0), // x4 = addi(1,0,99) encoding
+        sw(4, 3, 0),     // *(0x80001000) = x4
+        lui(4, hi1),
+        addi(4, 4, lo1), // x4 = ecall() encoding
+        sw(4, 3, 4),     // *(0x80001004) = x4
+        fence_i(),
+        // jal to 0x1000: from 0x224 to 0x1000 = -(0x224-0x1000)
+        // 0x200 + 10*4 = 0x228, jal at 0x224.
+        // offset = 0x1000 - 0x224 = 0xDDC
+        jal(0, 0x1000 - 0x224i32),
+    ]);
+    code[0x200..0x200 + phase2.len()].copy_from_slice(&phase2);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys(ram_size, &code);
     cpu.cpu.pc = RAM_BASE;
 
-    // Phase 1: execute, expect x1 = 42.
+    // Phase 1.
     let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
     assert_eq!(r, ExitReason::Ecall { priv_level: 3 },);
     assert_eq!(cpu.cpu.gpr[1], 42, "phase 1: x1 should be 42",);
 
-    // Phase 2: overwrite code at 0x100 with x1=99.
-    let target_code_v2 = encode(&[addi(1, 0, 99), ecall()]);
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            target_code_v2.as_ptr(),
-            (ram as *mut u8).add(0x100),
-            target_code_v2.len(),
-        );
-    }
-
-    // Write phase 2 entry at 0x200: fence.i + jal 0x100
-    // Jump offset from 0x200 to 0x100 = -0x100
-    let phase2_code = encode(&[
-        fence_i(),
-        jal(0, -0x104), // from 0x204 to 0x100
-    ]);
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            phase2_code.as_ptr(),
-            (ram as *mut u8).add(0x200),
-            phase2_code.len(),
-        );
-    }
-
-    // Execute phase 2 from offset 0x200.
+    // Phase 2: guest store + fence.i + re-execute.
     cpu.cpu.pc = RAM_BASE + 0x200;
     let r2 = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
     assert_eq!(r2, ExitReason::Ecall { priv_level: 3 },);
     assert_eq!(
         cpu.cpu.gpr[1], 99,
-        "phase 2: x1 should be 99 after fence.i \
-         retranslation",
+        "phase 2: x1 should be 99 after guest \
+         store + fence.i retranslation",
     );
 }
 
@@ -451,4 +510,152 @@ fn test_fullsys_precise_fault_mepc() {
         "x2 should be 0: instruction after fault \
          should not execute",
     );
+}
+
+// ═══════════════════════════════════════════════════════
+// AC-7: MMIO observable dispatch test
+// ═══════════════════════════════════════════════════════
+
+use std::sync::atomic::AtomicU64;
+use std::sync::Mutex;
+
+/// A simple test MMIO device that counts writes.
+struct TestMmioDevice {
+    write_count: AtomicU64,
+    last_value: AtomicU64,
+}
+
+impl TestMmioDevice {
+    fn new() -> Self {
+        Self {
+            write_count: AtomicU64::new(0),
+            last_value: AtomicU64::new(0),
+        }
+    }
+}
+
+impl machina_memory::region::MmioOps for TestMmioDevice {
+    fn read(&self, _offset: u64, _size: u32) -> u64 {
+        self.last_value.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn write(&self, _offset: u64, _size: u32, val: u64) {
+        self.last_value
+            .store(val, std::sync::atomic::Ordering::Relaxed);
+        self.write_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Test: MMIO write goes through AddressSpace dispatch
+/// to a real IO device, not through addend fast path.
+/// Two writes to the same MMIO page should both hit
+/// the device (write_count == 2).
+#[test]
+fn test_fullsys_mmio_observable_dispatch() {
+    let ram_size: u64 = 1024 * 1024;
+    let mmio_base: u64 = 0x1000_0000;
+
+    // Code: write two values to MMIO device.
+    fn auipc(rd: u32, imm20: u32) -> u32 {
+        (imm20 << 12) | (rd << 7) | 0x17
+    }
+    let code = encode(&[
+        lui(3, 0x10000),  // x3 = 0x10000000
+        addi(1, 0, 0x41), // x1 = 'A' (65)
+        sw(1, 3, 0),      // write 65 to MMIO
+        addi(1, 0, 0x42), // x1 = 'B' (66)
+        sw(1, 3, 0),      // write 66 to MMIO
+        ecall(),
+    ]);
+
+    // Set up with MMIO device at 0x10000000.
+    let mut backend = X86_64CodeGen::new();
+    backend.mmio = Some(test_mmu_config());
+    let env = ExecEnv::new(backend);
+
+    let root = MemoryRegion::container("root", u64::MAX);
+    let (ram_region, ram_block) = MemoryRegion::ram("ram", ram_size);
+
+    // Create the test MMIO device.
+    let device = Arc::new(TestMmioDevice::new());
+    let io_region = MemoryRegion::io(
+        "test-mmio",
+        0x1000,
+        Box::new(TestMmioDeviceWrapper {
+            inner: Arc::clone(&device),
+        }),
+    );
+
+    let mut addr_space = Box::new(AddressSpace::new(root));
+    addr_space
+        .root_mut()
+        .add_subregion(ram_region, GPA::new(RAM_BASE));
+    addr_space
+        .root_mut()
+        .add_subregion(io_region, GPA::new(mmio_base));
+    addr_space.update_flat_view();
+
+    let ram_ptr = ram_block.as_ptr() as *const u8;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            code.as_ptr(),
+            ram_block.as_ptr(),
+            code.len(),
+        );
+    }
+
+    let shared_mip: SharedMip = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let wfi_waker = Arc::new(WfiWaker::new());
+    let stop_flag = Arc::new(AtomicBool::new(true));
+
+    let cpu = RiscvCpu::new();
+    let mut fscpu = unsafe {
+        FullSystemCpu::new(
+            cpu,
+            ram_ptr,
+            ram_size,
+            shared_mip,
+            wfi_waker,
+            &*addr_space as *const AddressSpace,
+            stop_flag,
+        )
+    };
+    fscpu.cpu.pc = RAM_BASE;
+
+    let mut env = env;
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut fscpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 },);
+
+    // Device should have received exactly 2 writes.
+    let wc = device
+        .write_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        wc, 2,
+        "MMIO device should receive 2 writes, \
+         got {}",
+        wc,
+    );
+
+    // Last value should be 'B' (66).
+    let lv = device.last_value.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(lv, 0x42, "last MMIO write should be 0x42, got {:#x}", lv,);
+}
+
+/// Wrapper to make TestMmioDevice work with MmioOps
+/// (which requires Send but not Sync directly).
+struct TestMmioDeviceWrapper {
+    inner: Arc<TestMmioDevice>,
+}
+
+impl machina_memory::region::MmioOps for TestMmioDeviceWrapper {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        self.inner.read(offset, size)
+    }
+
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        self.inner.write(offset, size, val);
+    }
 }
