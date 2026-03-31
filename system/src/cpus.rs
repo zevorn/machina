@@ -57,7 +57,11 @@ pub fn fault_pc_offset() -> usize {
     let dummy = RiscvCpu::new();
     let base = &dummy as *const RiscvCpu as usize;
     let field = &dummy.fault_pc as *const u64 as usize;
-    field - base
+    let off = field - base;
+    // Verify no overlap with adjacent fields.
+    let fc_off = fault_cause_offset();
+    debug_assert!(off.abs_diff(fc_off) >= 8, "fault_pc overlaps fault_cause",);
+    off
 }
 
 /// Last translated TB PC for crash diagnosis.

@@ -1199,6 +1199,9 @@ pub struct SoftMmuConfig {
     /// Offset of `mem_fault_cause` within env (for
     /// checking after helper returns).
     pub fault_cause_offset: usize,
+    /// Offset of `fault_pc` within env (for precise
+    /// fault mepc).
+    pub fault_pc_offset: usize,
     /// Epilogue offset for exiting TB on helper fault.
     pub tb_ret_addr: u64,
 }
@@ -1585,9 +1588,22 @@ impl X86_64CodeGen {
 
     /// Emit a post-helper fault check: if
     /// mem_fault_cause != 0, exit TB immediately.
-    fn emit_fault_check(&self, _buf: &mut CodeBuffer, _cfg: &SoftMmuConfig) {
-        // Disabled — faults handled at TB boundary by
-        // check_mem_fault() in exec loop.
+    fn emit_fault_check(&self, buf: &mut CodeBuffer, cfg: &SoftMmuConfig) {
+        // Save R11 before clobbering for the check.
+        emit_store(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
+        emit_load(buf, true, Reg::R11, Reg::Rbp, cfg.fault_cause_offset as i32);
+        emit_arith_ri(buf, ArithOp::Cmp, true, Reg::R11, 0);
+        // Restore R11 (MOV doesn't affect flags).
+        emit_load(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
+        // je skip (no fault)
+        emit_opc(buf, OPC_JCC_long + (X86Cond::Je as u32), 0, 0);
+        let je_off = buf.offset();
+        buf.emit_u32(0);
+        // Fault: exit TB with NOCHAIN.
+        emit_mov_ri(buf, true, Reg::Rax, crate::ir::tb::TB_EXIT_NOCHAIN);
+        emit_jmp(buf, self.tb_ret_offset);
+        // skip:
+        Self::patch_disp(buf, je_off, buf.offset());
     }
 
     /// Patch a jmp/jcc disp32 field.

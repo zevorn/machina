@@ -157,7 +157,8 @@ fn run_machine_cycle(
         load_helper: machina_mem_read as *const () as u64,
         store_helper: machina_mem_write as *const () as u64,
         fault_cause_offset: fault_cause_offset(),
-        tb_ret_addr: 0, // unused, fault exits via epilogue
+        fault_pc_offset: fault_pc_offset(),
+        tb_ret_addr: 0,
     });
     let env = ExecEnv::new(backend);
     let shared = env.shared.clone();

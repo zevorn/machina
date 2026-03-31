@@ -652,7 +652,13 @@ pub fn regalloc_and_codegen(
         let flags = def.flags;
 
         match op.opc {
-            Opcode::Nop | Opcode::InsnStart => continue,
+            Opcode::Nop => continue,
+            Opcode::InsnStart => {
+                // Pass through to backend for fault_pc.
+                let ca: Vec<u32> = op.cargs().iter().map(|t| t.0).collect();
+                backend.tcg_out_op(buf, ctx, &op, &[], &[], &ca);
+                continue;
+            }
 
             Opcode::Mov => {
                 let dst_idx = op.args[0];

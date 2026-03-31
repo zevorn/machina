@@ -653,6 +653,29 @@ impl HostCodeGen for X86_64CodeGen {
             // Memory barrier: NOP on x86 (TSO provides
             // sufficient ordering for single-hart use).
             Opcode::Mb => {}
+            // Write the guest instruction PC to
+            // [rbp + fault_pc_offset] for precise
+            // fault delivery.
+            Opcode::InsnStart => {
+                if let Some(ref cfg) = self.mmio {
+                    let pc = (cargs[1] as u64) << 32 | (cargs[0] as u64);
+                    // Save R11 to stack scratch, write
+                    // fault_pc, then restore R11.
+                    // Scratch offset 112 matches
+                    // emitter::TLB_SAVE_R11.
+                    const SCRATCH_R11: i32 = 112;
+                    emit_store(buf, true, Reg::R11, Reg::Rsp, SCRATCH_R11);
+                    emit_mov_ri(buf, true, Reg::R11, pc);
+                    emit_store(
+                        buf,
+                        true,
+                        Reg::R11,
+                        Reg::Rbp,
+                        cfg.fault_pc_offset as i32,
+                    );
+                    emit_load(buf, true, Reg::R11, Reg::Rsp, SCRATCH_R11);
+                }
+            }
             Opcode::Call => {
                 let func = (cargs[1] as u64) << 32 | (cargs[0] as u64);
                 emit_mov_ri(buf, true, Reg::R11, func);
