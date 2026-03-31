@@ -190,6 +190,10 @@ impl Aclint {
 
     pub fn write(&mut self, offset: u64, _size: u32, val: u64) {
         if offset == MTIME_OFFSET {
+            // Invalidate all pending timer threads.
+            for gen in &self.timer_state.cancel_gen {
+                gen.fetch_add(1, Ordering::SeqCst);
+            }
             self.mtime_base = val;
             self.epoch = Instant::now();
             self.update_mti();
@@ -198,6 +202,11 @@ impl Aclint {
         if offset >= MTIMECMP_BASE {
             let hart = ((offset - MTIMECMP_BASE) / 8) as usize;
             if hart < self.num_harts as usize {
+                // Invalidate any pending timer thread
+                // for this hart before updating state.
+                self.timer_state.cancel_gen[hart]
+                    .fetch_add(1, Ordering::SeqCst);
+
                 self.mtimecmp[hart] = val;
                 let pending = self.read_mtime() >= self.mtimecmp[hart];
                 if let Some(ref line) = self.mti_outputs[hart] {

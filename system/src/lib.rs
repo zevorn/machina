@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use machina_accel::exec::exec_loop::{cpu_exec_loop, ExitReason};
 use machina_accel::exec::{PerCpuState, SharedState};
+use machina_accel::GuestCpu;
 use machina_accel::HostCodeGen;
 use machina_core::wfi::WfiWaker;
 
@@ -77,6 +78,18 @@ impl CpuManager {
                     }
                 }
                 ExitReason::BufferFull => {}
+                ExitReason::Ecall { priv_level } => {
+                    // Route ECALL as trap exception.
+                    // 8=EcallFromU, 9=EcallFromS,
+                    // 11=EcallFromM.
+                    let cause = match priv_level {
+                        0 => 8,
+                        1 => 9,
+                        3 => 11,
+                        _ => 11,
+                    };
+                    cpu.handle_exception(cause, 0);
+                }
                 other => return other,
             }
         }

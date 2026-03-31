@@ -223,7 +223,9 @@ impl GuestCpu for FullSystemCpu {
         }
         let insn = unsafe {
             let ptr = self.ram_ptr.add(pc_off as usize);
-            *(ptr as *const u32)
+            // Use unaligned read: RVC allows 32-bit
+            // instructions at halfword-aligned addresses.
+            std::ptr::read_unaligned(ptr as *const u32)
         };
         // Decode CSR instruction fields:
         //   [31:20] = csr, [19:15] = rs1, [14:12] = funct3,

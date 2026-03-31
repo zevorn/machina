@@ -21,6 +21,10 @@ pub const CSR_MTVAL: u16 = 0x343;
 pub const CSR_MIP: u16 = 0x344;
 pub const CSR_MENVCFG: u16 = 0x30A;
 pub const CSR_MCOUNTINHIBIT: u16 = 0x320;
+pub const CSR_MHARTID: u16 = 0xF14;
+pub const CSR_MVENDORID: u16 = 0xF11;
+pub const CSR_MARCHID: u16 = 0xF12;
+pub const CSR_MIMPID: u16 = 0xF13;
 
 // PMP CSRs
 pub const CSR_PMPCFG0: u16 = 0x3A0;
@@ -220,6 +224,9 @@ pub struct CsrFile {
     // Floating-point
     pub fflags: u64,
     pub frm: u64,
+
+    // Machine info (read-only)
+    pub hart_id: u64,
 }
 
 impl CsrFile {
@@ -252,6 +259,7 @@ impl CsrFile {
             instret: 0,
             fflags: 0,
             frm: 0,
+            hart_id: 0,
         }
     }
 
@@ -306,6 +314,12 @@ impl CsrFile {
             CSR_STVAL => Ok(self.stval),
             CSR_SIP => Ok(self.mip & self.mideleg & SIP_MASK),
             CSR_SATP => Ok(self.satp),
+
+            // -- Machine info (read-only) --
+            CSR_MHARTID => Ok(self.hart_id),
+            CSR_MVENDORID => Ok(0),
+            CSR_MARCHID => Ok(0),
+            CSR_MIMPID => Ok(0),
 
             // -- Counters (read-only) --
             CSR_CYCLE | CSR_TIME => Ok(self.cycle),
