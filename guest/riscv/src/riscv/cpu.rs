@@ -99,6 +99,13 @@ pub struct RiscvCpu {
     /// faults have the correct mepc.
     pub fault_pc: u64,
 
+    /// Pointer to the exec loop's jmp_buf for longjmp.
+    /// Set by the exec loop before TB execution. Helpers
+    /// call longjmp through this pointer when they need
+    /// to abort TB execution (e.g. illegal CSR access).
+    /// Zero means longjmp is not available.
+    pub jmp_env: u64,
+
     /// Physical pages written since last fence.i. Used
     /// for page-granularity TB invalidation.
     pub dirty_pages: Vec<u64>,
@@ -187,6 +194,7 @@ impl RiscvCpu {
             tb_flush_pending: false,
             last_phys_pc: 0,
             fault_pc: 0,
+            jmp_env: 0,
             dirty_pages: Vec::new(),
         }
     }

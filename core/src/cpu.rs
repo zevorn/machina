@@ -36,6 +36,11 @@ pub trait GuestCpu {
     fn handle_exception(&mut self, _excp: u32, _tval: u64) {}
     fn execute_mret(&mut self) {}
     fn execute_sret(&mut self) -> bool { true }
+
+    /// Set the jmp_env pointer for longjmp from helpers.
+    fn set_jmp_env(&mut self, _ptr: u64) {}
+    /// Clear the jmp_env pointer.
+    fn clear_jmp_env(&mut self) {}
     fn tlb_flush(&mut self) {}
     fn tlb_flush_page(&mut self, _vpn: u64) {}
 

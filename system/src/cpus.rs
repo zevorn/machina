@@ -435,6 +435,8 @@ impl GuestCpu for FullSystemCpu {
                 fault_pc_offset() as i64,
                 "fault_pc",
             );
+            // d.csr_helper =
+                machina_csr_op as *const () as u64;
             RiscvTranslator::tb_start(&mut d, ir);
             loop {
                 RiscvTranslator::insn_start(&mut d, ir);
@@ -540,6 +542,14 @@ impl GuestCpu for FullSystemCpu {
 
     fn execute_sret(&mut self) -> bool {
         self.cpu.execute_sret()
+    }
+
+    fn set_jmp_env(&mut self, ptr: u64) {
+        self.cpu.jmp_env = ptr;
+    }
+
+    fn clear_jmp_env(&mut self) {
+        self.cpu.jmp_env = 0;
     }
 
     fn tlb_flush(&mut self) {
@@ -956,4 +966,118 @@ pub unsafe extern "C" fn machina_mem_write(
         }
         write_phys_sized(cpu, pa, val, size);
     }
+}
+
+// ---- longjmp-based TB abort ----
+
+/// Abort the current TB and return to the exec loop via
+/// longjmp. The caller must have already delivered the
+/// exception via raise_exception() before calling this.
+///
+/// # Safety
+/// `cpu.jmp_env` must point to a valid jmp_buf set by
+/// the exec loop's setjmp.
+unsafe extern "C" {
+    fn siglongjmp(env: *mut u8, val: i32) -> !;
+}
+
+unsafe fn cpu_loop_exit(cpu: &RiscvCpu) -> ! {
+    let ptr = cpu.jmp_env;
+    assert!(ptr != 0, "cpu_loop_exit: no jmp_env");
+    siglongjmp(ptr as *mut u8, 1);
+}
+
+// ---- CSR helper for JIT ----
+
+/// JIT helper: execute a CSR read-modify-write.
+///
+/// Called from JIT code via gen_call instead of exiting
+/// the TB. On illegal CSR access, delivers the exception
+/// via raise_exception + longjmp back to exec loop.
+#[no_mangle]
+pub unsafe extern "C" fn machina_csr_op(
+    env: *mut u8,
+    csr: u64,
+    rs1_val: u64,
+    funct3: u64,
+) -> u64 {
+    use machina_guest_riscv::riscv::csr::{
+        CSR_PMPADDR0, CSR_PMPCFG0, CSR_SATP, PMP_COUNT,
+    };
+    let cpu = &mut *(env as *mut RiscvCpu);
+    let csr_addr = csr as u16;
+    let priv_level = cpu.priv_level;
+
+    let old = match csr_addr {
+        machina_guest_riscv::riscv::csr::CSR_TIME
+        | machina_guest_riscv::riscv::csr::CSR_CYCLE => {
+            let asp = cpu.as_ptr;
+            if asp != 0 {
+                let a = &*(asp as *const AddressSpace);
+                a.read(GPA::new(0x0200_BFF8), 8)
+            } else {
+                0
+            }
+        }
+        machina_guest_riscv::riscv::csr::CSR_INSTRET => {
+            cpu.csr.instret
+        }
+        _ => match cpu.csr.read(csr_addr, priv_level) {
+            Ok(v) => v,
+            Err(_) => {
+                cpu.raise_exception(
+                    Exception::IllegalInstruction,
+                    0,
+                );
+                cpu_loop_exit(cpu);
+                return 0; // unreachable
+            }
+        },
+    };
+
+    let new_val = match funct3 {
+        1 | 5 => rs1_val,
+        2 | 6 => old | rs1_val,
+        3 | 7 => old & !rs1_val,
+        _ => return old,
+    };
+
+    let do_write = match funct3 {
+        1 | 5 => true,
+        _ => rs1_val != 0,
+    };
+
+    if do_write {
+        if cpu
+            .csr
+            .write(csr_addr, new_val, priv_level)
+            .is_err()
+        {
+            cpu.raise_exception(
+                Exception::IllegalInstruction,
+                0,
+            );
+            cpu_loop_exit(cpu);
+            return 0; // unreachable
+        }
+        let is_pmp =
+            (CSR_PMPCFG0..=CSR_PMPCFG0 + 3)
+                .contains(&csr_addr)
+                || (CSR_PMPADDR0
+                    ..CSR_PMPADDR0 + PMP_COUNT as u16)
+                    .contains(&csr_addr);
+        if is_pmp {
+            cpu.pmp.sync_from_csr(
+                &cpu.csr.pmpcfg,
+                &cpu.csr.pmpaddr,
+            );
+        }
+        if csr_addr == CSR_SATP {
+            cpu.mmu.set_satp(new_val);
+            cpu.mmu.flush();
+            cpu.tb_flush_pending = true;
+        }
+    }
+
+    old
 }

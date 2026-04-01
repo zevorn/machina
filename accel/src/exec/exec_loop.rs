@@ -1,5 +1,18 @@
 use std::sync::atomic::Ordering;
 
+// sigjmp_buf for helper exception handling.
+// On x86-64 Linux, sigjmp_buf = __jmp_buf_tag[1]
+// = 200 bytes (__jmp_buf[8 longs] + int + pad +
+// __sigset_t[16 longs]).
+#[repr(C, align(8))]
+struct SigJmpBuf([u8; 200]);
+
+unsafe extern "C" {
+    #[link_name = "__sigsetjmp"]
+    fn sigsetjmp(env: *mut SigJmpBuf, savemask: i32)
+        -> i32;
+}
+
 use super::{ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING};
 use crate::cpu::GuestCpu;
 use crate::ir::context::Context;
@@ -61,7 +74,22 @@ where
 {
     let mut next_tb_hint: Option<usize> = None;
 
+    // Set up setjmp context for helper longjmp.
+    // Helpers call longjmp(jmp_env, 1) when they need
+    // to abort TB execution (e.g. illegal CSR access).
+    let mut jmp_env: SigJmpBuf = std::mem::zeroed();
+    let jmp_ptr = &mut jmp_env as *mut SigJmpBuf;
+    cpu.set_jmp_env(jmp_ptr as u64);
+
     loop {
+        if sigsetjmp(jmp_ptr, 0) != 0 {
+            // Helper raised an exception via longjmp.
+            // The exception was already delivered by
+            // raise_exception() before the longjmp.
+            // Just continue the exec loop to re-check
+            // interrupts and translate the next TB.
+            next_tb_hint = None;
+        }
         per_cpu.stats.loop_iters += 1;
 
         // Check interrupts BEFORE executing the next TB

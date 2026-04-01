@@ -216,6 +216,35 @@ impl RiscvDisasContext {
         self.base.is_jmp = crate::DisasJumpType::NoReturn;
     }
 
+    /// Generate a helper call for the full CSR operation.
+    /// The helper does read-modify-write and returns old
+    /// value. On illegal access, it raises exception via
+    /// longjmp (never returns).
+    pub(super) fn gen_csr_helper(
+        &self,
+        ir: &mut Context,
+        csr: i64,
+        rs1_val: TempIdx,
+        funct3: u32,
+        rd: i64,
+    ) {
+        // Sync PC so raise_exception has correct mepc.
+        let cur_pc = self.base.pc_next;
+        let pc = ir.new_const(Type::I64, cur_pc);
+        ir.gen_mov(Type::I64, self.pc, pc);
+
+        let csr_arg =
+            ir.new_const(Type::I64, csr as u64);
+        let f3_arg =
+            ir.new_const(Type::I64, funct3 as u64);
+        let old = self.gen_helper_call(
+            ir,
+            self.csr_helper as usize,
+            &[self.env, csr_arg, rs1_val, f3_arg],
+        );
+        self.gen_set_gpr(ir, rd, old);
+    }
+
     pub(super) fn gen_csr_read(
         &self,
         ir: &mut Context,
