@@ -748,13 +748,13 @@ fn test_mmio_tlb_entry_properties() {
     assert!(mmu.tlb_lookup_write(uart).is_none());
     assert!(mmu.tlb_lookup_code(uart).is_none());
 
-    // Tags ARE set (not invalid tag), so the TLB
-    // "knows" about this page but routes to helper.
+    // Tags are TLB_INVALID_TAG for MMIO so the JIT
+    // inline fast path always misses and calls the
+    // helper for proper MMIO dispatch.
     let idx = machina_guest_riscv::riscv::mmu::tlb_index(uart);
-    let tag = uart & !0xFFF;
-    assert_eq!(mmu.tlb[idx].addr_read, tag);
-    assert_eq!(mmu.tlb[idx].addr_write, tag);
-    assert_eq!(mmu.tlb[idx].addr_code, tag);
+    assert_eq!(mmu.tlb[idx].addr_read, u64::MAX);
+    assert_eq!(mmu.tlb[idx].addr_write, u64::MAX);
+    assert_eq!(mmu.tlb[idx].addr_code, u64::MAX);
     assert_eq!(mmu.tlb[idx].addend, TLB_MMIO_ADDEND);
 }
 

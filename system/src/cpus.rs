@@ -14,6 +14,7 @@ use machina_accel::ir::context::Context;
 use machina_accel::ir::TempIdx;
 use machina_accel::GuestCpu;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
+use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_guest_riscv::riscv::exception::Exception;
 use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
@@ -21,6 +22,8 @@ use machina_guest_riscv::{translator_loop, DisasJumpType, TranslatorOps};
 
 const NUM_GPRS: usize = 32;
 pub const RAM_BASE: u64 = 0x8000_0000;
+const MSTATUS_SIE: u64 = 1 << 1;
+const MSTATUS_MIE: u64 = 1 << 50;
 
 /// Compute the byte offset of the TLB Box pointer from
 /// the start of RiscvCpu (env pointer). Used by the JIT
@@ -123,6 +126,20 @@ impl FullSystemCpu {
             shared_mip,
             wfi_waker,
             stop_flag,
+        }
+    }
+
+    /// Read ACLINT mtime register via AddressSpace MMIO.
+    fn read_aclint_mtime(&self) -> u64 {
+        const ACLINT_MTIME: u64 = 0x0200_BFF8;
+        let asp = self.cpu.as_ptr;
+        if asp == 0 {
+            return 0;
+        }
+        unsafe {
+            let as_ =
+                &*(asp as *const AddressSpace);
+            as_.read(GPA::new(ACLINT_MTIME), 8)
         }
     }
 
@@ -443,8 +460,37 @@ impl GuestCpu for FullSystemCpu {
 
     fn pending_interrupt(&self) -> bool {
         let dev_mip = self.shared_mip.load(Ordering::Relaxed);
-        let effective = self.cpu.csr.mip | dev_mip;
-        effective & self.cpu.csr.mie != 0
+        let pending =
+            (self.cpu.csr.mip | dev_mip) & self.cpu.csr.mie;
+        if pending == 0 {
+            return false;
+        }
+
+        let cur_priv = self.cpu.priv_level as u64;
+        for irq in [11u64, 3, 7, 9, 1, 5] {
+            let bit = 1u64 << irq;
+            if pending & bit == 0 {
+                continue;
+            }
+
+            let delegated =
+                (self.cpu.csr.mideleg >> irq) & 1 != 0;
+            if delegated {
+                let s = PrivLevel::Supervisor as u64;
+                return cur_priv < s
+                    || (cur_priv == s
+                        && self.cpu.csr.mstatus & MSTATUS_SIE
+                            != 0);
+            }
+
+            let m = PrivLevel::Machine as u64;
+            return cur_priv < m
+                || (cur_priv == m
+                    && self.cpu.csr.mstatus & MSTATUS_MIE
+                        != 0);
+        }
+
+        false
     }
 
     fn is_halted(&self) -> bool {
@@ -599,9 +645,19 @@ impl GuestCpu for FullSystemCpu {
             }
         };
 
-        let old = match self.cpu.csr.read(csr_addr, priv_level) {
-            Ok(v) => v,
-            Err(_) => return false,
+        let old = match csr_addr {
+            machina_guest_riscv::riscv::csr::CSR_TIME
+            | machina_guest_riscv::riscv::csr::CSR_CYCLE => {
+                self.read_aclint_mtime()
+            }
+            machina_guest_riscv::riscv::csr::CSR_INSTRET => {
+                self.cpu.csr.instret
+            }
+            _ => match self.cpu.csr.read(csr_addr, priv_level)
+            {
+                Ok(v) => v,
+                Err(_) => return false,
+            },
         };
 
         // Compute new value based on funct3.

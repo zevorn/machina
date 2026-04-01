@@ -77,7 +77,19 @@ impl CpuManager {
                         return r;
                     }
                 }
-                ExitReason::BufferFull => {}
+                ExitReason::BufferFull => {
+                    let _guard =
+                        shared.translate_lock.lock().unwrap();
+                    shared.tb_store.invalidate_all(
+                        shared.code_buf(),
+                        &shared.backend,
+                    );
+                    shared.tb_store.flush();
+                    shared
+                        .code_buf_mut()
+                        .set_offset(shared.code_gen_start);
+                    per_cpu.jump_cache.invalidate();
+                }
                 ExitReason::Ecall { priv_level } => {
                     // Route ECALL as trap exception.
                     // 8=EcallFromU, 9=EcallFromS,

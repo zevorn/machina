@@ -426,16 +426,28 @@ impl Mmu {
 
     /// Fill TLB with an identity mapping for M-mode
     /// (VA == PA, all permissions granted).
+    ///
+    /// For MMIO (addend == TLB_MMIO_ADDEND), tags are set
+    /// to TLB_INVALID_TAG so the JIT fast path always
+    /// misses, forcing the slow path through the MMIO
+    /// dispatch.
     pub fn fill_identity(&mut self, gva: u64, addend: usize) {
         let tag = gva & PAGE_MASK;
         let idx = tlb_index(gva);
         let entry = &mut self.tlb[idx];
-        entry.addr_read = tag;
-        entry.addr_write = tag;
-        entry.addr_code = tag;
+        if addend == TLB_MMIO_ADDEND {
+            entry.addr_read = TLB_INVALID_TAG;
+            entry.addr_write = TLB_INVALID_TAG;
+            entry.addr_code = TLB_INVALID_TAG;
+        } else {
+            entry.addr_read = tag;
+            entry.addr_write = tag;
+            entry.addr_code = tag;
+        }
         entry.addend = addend;
-        entry.phys_page = gva >> 12; // identity: VA == PA
-        entry.perm = PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+        entry.phys_page = gva >> 12;
+        entry.perm =
+            PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
         entry.asid = 0;
         entry.page_size = PAGE_SIZE;
     }
