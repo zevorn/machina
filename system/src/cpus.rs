@@ -182,7 +182,15 @@ impl FullSystemCpu {
     /// instruction fetch. Returns u64::MAX on fault
     /// (fault cause is latched).
     fn translate_pc(&mut self, vpc: u64) -> u64 {
-        let mode = self.cpu.mmu.satp_mode();
+        // M-mode always uses BARE (physical addressing),
+        // regardless of satp setting.
+        let mode = if self.cpu.priv_level
+            == PrivLevel::Machine
+        {
+            0
+        } else {
+            self.cpu.mmu.satp_mode()
+        };
         if mode == 0 {
             // BARE mode: VA == PA. PMP check for execute.
             use machina_guest_riscv::riscv::mmu::AccessType;
@@ -743,9 +751,14 @@ unsafe fn translate_for_helper(
     access: AccessType,
     size: u32,
 ) -> Option<u64> {
-    let mode = cpu.mmu.satp_mode();
+    // M-mode always uses BARE regardless of satp.
+    let mode = if cpu.priv_level == PrivLevel::Machine {
+        0
+    } else {
+        cpu.mmu.satp_mode()
+    };
     if mode == 0 {
-        // BARE mode (M-mode): VA == PA.
+        // BARE mode: VA == PA.
         // PMP check.
         match cpu
             .pmp
