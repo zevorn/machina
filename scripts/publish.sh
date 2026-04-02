@@ -31,11 +31,13 @@ SLEEP_SECS="${SLEEP_SECS:-1}"
 REGISTRY="--registry crates-io"
 DRY_RUN=""
 ALLOW_DIRTY=""
+NO_VERIFY=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d|--dry-run)      DRY_RUN="--dry-run"; shift ;;
         -a|--allow-dirty)  ALLOW_DIRTY="--allow-dirty"; shift ;;
+        -n|--no-verify)    NO_VERIFY="--no-verify"; shift ;;
         -h|--help)         usage; exit 0 ;;
         *)                 echo "unknown argument: $1"; usage; exit 1 ;;
     esac
@@ -69,13 +71,13 @@ fail=0
 
 for crate in "${CRATES[@]}"; do
     echo ">>> Publishing ${crate} ..."
-    if cargo publish -p "${crate}" ${REGISTRY} ${DRY_RUN} ${ALLOW_DIRTY}; then
+    if cargo publish -p "${crate}" ${REGISTRY} ${DRY_RUN} ${ALLOW_DIRTY} ${NO_VERIFY}; then
         echo "    ${crate} OK"
         ok=$((ok + 1))
     else
         echo "    ${crate} FAILED (retrying in ${SLEEP_SECS}s...)"
         sleep "${SLEEP_SECS}"
-        if cargo publish -p "${crate}" ${REGISTRY} ${DRY_RUN} ${ALLOW_DIRTY}; then
+        if cargo publish -p "${crate}" ${REGISTRY} ${DRY_RUN} ${ALLOW_DIRTY} ${NO_VERIFY}; then
             echo "    ${crate} OK (retry)"
             ok=$((ok + 1))
         else
