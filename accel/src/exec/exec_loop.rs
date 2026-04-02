@@ -332,13 +332,15 @@ where
             next_tb_hint = None;
         }
 
-        // Monitor pause check (blocks if paused).
-        if cpu.check_monitor_pause() {
+        // External stop check BEFORE monitor pause,
+        // so guest shutdown/reset is not blocked by
+        // a concurrent monitor stop request.
+        if cpu.should_exit() {
             return ExitReason::Halted;
         }
 
-        // External stop check (SiFive Test shutdown, etc).
-        if cpu.should_exit() {
+        // Monitor pause check (blocks if paused).
+        if cpu.check_monitor_pause() {
             return ExitReason::Halted;
         }
     }
