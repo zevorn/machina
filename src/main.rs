@@ -219,15 +219,70 @@ fn run_machine_cycle(
     monitor_state: Option<
         Arc<machina_core::monitor::MonitorState>,
     >,
+    monitor_svc: Arc<
+        std::sync::Mutex<
+            machina_monitor::service::MonitorService,
+        >,
+    >,
 ) -> Option<ShutdownReason> {
     let mut machine = RefMachine::new();
 
-    // Set Ctrl+A X quit callback (restores terminal).
+    // Set Ctrl+A X quit callback + Ctrl+A C monitor mux.
     if let Some(ref ms) = monitor_state {
         let ms_quit = Arc::clone(ms);
         machine.set_quit_cb(Arc::new(move || {
             ms_quit.request_quit();
         }));
+
+        // Ctrl+A C: route input bytes to HMP console.
+        // Buffer bytes into lines, dispatch via HMP.
+        let mon_svc = Arc::clone(&monitor_svc);
+        let line_buf = Arc::new(
+            std::sync::Mutex::new(String::new()),
+        );
+        let mon_cb: Arc<
+            std::sync::Mutex<dyn FnMut(u8) + Send>,
+        > = Arc::new(std::sync::Mutex::new(
+            move |byte: u8| {
+                use std::io::Write;
+                let ch = byte as char;
+                let mut buf =
+                    line_buf.lock().unwrap();
+                if ch == '\r' || ch == '\n' {
+                    let line = buf.clone();
+                    buf.clear();
+                    match machina_monitor::hmp
+                        ::handle_line(&line, &mon_svc)
+                    {
+                        Some(output) => {
+                            let mut out =
+                                std::io::stderr()
+                                    .lock();
+                            let _ = write!(
+                                out, "\r{}",
+                                output
+                            );
+                            let _ = write!(
+                                out, "{}",
+                                machina_monitor::hmp
+                                    ::PROMPT
+                            );
+                            let _ = out.flush();
+                        }
+                        None => {} // quit handled
+                    }
+                } else if byte == 0x7f || byte == 0x08
+                {
+                    // Backspace.
+                    buf.pop();
+                    let _ = eprint!("\x08 \x08");
+                } else {
+                    buf.push(ch);
+                    let _ = eprint!("{}", ch);
+                }
+            },
+        ));
+        machine.set_monitor_cb(mon_cb);
     }
 
     if let Err(e) = machine.init(opts) {
@@ -430,6 +485,7 @@ fn main() {
             &opts,
             ram_size,
             Some(Arc::clone(&monitor_state)),
+            Arc::clone(&monitor_svc),
         );
 
         match reason {

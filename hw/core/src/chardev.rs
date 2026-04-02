@@ -187,7 +187,12 @@ impl Chardev for StdioChardev {
                                     in_monitor =
                                         !in_monitor;
                                     if in_monitor {
-                                        eprint!("\n");
+                                        eprint!(
+                                            "\r\n\
+                                             (machina) "
+                                        );
+                                    } else {
+                                        eprint!("\r\n");
                                     }
                                 }
                                 b'h' | b'H' => {

@@ -365,7 +365,7 @@ fn test_fullsys_fence_i_retranslation() {
     // Phase 2: compute target address, store, fence.i,
     // jump. Use x3 as base for 0x80001000.
     // 10 instructions starting at 0x200.
-    let phase2 = encode(&[
+    let _phase2 = encode(&[
         auipc(3, 0),       // x3 = PC = 0x80000200
         addi(3, 3, 0xE00), // x3 += 0xE00 → ERR: >12bit!
     ]);
@@ -547,7 +547,6 @@ fn test_fullsys_precise_fault_mepc() {
 // ═══════════════════════════════════════════════════════
 
 use std::sync::atomic::AtomicU64;
-use std::sync::Mutex;
 
 /// A simple test MMIO device that counts writes.
 struct TestMmioDevice {
@@ -587,6 +586,7 @@ fn test_fullsys_mmio_observable_dispatch() {
     let mmio_base: u64 = 0x1000_0000;
 
     // Code: write two values to MMIO device.
+    #[allow(dead_code)]
     fn auipc(rd: u32, imm20: u32) -> u32 {
         (imm20 << 12) | (rd << 7) | 0x17
     }
