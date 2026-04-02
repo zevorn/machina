@@ -274,16 +274,17 @@ where
                     cpu.handle_interrupt();
                 } else {
                     let woken = cpu.wait_for_interrupt();
-                    cpu.set_halted(false);
                     if !woken {
+                        cpu.set_halted(false);
                         return ExitReason::Halted;
                     }
-                    // Check monitor pause after WFI
-                    // wake (may have been woken for
-                    // pause, not IRQ).
+                    // Check monitor pause BEFORE clearing
+                    // halted, so snapshot captures WFI state.
                     if cpu.check_monitor_pause() {
+                        cpu.set_halted(false);
                         return ExitReason::Halted;
                     }
+                    cpu.set_halted(false);
                     // Woken by IRQ or timer. Check for
                     // pending interrupt and handle if any;
                     // otherwise resume (timer expired,

@@ -79,10 +79,10 @@ impl WfiWaker {
         s.deadline = None;
     }
 
-    /// Block until woken by `wake()`, `stop()`, or timer
-    /// deadline expiry.
+    /// Block until woken by `wake()`, `stop()`,
+    /// `monitor_wake()`, or timer deadline expiry.
     /// Returns true if woken by IRQ or timer, false if
-    /// stopped.
+    /// stopped or monitor wake.
     pub fn wait(&self) -> bool {
         let mut s = self.state.lock().unwrap();
         loop {
@@ -95,7 +95,12 @@ impl WfiWaker {
             }
             if s.monitor_wake {
                 s.monitor_wake = false;
-                return true; // woken for pause check
+                // Return true (woken) but the exec
+                // loop's WFI handler will see that
+                // check_monitor_pause returns true,
+                // parking at the barrier instead of
+                // continuing past WFI.
+                return true;
             }
             if let Some(deadline) = s.deadline {
                 let now = Instant::now();
