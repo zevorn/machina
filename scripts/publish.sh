@@ -58,6 +58,7 @@ CRATES=(
     machina-guest-riscv
     machina-system
     machina-hw-riscv
+    machina
 )
 
 echo "Publishing ${#CRATES[@]} crates (sleep=${SLEEP_SECS}s between each)..."

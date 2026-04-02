@@ -57,7 +57,6 @@ description = "CLI entry point for the Machina RISC-V full-system emulator"
 license = "MIT"
 repository = "https://github.com/gevico/machina"
 authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
-publish = false
 
 [[bin]]
 name = "machina"
