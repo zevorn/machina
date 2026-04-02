@@ -16,6 +16,7 @@ members = [
     "hw/intc",
     "hw/char",
     "hw/riscv",
+    "hw/virtio",
     "tests/mtest",
     "tools/difftest",
 ]

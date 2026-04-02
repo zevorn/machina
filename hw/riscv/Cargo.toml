@@ -13,3 +13,4 @@ machina-hw-intc = { path = "../intc" }
 machina-hw-char = { path = "../char" }
 machina-memory = { path = "../../memory" }
 machina-guest-riscv = { path = "../../guest/riscv" }
+machina-hw-virtio = { path = "../virtio" }

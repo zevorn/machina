@@ -34,6 +34,9 @@ fn usage() {
         "  --difftest    Instruction-level difftest \
          vs QEMU"
     );
+    eprintln!(
+        "  -drive file=<path>  Attach raw disk image"
+    );
     eprintln!("  -h, --help    Show this help");
 }
 
@@ -45,6 +48,7 @@ struct CliArgs {
     #[allow(dead_code)]
     nographic: bool,
     difftest: bool,
+    drive: Option<PathBuf>,
 }
 
 impl Default for CliArgs {
@@ -56,6 +60,7 @@ impl Default for CliArgs {
             kernel: None,
             nographic: false,
             difftest: false,
+            drive: None,
         }
     }
 }
@@ -103,6 +108,33 @@ fn parse_args() -> Result<CliArgs, String> {
             "--difftest" => {
                 cli.difftest = true;
             }
+            "-drive" => {
+                i += 1;
+                let s = args
+                    .get(i)
+                    .ok_or("-drive requires argument")?;
+                // Parse file=<path> from the option
+                // string (ignore if=, format=, id=).
+                let mut path = None;
+                for part in s.split(',') {
+                    if let Some(p) =
+                        part.strip_prefix("file=")
+                    {
+                        path = Some(p.to_string());
+                    }
+                }
+                cli.drive = path.map(PathBuf::from);
+                if cli.drive.is_none() {
+                    return Err(
+                        "-drive: missing file=<path>"
+                            .to_string(),
+                    );
+                }
+            }
+            "-device" => {
+                // Accept and skip for QEMU compat.
+                i += 1;
+            }
             "-h" | "--help" => {
                 usage();
                 process::exit(0);
@@ -120,7 +152,7 @@ fn install_crash_handler() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction =
-            crash_handler as usize;
+            crash_handler as *const () as usize;
         sa.sa_flags =
             libc::SA_SIGINFO | libc::SA_NODEFER;
         libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
@@ -281,6 +313,7 @@ fn main() {
         bios: cli.bios.clone(),
         append: None,
         nographic: cli.nographic,
+        drive: cli.drive.clone(),
     };
 
     eprintln!("machina: riscv64-ref, {} MiB RAM", cli.ram_mib,);

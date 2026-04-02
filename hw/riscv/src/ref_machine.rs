@@ -28,6 +28,7 @@ const SIFIVE_TEST_BASE: u64 = 0x0010_0000;
 const PLIC_BASE: u64 = 0x0C00_0000;
 const ACLINT_BASE: u64 = 0x0200_0000;
 const UART0_BASE: u64 = 0x1000_0000;
+const VIRTIO0_BASE: u64 = 0x1000_1000;
 pub const RAM_BASE: u64 = 0x8000_0000;
 
 // Region sizes.
@@ -36,8 +37,10 @@ const SIFIVE_TEST_SIZE: u64 = 0x1000;
 const PLIC_SIZE: u64 = 0x0400_0000;
 const ACLINT_SIZE: u64 = 0x0001_0000;
 const UART0_SIZE: u64 = 0x100;
+const VIRTIO0_SIZE: u64 = 0x1000;
 
 const UART_IRQ: u32 = 10;
+const VIRTIO_IRQ: u32 = 1;
 const PLIC_NUM_SOURCES: u32 = 96;
 // PLIC context count is 2 * cpu_count (M-mode + S-mode per
 // hart), computed dynamically in init().
@@ -182,6 +185,8 @@ pub struct RefMachine {
     pub(crate) kernel_path: Option<PathBuf>,
     // UART → PLIC IRQ line (source 10).
     uart_irq: Option<IrqLine>,
+    // Whether VirtIO block device is configured.
+    has_virtio: bool,
 }
 
 impl RefMachine {
@@ -204,6 +209,7 @@ impl RefMachine {
             bios_path: None,
             kernel_path: None,
             uart_irq: None,
+            has_virtio: false,
         }
     }
 
@@ -440,6 +446,30 @@ impl RefMachine {
         fdt.property_u32("interrupt-parent", plic_phandle);
         fdt.end_node();
 
+        // /soc/virtio_mmio@10001000 (if drive configured)
+        if self.has_virtio {
+            fdt.begin_node("virtio_mmio@10001000");
+            fdt.property_string(
+                "compatible",
+                "virtio,mmio",
+            );
+            fdt.property_u32_list(
+                "reg",
+                &[
+                    0,
+                    VIRTIO0_BASE as u32,
+                    0,
+                    VIRTIO0_SIZE as u32,
+                ],
+            );
+            fdt.property_u32("interrupts", VIRTIO_IRQ);
+            fdt.property_u32(
+                "interrupt-parent",
+                plic_phandle,
+            );
+            fdt.end_node();
+        }
+
         fdt.end_node(); // /soc
 
         // /chosen
@@ -535,6 +565,52 @@ impl Machine for RefMachine {
             MemoryRegion::ram("mrom", MROM_SIZE);
         self.mrom_block = Some(mrom_block);
         root.add_subregion(mrom_region, GPA::new(MROM_BASE));
+
+        // VirtIO block device (if -drive configured).
+        if let Some(ref drive_path) = opts.drive {
+            use machina_hw_virtio::block::VirtioBlk;
+            use machina_hw_virtio::mmio::VirtioMmio;
+
+            let blk = VirtioBlk::open(drive_path)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "virtio-blk: failed to open \
+                         {:?}: {}",
+                        drive_path, e
+                    );
+                });
+            let plic_sink = Arc::new(PlicIrqSink(
+                Arc::clone(
+                    self.plic.as_ref().unwrap(),
+                ),
+            ));
+            let virtio_irq = IrqLine::new(
+                plic_sink as Arc<dyn IrqSink>,
+                VIRTIO_IRQ,
+            );
+            let ram_ptr = self
+                .ram_block
+                .as_ref()
+                .unwrap()
+                .as_ptr() as *mut u8;
+            let virtio_mmio = VirtioMmio::new(
+                blk,
+                virtio_irq,
+                ram_ptr,
+                RAM_BASE,
+                opts.ram_size,
+            );
+            let virtio_region = MemoryRegion::io(
+                "virtio-mmio0",
+                VIRTIO0_SIZE,
+                Box::new(virtio_mmio),
+            );
+            root.add_subregion(
+                virtio_region,
+                GPA::new(VIRTIO0_BASE),
+            );
+            self.has_virtio = true;
+        }
 
         self.address_space = Some(AddressSpace::new(root));
 

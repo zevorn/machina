@@ -1052,13 +1052,12 @@ pub unsafe extern "C" fn machina_mem_write(
 
 // ---- longjmp-based TB abort ----
 
-/// Abort the current TB and return to the exec loop via
-/// longjmp. The caller must have already delivered the
-/// exception via raise_exception() before calling this.
-///
-/// # Safety
-/// `cpu.jmp_env` must point to a valid jmp_buf set by
-/// the exec loop's setjmp.
+// Abort the current TB and return to the exec loop via
+// longjmp. The caller must have already delivered the
+// exception via raise_exception() before calling this.
+//
+// SAFETY: cpu.jmp_env must point to a valid jmp_buf set
+// by the exec loop's setjmp.
 unsafe extern "C" {
     fn siglongjmp(env: *mut u8, val: i32) -> !;
 }
@@ -1112,7 +1111,6 @@ pub unsafe extern "C" fn machina_csr_op(
                     0,
                 );
                 cpu_loop_exit(cpu);
-                return 0; // unreachable
             }
         },
     };
@@ -1140,7 +1138,6 @@ pub unsafe extern "C" fn machina_csr_op(
                 0,
             );
             cpu_loop_exit(cpu);
-            return 0; // unreachable
         }
         let is_pmp =
             (CSR_PMPCFG0..=CSR_PMPCFG0 + 3)

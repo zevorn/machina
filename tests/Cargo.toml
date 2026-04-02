@@ -10,4 +10,7 @@ machina-decode = { path = "../decode" }
 machina-system = { path = "../system" }
 machina-memory = { path = "../memory" }
 machina-core = { path = "../core" }
+machina-hw-core = { path = "../hw/core" }
+machina-hw-virtio = { path = "../hw/virtio" }
 libc = "0.2"
+tempfile = "3"

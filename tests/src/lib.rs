@@ -16,3 +16,5 @@ mod softmmu;
 mod softmmu_exec;
 #[cfg(test)]
 mod tools;
+#[cfg(test)]
+mod virtio;

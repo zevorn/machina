@@ -11,6 +11,7 @@ pub struct MachineOpts {
     pub bios: Option<PathBuf>,
     pub append: Option<String>,
     pub nographic: bool,
+    pub drive: Option<PathBuf>,
 }
 
 pub trait Machine: Send + Sync {
