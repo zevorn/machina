@@ -18,3 +18,5 @@ mod softmmu_exec;
 mod tools;
 #[cfg(test)]
 mod virtio;
+#[cfg(test)]
+mod monitor;

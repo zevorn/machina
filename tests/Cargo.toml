@@ -12,5 +12,7 @@ machina-memory = { path = "../memory" }
 machina-core = { path = "../core" }
 machina-hw-core = { path = "../hw/core" }
 machina-hw-virtio = { path = "../hw/virtio" }
+machina-monitor = { path = "../monitor" }
 libc = "0.2"
+serde_json = "1"
 tempfile = "3"
