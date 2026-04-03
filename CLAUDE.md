@@ -217,6 +217,7 @@ trait HostCodeGen {
 - 注释使用英文，仅在关键逻辑处添加
 - 常量命名：QEMU 风格的操作码常量允许 `non_upper_case_globals`
 - `unsafe` 仅限 JIT 执行和客户内存访问
+- **测试集中管理**：所有测试**必须**写在 `tests/` crate（`machina-tests`）中，**禁止**在各 crate 内部的 `tests/` 目录或 `#[cfg(test)] mod tests` 中编写测试。各 crate 仅提供 `pub` 接口供 tests crate 调用。
 
 ## ASCII 图表规范
 
