@@ -317,7 +317,7 @@ fn test_superpage() {
 #[test]
 fn test_ad_bit_update_on_read() {
     // PTE has V|R|W|X but NOT A or D.
-    // A read should set A=1 via mem_write.
+    // A software-managed MMU should fault instead of updating A in hardware.
     let mem_size = 0x10000;
     let mem = RefCell::new(vec![0u8; mem_size]);
 
@@ -343,21 +343,21 @@ fn test_ad_bit_update_on_read() {
         mem_reader_rc(&mem),
         mem_writer_rc(&mem),
     );
-    assert_eq!(pa, Ok(0x0042));
+    assert_eq!(pa, Err(Exception::LoadPageFault));
 
-    // Verify PTE now has A=1, D still 0.
+    // Verify PTE remains unchanged.
     let updated_pte = {
         let m = mem.borrow();
         u64::from_le_bytes(m[0x3000..0x3008].try_into().unwrap())
     };
-    assert_ne!(updated_pte & PTE_A, 0, "A bit must be set");
-    assert_eq!(updated_pte & PTE_D, 0, "D bit must remain clear on read");
+    assert_eq!(updated_pte & PTE_A, 0, "A bit must remain clear");
+    assert_eq!(updated_pte & PTE_D, 0, "D bit must remain clear");
 }
 
 #[test]
 fn test_ad_bit_update_on_write() {
     // PTE has V|R|W|X but NOT A or D.
-    // A write should set both A=1 and D=1.
+    // A software-managed MMU should fault instead of updating A/D in hardware.
     let mem_size = 0x10000;
     let mem = RefCell::new(vec![0u8; mem_size]);
 
@@ -382,14 +382,15 @@ fn test_ad_bit_update_on_write() {
         mem_reader_rc(&mem),
         mem_writer_rc(&mem),
     );
-    assert_eq!(pa, Ok(0x0042));
+    assert_eq!(pa, Err(Exception::StorePageFault));
 
+    // Verify PTE remains unchanged.
     let updated_pte = {
         let m = mem.borrow();
         u64::from_le_bytes(m[0x3000..0x3008].try_into().unwrap())
     };
-    assert_ne!(updated_pte & PTE_A, 0, "A bit must be set");
-    assert_ne!(updated_pte & PTE_D, 0, "D bit must be set");
+    assert_eq!(updated_pte & PTE_A, 0, "A bit must remain clear");
+    assert_eq!(updated_pte & PTE_D, 0, "D bit must remain clear");
 }
 
 // ── SUM semantics tests ───────────────────────────────────────

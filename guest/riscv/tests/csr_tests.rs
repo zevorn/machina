@@ -8,19 +8,19 @@ fn test_mstatus_read_write() {
     let mut cpu = RiscvCpu::new();
     assert_eq!(cpu.priv_level, PrivLevel::Machine);
 
-    // mstatus starts at 0.
+    // RV64 reads back UXL=2 and SXL=2.
     let v = cpu.csr_read(CSR_MSTATUS);
-    assert_eq!(v, 0);
+    assert_eq!(v & ((3u64 << 32) | (3u64 << 34)), (2u64 << 32) | (2u64 << 34));
 
     // Write MIE (bit 3) + MPIE (bit 7).
     cpu.csr_write(CSR_MSTATUS, (1 << 3) | (1 << 7));
     let v = cpu.csr_read(CSR_MSTATUS);
     assert_eq!(v & ((1 << 3) | (1 << 7)), (1 << 3) | (1 << 7));
 
-    // Non-writable bits are masked out (e.g. UXL is read-only).
+    // Non-writable bits are WARL/read-only. RV64 reads back UXL=2.
     cpu.csr_write(CSR_MSTATUS, 3u64 << 32);
     let v = cpu.csr_read(CSR_MSTATUS);
-    assert_eq!(v & (3u64 << 32), 0);
+    assert_eq!(v & (3u64 << 32), 2u64 << 32);
 }
 
 #[test]
