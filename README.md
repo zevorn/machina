@@ -120,7 +120,7 @@ Machina is an AI-agent collaborative development project. Contributions are welc
 
 ### AI Agent Workflow
 
-This project uses [Humanize](https://github.com/humania/humanize) for structured AI development:
+This project uses [Humanize](https://github.com/humania-org/humanize) for structured AI development:
 
 - **RLCR Loop**: Round → Loop → Codex Review — iterative development with automated code review
 - **BitLesson**: Persistent knowledge base capturing debugging insights across sessions
