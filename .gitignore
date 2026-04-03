@@ -2,6 +2,7 @@
 **/*.rs.bk
 Cargo.lock
 .*/
+!.github/
 *.pptx
 __pycache__/
 
