@@ -9,7 +9,7 @@ use machina_core::machine::{Machine, MachineOpts, MachineState};
 use machina_core::wfi::WfiWaker;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_hw_char::uart::{Uart16550, Uart16550Mmio};
-use machina_hw_core::bus::SysBus;
+use machina_hw_core::bus::{SysBus, SysBusMapping};
 use machina_hw_core::chardev::{
     CharFrontend, Chardev, NullChardev, StdioChardev,
 };
@@ -139,8 +139,6 @@ pub struct RefMachine {
     pub(crate) kernel_path: Option<PathBuf>,
     // UART → PLIC IRQ line (source 10).
     uart_irq: Option<IrqLine>,
-    // Whether VirtIO block device is configured.
-    has_virtio: bool,
     // Monitor callbacks for StdioChardev.
     quit_cb: Option<Arc<dyn Fn() + Send + Sync>>,
     monitor_cb: Option<MonitorCallback>,
@@ -169,7 +167,6 @@ impl RefMachine {
             bios_path: None,
             kernel_path: None,
             uart_irq: None,
-            has_virtio: false,
             quit_cb: None,
             monitor_cb: None,
         }
@@ -183,6 +180,24 @@ impl RefMachine {
 
     pub fn sysbus(&self) -> &SysBus {
         self.sysbus.as_ref().expect("machine not initialized")
+    }
+
+    fn realized_sysbus_mapping(&self, owner: &str) -> &SysBusMapping {
+        self.sysbus()
+            .mappings()
+            .iter()
+            .find(|mapping| mapping.owner == owner)
+            .unwrap_or_else(|| panic!("missing sysbus mapping for '{owner}'"))
+    }
+
+    fn sysbus_reg_cells(&self, owner: &str) -> [u32; 4] {
+        let mapping = self.realized_sysbus_mapping(owner);
+        [
+            (mapping.base.0 >> 32) as u32,
+            mapping.base.0 as u32,
+            (mapping.size >> 32) as u32,
+            mapping.size as u32,
+        ]
     }
 
     pub fn plic(&self) -> &Arc<Mutex<Plic>> {
@@ -294,6 +309,14 @@ impl RefMachine {
 
     fn generate_fdt(&self) -> Vec<u8> {
         let mut fdt = FdtBuilder::new();
+        let plic_mapping = self.realized_sysbus_mapping("plic0");
+        let aclint_mapping = self.realized_sysbus_mapping("aclint0");
+        let uart_mapping = self.realized_sysbus_mapping("uart0");
+        let virtio_mapping = self
+            .sysbus()
+            .mappings()
+            .iter()
+            .find(|mapping| mapping.owner == "virtio-mmio0");
 
         // Phandle allocation: intc_phandle(hart) = hart + 1,
         // PLIC phandle = cpu_count + 1.
@@ -367,15 +390,12 @@ impl RefMachine {
             plic_ext.push(intc_ph);
             plic_ext.push(IRQ_SEI);
         }
-        fdt.begin_node("plic@c000000");
+        fdt.begin_node(&format!("plic@{:x}", plic_mapping.base.0));
         fdt.property_string("compatible", "sifive,plic-1.0.0");
         fdt.property_u32("#interrupt-cells", 1);
         fdt.property_bytes("interrupt-controller", &[]);
         fdt.property_u32("phandle", plic_phandle);
-        fdt.property_u32_list(
-            "reg",
-            &[0, PLIC_BASE as u32, 0, PLIC_SIZE as u32],
-        );
+        fdt.property_u32_list("reg", &self.sysbus_reg_cells("plic0"));
         fdt.property_u32("riscv,ndev", PLIC_NUM_SOURCES - 1);
         fdt.property_u32_list("interrupts-extended", &plic_ext);
         fdt.end_node();
@@ -391,12 +411,9 @@ impl RefMachine {
             clint_ext.push(intc_ph);
             clint_ext.push(IRQ_MSI);
         }
-        fdt.begin_node("clint@2000000");
+        fdt.begin_node(&format!("clint@{:x}", aclint_mapping.base.0));
         fdt.property_string("compatible", "riscv,clint0");
-        fdt.property_u32_list(
-            "reg",
-            &[0, ACLINT_BASE as u32, 0, ACLINT_SIZE as u32],
-        );
+        fdt.property_u32_list("reg", &self.sysbus_reg_cells("aclint0"));
         fdt.property_u32_list("interrupts-extended", &clint_ext);
         fdt.end_node();
 
@@ -410,23 +427,20 @@ impl RefMachine {
         fdt.end_node();
 
         // /soc/serial@10000000
-        fdt.begin_node("serial@10000000");
+        fdt.begin_node(&format!("serial@{:x}", uart_mapping.base.0));
         fdt.property_string("compatible", "ns16550a");
-        fdt.property_u32_list(
-            "reg",
-            &[0, UART0_BASE as u32, 0, UART0_SIZE as u32],
-        );
+        fdt.property_u32_list("reg", &self.sysbus_reg_cells("uart0"));
         fdt.property_u32("interrupts", UART_IRQ);
         fdt.property_u32("interrupt-parent", plic_phandle);
         fdt.end_node();
 
         // /soc/virtio_mmio@10001000 (if drive configured)
-        if self.has_virtio {
-            fdt.begin_node("virtio_mmio@10001000");
+        if let Some(mapping) = virtio_mapping {
+            fdt.begin_node(&format!("virtio_mmio@{:x}", mapping.base.0));
             fdt.property_string("compatible", "virtio,mmio");
             fdt.property_u32_list(
                 "reg",
-                &[0, VIRTIO0_BASE as u32, 0, VIRTIO0_SIZE as u32],
+                &self.sysbus_reg_cells("virtio-mmio0"),
             );
             fdt.property_u32("interrupts", VIRTIO_IRQ);
             fdt.property_u32("interrupt-parent", plic_phandle);
@@ -437,7 +451,10 @@ impl RefMachine {
 
         // /chosen
         fdt.begin_node("chosen");
-        fdt.property_string("stdout-path", "/soc/serial@10000000");
+        fdt.property_string(
+            "stdout-path",
+            &format!("/soc/serial@{:x}", uart_mapping.base.0),
+        );
         fdt.end_node();
 
         fdt.end_node(); // root
@@ -588,7 +605,6 @@ impl Machine for RefMachine {
                 virtio_mmio.make_mmio_region("virtio-mmio0", VIRTIO0_SIZE);
             virtio_mmio.register_mmio(virtio_region, GPA::new(VIRTIO0_BASE))?;
             self.virtio_mmio = Some(virtio_mmio);
-            self.has_virtio = true;
         }
 
         // ---- IRQ wiring ----

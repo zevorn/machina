@@ -103,6 +103,32 @@ fn test_ref_machine_virtio_is_realized_via_sysbus() {
 }
 
 #[test]
+fn test_ref_machine_fdt_virtio_node_tracks_sysbus_mapping() {
+    let mut image = tempfile::NamedTempFile::new().unwrap();
+    image.write_all(&[0u8; 512]).unwrap();
+
+    let mut m = RefMachine::new();
+    let mut opts = default_opts();
+    opts.drive = Some(image.path().to_path_buf());
+    m.init(&opts).expect("init failed");
+
+    let mapping = m
+        .sysbus()
+        .mappings()
+        .iter()
+        .find(|mapping| mapping.owner == "virtio-mmio0")
+        .unwrap();
+    let node_name = format!("virtio_mmio@{:x}", mapping.base.0);
+    let fdt = m.fdt_blob();
+
+    assert!(
+        fdt.windows(node_name.len())
+            .any(|window| window == node_name.as_bytes()),
+        "FDT should use sysbus-derived virtio-mmio node name"
+    );
+}
+
+#[test]
 fn test_ref_machine_fdt_valid() {
     let mut m = RefMachine::new();
     m.init(&default_opts()).expect("init failed");
