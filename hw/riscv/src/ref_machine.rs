@@ -17,6 +17,7 @@ use machina_hw_core::fdt::FdtBuilder;
 use machina_hw_core::irq::{IrqLine, IrqSink};
 use machina_hw_intc::aclint::{Aclint, AclintMmio};
 use machina_hw_intc::plic::{Plic, PlicIrqSink, PlicMmio};
+use machina_hw_virtio::mmio::VirtioMmio;
 use machina_memory::address_space::AddressSpace;
 use machina_memory::ram::RamBlock;
 use machina_memory::region::{MemoryRegion, MmioOps};
@@ -124,6 +125,7 @@ pub struct RefMachine {
     plic: Option<Arc<Mutex<Plic>>>,
     aclint: Option<Arc<Mutex<Aclint>>>,
     uart: Option<Arc<Mutex<Uart16550>>>,
+    virtio_mmio: Option<VirtioMmio>,
     sifive_test: Option<Arc<SifiveTest>>,
     fdt_blob: Option<Vec<u8>>,
     // Per-hart RiscvCpu instances. None after take_cpu().
@@ -158,6 +160,7 @@ impl RefMachine {
             plic: None,
             aclint: None,
             uart: None,
+            virtio_mmio: None,
             sifive_test: None,
             fdt_blob: None,
             cpus: Arc::new(Mutex::new(Vec::new())),
@@ -559,7 +562,6 @@ impl Machine for RefMachine {
         // VirtIO block device (if -drive configured).
         if let Some(ref drive_path) = opts.drive {
             use machina_hw_virtio::block::VirtioBlk;
-            use machina_hw_virtio::mmio::VirtioMmio;
 
             let blk = VirtioBlk::open(drive_path).unwrap_or_else(|e| {
                 panic!(
@@ -573,19 +575,19 @@ impl Machine for RefMachine {
             let virtio_irq =
                 IrqLine::new(plic_sink as Arc<dyn IrqSink>, VIRTIO_IRQ);
             let ram_ptr = self.ram_block.as_ref().unwrap().as_ptr();
-            let virtio_mmio = VirtioMmio::new(
+            let mut virtio_mmio = VirtioMmio::new_named(
+                "virtio-mmio0",
                 blk,
                 virtio_irq,
                 ram_ptr,
                 RAM_BASE,
                 opts.ram_size,
             );
-            let virtio_region = MemoryRegion::io(
-                "virtio-mmio0",
-                VIRTIO0_SIZE,
-                Box::new(virtio_mmio),
-            );
-            root.add_subregion(virtio_region, GPA::new(VIRTIO0_BASE));
+            virtio_mmio.attach_to_bus(&sysbus)?;
+            let virtio_region =
+                virtio_mmio.make_mmio_region("virtio-mmio0", VIRTIO0_SIZE);
+            virtio_mmio.register_mmio(virtio_region, GPA::new(VIRTIO0_BASE))?;
+            self.virtio_mmio = Some(virtio_mmio);
             self.has_virtio = true;
         }
 
@@ -670,6 +672,9 @@ impl Machine for RefMachine {
                 .lock()
                 .unwrap()
                 .realize_onto(&mut sysbus, address_space)?;
+            if let Some(virtio_mmio) = self.virtio_mmio.as_mut() {
+                virtio_mmio.realize_onto(&mut sysbus, address_space)?;
+            }
         }
 
         // ---- Attach IRQ + chardev to UART ----
@@ -725,6 +730,9 @@ impl Machine for RefMachine {
         }
         if let Some(uart) = &self.uart {
             uart.lock().unwrap().reset_runtime();
+        }
+        if let Some(virtio_mmio) = &mut self.virtio_mmio {
+            virtio_mmio.reset_runtime();
         }
     }
 

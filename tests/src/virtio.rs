@@ -2,10 +2,14 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use machina_core::address::GPA;
+use machina_hw_core::bus::SysBus;
 use machina_hw_core::irq::{IrqLine, IrqSink};
 use machina_hw_virtio::block::VirtioBlk;
 use machina_hw_virtio::mmio::VirtioMmio;
 use machina_hw_virtio::queue::VirtQueue;
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::MemoryRegion;
 use machina_memory::region::MmioOps;
 
 struct DummySink {
@@ -35,6 +39,10 @@ fn make_test_device() -> (VirtioMmio, Arc<DummySink>) {
         128 * 1024 * 1024,
     );
     (mmio, sink)
+}
+
+fn make_address_space() -> AddressSpace {
+    AddressSpace::new(MemoryRegion::container("system", u64::MAX))
 }
 
 #[test]
@@ -113,4 +121,21 @@ fn test_virtio_queue_num_max() {
     let (dev, _) = make_test_device();
     dev.write(0x030, 4, 0); // QUEUE_SEL = 0
     assert_eq!(dev.read(0x034, 4), 256);
+}
+
+#[test]
+fn test_virtio_realize_via_sysbus_maps_mmio() {
+    let (mut dev, _) = make_test_device();
+    let mut bus = SysBus::new("sysbus0");
+    dev.attach_to_bus(&bus).unwrap();
+    let region = dev.make_mmio_region("virtio-mmio0", 0x1000);
+    dev.register_mmio(region, GPA::new(0x1000_1000)).unwrap();
+
+    let mut address_space = make_address_space();
+    dev.realize_onto(&mut bus, &mut address_space).unwrap();
+
+    assert!(address_space.is_mapped(GPA::new(0x1000_1000), 4));
+    assert_eq!(address_space.read(GPA::new(0x1000_1000), 4), 0x74726976);
+    assert_eq!(bus.mappings().len(), 1);
+    assert_eq!(bus.mappings()[0].owner, "virtio-mmio");
 }

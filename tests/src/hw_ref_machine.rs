@@ -2,6 +2,7 @@ use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts};
 use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_hw_riscv::ref_machine::{RefMachine, MROM_BASE, RAM_BASE};
+use std::io::Write;
 
 fn default_opts() -> MachineOpts {
     MachineOpts {
@@ -80,6 +81,25 @@ fn test_ref_machine_uart_is_realized_via_sysbus() {
 
     let uart = m.uart().lock().unwrap();
     assert_eq!(uart.chardev_property(), Some("/machine/chardev/uart0"));
+}
+
+#[test]
+fn test_ref_machine_virtio_is_realized_via_sysbus() {
+    let mut image = tempfile::NamedTempFile::new().unwrap();
+    image.write_all(&[0u8; 512]).unwrap();
+
+    let mut m = RefMachine::new();
+    let mut opts = default_opts();
+    opts.drive = Some(image.path().to_path_buf());
+    m.init(&opts).expect("init failed");
+
+    assert_eq!(m.sysbus().mappings().len(), 4);
+    assert!(m
+        .sysbus()
+        .mappings()
+        .iter()
+        .any(|mapping| mapping.owner == "virtio-mmio0"));
+    assert_eq!(m.address_space().read(GPA::new(0x1000_1000), 4), 0x74726976);
 }
 
 #[test]
