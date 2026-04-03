@@ -1,8 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use machina_hw_core::chardev::{
-    CharFrontend, Chardev, NullChardev, SocketChardev,
-    StdioChardev,
+    CharFrontend, Chardev, NullChardev, SocketChardev, StdioChardev,
 };
 
 #[test]
@@ -57,10 +56,7 @@ fn test_char_frontend_write_through() {
     let mut fe = CharFrontend::new(Box::new(backend));
 
     fe.write(b"hello");
-    assert_eq!(
-        *sink.lock().unwrap(),
-        b"hello".to_vec()
-    );
+    assert_eq!(*sink.lock().unwrap(), b"hello".to_vec());
 }
 
 #[test]

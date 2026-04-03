@@ -30,10 +30,7 @@ fn test_exception_to_m_mode() {
     // Enable MIE so we can verify it gets cleared.
     cpu.csr.mstatus |= 1 << 3; // MIE
 
-    cpu.raise_exception(
-        Exception::IllegalInstruction,
-        0xDEAD,
-    );
+    cpu.raise_exception(Exception::IllegalInstruction, 0xDEAD);
 
     // Should trap to M-mode.
     assert_eq!(cpu.priv_level, PrivLevel::Machine);
@@ -63,10 +60,7 @@ fn test_exception_delegated_to_s_mode() {
     // Enable SIE so we can verify it gets cleared.
     cpu.csr.mstatus |= 1 << 1; // SIE
 
-    cpu.raise_exception(
-        Exception::IllegalInstruction,
-        0xBEEF,
-    );
+    cpu.raise_exception(Exception::IllegalInstruction, 0xBEEF);
 
     // Should trap to S-mode.
     assert_eq!(cpu.priv_level, PrivLevel::Supervisor);

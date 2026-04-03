@@ -387,8 +387,7 @@ where
         if !tb.invalid.load(Ordering::Acquire)
             && tb.pc == pc
             && tb.flags == flags
-            && (cur_phys == u64::MAX
-                || tb.phys_pc == cur_phys)
+            && (cur_phys == u64::MAX || tb.phys_pc == cur_phys)
         {
             per_cpu.stats.jc_hit += 1;
             return Some(idx);
@@ -396,13 +395,9 @@ where
     }
 
     // Slow path: hash table.
-    if let Some(idx) =
-        shared.tb_store.lookup(pc, flags)
-    {
+    if let Some(idx) = shared.tb_store.lookup(pc, flags) {
         let tb = shared.tb_store.get(idx);
-        if cur_phys == u64::MAX
-            || tb.phys_pc == cur_phys
-        {
+        if cur_phys == u64::MAX || tb.phys_pc == cur_phys {
             per_cpu.jump_cache.insert(pc, idx);
             per_cpu.stats.ht_hit += 1;
             return Some(idx);

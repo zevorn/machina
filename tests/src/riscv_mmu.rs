@@ -17,35 +17,26 @@ fn write_pte(mem: &mut [u8], addr: u64, pte: u64) {
 fn mem_reader(mem: &[u8]) -> impl Fn(u64) -> u64 + '_ {
     move |addr: u64| {
         let off = addr as usize;
-        u64::from_le_bytes(
-            mem[off..off + 8].try_into().unwrap(),
-        )
+        u64::from_le_bytes(mem[off..off + 8].try_into().unwrap())
     }
 }
 
 /// Build a `mem_read` closure over a RefCell byte slice
 /// (for tests that also need `mem_write`).
-fn mem_reader_rc(
-    mem: &RefCell<Vec<u8>>,
-) -> impl Fn(u64) -> u64 + '_ {
+fn mem_reader_rc(mem: &RefCell<Vec<u8>>) -> impl Fn(u64) -> u64 + '_ {
     move |addr: u64| {
         let m = mem.borrow();
         let off = addr as usize;
-        u64::from_le_bytes(
-            m[off..off + 8].try_into().unwrap(),
-        )
+        u64::from_le_bytes(m[off..off + 8].try_into().unwrap())
     }
 }
 
 /// Build a `mem_write` closure over a RefCell byte slice.
-fn mem_writer_rc(
-    mem: &RefCell<Vec<u8>>,
-) -> impl FnMut(u64, u64) + '_ {
+fn mem_writer_rc(mem: &RefCell<Vec<u8>>) -> impl FnMut(u64, u64) + '_ {
     move |addr: u64, val: u64| {
         let mut m = mem.borrow_mut();
         let off = addr as usize;
-        m[off..off + 8]
-            .copy_from_slice(&val.to_le_bytes());
+        m[off..off + 8].copy_from_slice(&val.to_le_bytes());
     }
 }
 
@@ -90,8 +81,7 @@ fn test_bare_mode_passthrough() {
     assert_eq!(mmu.get_satp(), 0);
 
     let dummy = |_addr: u64| -> u64 { 0 };
-    let addrs: &[u64] =
-        &[0, 0x1000, 0x8000_0000, u64::MAX];
+    let addrs: &[u64] = &[0, 0x1000, 0x8000_0000, u64::MAX];
     for &gva in addrs {
         let pa = mmu.translate(
             gva,
@@ -114,8 +104,7 @@ fn test_sv39_identity_map() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags =
-        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -155,8 +144,7 @@ fn test_sv39_page_fault() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags =
-        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -230,8 +218,7 @@ fn test_tlb_hit() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags =
-        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -278,13 +265,7 @@ fn test_superpage() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     let mega_ppn: u64 = 0x200;
-    let flags = PTE_V
-        | PTE_R
-        | PTE_W
-        | PTE_X
-        | PTE_U
-        | PTE_A
-        | PTE_D;
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
     write_pte(&mut mem, 0x2000, leaf_pte(mega_ppn, flags));
 
     let mut mmu = Mmu::new();
@@ -365,16 +346,10 @@ fn test_ad_bit_update_on_read() {
     // Verify PTE now has A=1, D still 0.
     let updated_pte = {
         let m = mem.borrow();
-        u64::from_le_bytes(
-            m[0x3000..0x3008].try_into().unwrap(),
-        )
+        u64::from_le_bytes(m[0x3000..0x3008].try_into().unwrap())
     };
     assert_ne!(updated_pte & PTE_A, 0, "A bit must be set");
-    assert_eq!(
-        updated_pte & PTE_D,
-        0,
-        "D bit must remain clear on read"
-    );
+    assert_eq!(updated_pte & PTE_D, 0, "D bit must remain clear on read");
 }
 
 #[test]
@@ -409,9 +384,7 @@ fn test_ad_bit_update_on_write() {
     // Verify PTE now has A=1 and D=1.
     let updated_pte = {
         let m = mem.borrow();
-        u64::from_le_bytes(
-            m[0x3000..0x3008].try_into().unwrap(),
-        )
+        u64::from_le_bytes(m[0x3000..0x3008].try_into().unwrap())
     };
     assert_ne!(updated_pte & PTE_A, 0, "A bit must be set");
     assert_ne!(updated_pte & PTE_D, 0, "D bit must be set");
@@ -427,13 +400,7 @@ fn test_sum_blocks_s_mode_execute_on_u_page() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags = PTE_V
-        | PTE_R
-        | PTE_W
-        | PTE_X
-        | PTE_U
-        | PTE_A
-        | PTE_D;
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -466,13 +433,7 @@ fn test_sum_allows_s_mode_read_on_u_page() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags = PTE_V
-        | PTE_R
-        | PTE_W
-        | PTE_X
-        | PTE_U
-        | PTE_A
-        | PTE_D;
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -507,8 +468,7 @@ fn test_pmp_deny_after_translation() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags =
-        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -549,8 +509,7 @@ fn test_pmp_subpage_deny() {
     // Identity-map page 0.
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags =
-        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();

@@ -1,9 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use machina_hw_core::irq::{
-    IrqLine, IrqSink, OrIrq, SplitIrq,
-};
+use machina_hw_core::irq::{IrqLine, IrqSink, OrIrq, SplitIrq};
 
 /// Simple test sink that records the last level and
 /// the number of set_irq calls.

@@ -18,8 +18,7 @@ impl TestIrqSink {
     }
 
     fn level(&self, irq: u32) -> bool {
-        self.levels[irq as usize]
-            .load(Ordering::Relaxed)
+        self.levels[irq as usize].load(Ordering::Relaxed)
     }
 }
 
@@ -36,9 +35,7 @@ fn test_aclint_mtime_wall_clock() {
     let aclint = Aclint::new(2);
 
     let t0 = aclint.read(0xBFF8, 8);
-    std::thread::sleep(
-        std::time::Duration::from_millis(100),
-    );
+    std::thread::sleep(std::time::Duration::from_millis(100));
     let t1 = aclint.read(0xBFF8, 8);
 
     // 100ms at 10 MHz = ~1_000_000 ticks.
@@ -115,10 +112,7 @@ fn test_aclint_mti_output() {
 
     let sink = Arc::new(TestIrqSink::new(16));
     let mti_irq = 7u32;
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        mti_irq,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti_irq);
     aclint.connect_mti(0, line);
 
     // Set mtimecmp[0] = 100.
@@ -152,25 +146,16 @@ fn test_aclint_msi_output() {
 
     let sink = Arc::new(TestIrqSink::new(16));
     let msi_irq = 3u32;
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        msi_irq,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, msi_irq);
     aclint.connect_msi(0, line);
 
     assert!(!sink.level(msi_irq), "MSI should be low");
 
     aclint.write(0x0000, 4, 1);
-    assert!(
-        sink.level(msi_irq),
-        "MSI should go high after msip=1"
-    );
+    assert!(sink.level(msi_irq), "MSI should go high after msip=1");
 
     aclint.write(0x0000, 4, 0);
-    assert!(
-        !sink.level(msi_irq),
-        "MSI should go low after msip=0"
-    );
+    assert!(!sink.level(msi_irq), "MSI should go low after msip=0");
 }
 
 #[test]
@@ -197,10 +182,7 @@ fn test_aclint_mtimecmp_disable() {
     let mut aclint = Aclint::new(1);
     let sink = Arc::new(TestIrqSink::new(16));
     let mti = 7u32;
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        mti,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
     aclint.connect_mti(0, line);
 
     // Set mtimecmp to a near-future value, then disable.
@@ -222,19 +204,13 @@ fn test_aclint_mtimecmp_retarget_past() {
     let mut aclint = Aclint::new(1);
     let sink = Arc::new(TestIrqSink::new(16));
     let mti = 7u32;
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        mti,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
     aclint.connect_mti(0, line);
 
     // Set mtime high, then set mtimecmp to past value.
     aclint.write(0xBFF8, 8, 1000);
     aclint.write(0x4000, 8, 500);
-    assert!(
-        sink.level(mti),
-        "MTI should be high when mtimecmp < mtime"
-    );
+    assert!(sink.level(mti), "MTI should be high when mtimecmp < mtime");
 }
 
 #[test]
@@ -242,10 +218,7 @@ fn test_aclint_timer_thread_asserts_mti() {
     let mut aclint = Aclint::new(1);
     let sink = Arc::new(TestIrqSink::new(16));
     let mti = 7u32;
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        mti,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
     aclint.connect_mti(0, line);
 
     // Set mtime near current wall clock, mtimecmp 10ms
@@ -253,19 +226,11 @@ fn test_aclint_timer_thread_asserts_mti() {
     let now = aclint.read(0xBFF8, 8);
     aclint.write(0x4000, 8, now + 100_000); // 10ms
 
-    assert!(
-        !sink.level(mti),
-        "MTI should be low before deadline"
-    );
+    assert!(!sink.level(mti), "MTI should be low before deadline");
 
     // Wait for timer thread to fire.
-    std::thread::sleep(
-        std::time::Duration::from_millis(30),
-    );
-    assert!(
-        sink.level(mti),
-        "MTI should be high after timer deadline"
-    );
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert!(sink.level(mti), "MTI should be high after timer deadline");
 }
 
 #[test]
@@ -273,10 +238,7 @@ fn test_aclint_retarget_future_cancels_stale_timer() {
     let mut aclint = Aclint::new(1);
     let sink = Arc::new(TestIrqSink::new(16));
     let mti = 7u32;
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        mti,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
     aclint.connect_mti(0, line);
 
     let now = aclint.read(0xBFF8, 8);
@@ -288,9 +250,7 @@ fn test_aclint_retarget_future_cancels_stale_timer() {
 
     // After 50ms, old timer would have fired but MTI
     // should still be low because it was cancelled.
-    std::thread::sleep(
-        std::time::Duration::from_millis(50),
-    );
+    std::thread::sleep(std::time::Duration::from_millis(50));
     assert!(
         !sink.level(mti),
         "MTI must stay low after retarget cancelled \
@@ -300,9 +260,7 @@ fn test_aclint_retarget_future_cancels_stale_timer() {
     // Now retarget to near future (10ms from current).
     let now2 = aclint.read(0xBFF8, 8);
     aclint.write(0x4000, 8, now2 + 100_000); // 10ms
-    std::thread::sleep(
-        std::time::Duration::from_millis(30),
-    );
+    std::thread::sleep(std::time::Duration::from_millis(30));
     assert!(
         sink.level(mti),
         "MTI should be high after retarget to near \

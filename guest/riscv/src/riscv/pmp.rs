@@ -231,4 +231,3 @@ fn access_fault(access: AccessType) -> Exception {
         AccessType::Execute => Exception::InstructionAccessFault,
     }
 }
-

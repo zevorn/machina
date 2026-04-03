@@ -62,4 +62,3 @@ addr_type! {
     /// Host Virtual Address.
     HVA
 }
-

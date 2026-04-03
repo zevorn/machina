@@ -29,48 +29,36 @@ fn test_clock_zero_freq() {
 #[test]
 fn test_clock_propagation() {
     let mut parent = DeviceClock::new(100_000_000);
-    let child =
-        Arc::new(Mutex::new(DeviceClock::new(0)));
+    let child = Arc::new(Mutex::new(DeviceClock::new(0)));
     parent.add_child(&child);
 
     // Propagate 100 MHz to child (1:1 ratio).
     parent.propagate();
-    assert_eq!(
-        child.lock().unwrap().freq_hz(),
-        100_000_000
-    );
+    assert_eq!(child.lock().unwrap().freq_hz(), 100_000_000);
 
     // Change parent and propagate again.
     parent.set_freq_and_propagate(200_000_000);
-    assert_eq!(
-        child.lock().unwrap().freq_hz(),
-        200_000_000
-    );
+    assert_eq!(child.lock().unwrap().freq_hz(), 200_000_000);
 }
 
 #[test]
 fn test_clock_multiplier() {
     let mut parent = DeviceClock::new(50_000_000);
-    let child =
-        Arc::new(Mutex::new(DeviceClock::new(0)));
+    let child = Arc::new(Mutex::new(DeviceClock::new(0)));
     child.lock().unwrap().multiplier = 2;
 
     parent.add_child(&child);
     parent.propagate();
 
     // Child should get 2x the parent frequency.
-    assert_eq!(
-        child.lock().unwrap().freq_hz(),
-        100_000_000
-    );
+    assert_eq!(child.lock().unwrap().freq_hz(), 100_000_000);
 }
 
 #[test]
 fn test_clock_dead_child() {
     let mut parent = DeviceClock::new(100_000_000);
     {
-        let child =
-            Arc::new(Mutex::new(DeviceClock::new(0)));
+        let child = Arc::new(Mutex::new(DeviceClock::new(0)));
         parent.add_child(&child);
         // child dropped here
     }

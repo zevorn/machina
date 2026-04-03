@@ -1,9 +1,7 @@
 use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts};
 use machina_guest_riscv::riscv::csr::PrivLevel;
-use machina_hw_riscv::ref_machine::{
-    RefMachine, MROM_BASE, RAM_BASE,
-};
+use machina_hw_riscv::ref_machine::{RefMachine, MROM_BASE, RAM_BASE};
 
 fn default_opts() -> MachineOpts {
     MachineOpts {
@@ -21,6 +19,7 @@ fn default_opts() -> MachineOpts {
 fn test_ref_machine_init() {
     let mut m = RefMachine::new();
     assert_eq!(m.name(), "riscv64-ref");
+    assert_eq!(m.machine_state().object().object_path(), Some("/machine"));
     m.init(&default_opts()).expect("init failed");
     assert_eq!(m.cpu_count(), 1);
     assert_eq!(m.ram_size(), 128 * 1024 * 1024);
@@ -65,24 +64,17 @@ fn test_ref_machine_fdt_valid() {
 
     // FDT magic: 0xD00DFEED big-endian at offset 0.
     assert!(fdt.len() >= 4, "FDT too short");
-    let magic = u32::from_be_bytes(
-        [fdt[0], fdt[1], fdt[2], fdt[3]],
-    );
-    assert_eq!(
-        magic, 0xD00D_FEED,
-        "bad FDT magic: {magic:#010x}"
-    );
+    let magic = u32::from_be_bytes([fdt[0], fdt[1], fdt[2], fdt[3]]);
+    assert_eq!(magic, 0xD00D_FEED, "bad FDT magic: {magic:#010x}");
 
     // FDT must contain "riscv,sv39".
     let sv39 = b"riscv,sv39";
-    let has_sv39 =
-        fdt.windows(sv39.len()).any(|w| w == sv39);
+    let has_sv39 = fdt.windows(sv39.len()).any(|w| w == sv39);
     assert!(has_sv39, "FDT missing riscv,sv39 mmu-type");
 
     // Must NOT contain sv48.
     let sv48 = b"riscv,sv48";
-    let has_sv48 =
-        fdt.windows(sv48.len()).any(|w| w == sv48);
+    let has_sv48 = fdt.windows(sv48.len()).any(|w| w == sv48);
     assert!(!has_sv48, "FDT still contains riscv,sv48");
 }
 
@@ -92,8 +84,7 @@ fn test_ref_machine_fdt_has_cpu() {
     m.init(&default_opts()).expect("init failed");
     let fdt = m.fdt_blob();
 
-    let has_cpu =
-        fdt.windows(3).any(|w| w == b"cpu");
+    let has_cpu = fdt.windows(3).any(|w| w == b"cpu");
     assert!(has_cpu, "FDT does not contain 'cpu'");
 }
 
@@ -148,8 +139,7 @@ fn test_ref_machine_plic_contexts_multi_hart() {
     // 2 harts -> 4 PLIC contexts (M+S per hart).
     let as_ = m.address_space();
     let plic_base = 0x0C00_0000u64;
-    let ctx3_enable =
-        GPA::new(plic_base + 0x2000 + 3 * 0x80);
+    let ctx3_enable = GPA::new(plic_base + 0x2000 + 3 * 0x80);
     as_.write(ctx3_enable, 4, 0xFFFF_FFFF);
     let val = as_.read(ctx3_enable, 4);
     assert_eq!(
@@ -159,13 +149,9 @@ fn test_ref_machine_plic_contexts_multi_hart() {
     );
 
     // Context 4 should be out of range.
-    let ctx4_enable =
-        GPA::new(plic_base + 0x2000 + 4 * 0x80);
+    let ctx4_enable = GPA::new(plic_base + 0x2000 + 4 * 0x80);
     let val4 = as_.read(ctx4_enable, 4);
-    assert_eq!(
-        val4, 0,
-        "PLIC context 4 should be out of range"
-    );
+    assert_eq!(val4, 0, "PLIC context 4 should be out of range");
 }
 
 #[test]
@@ -200,11 +186,7 @@ fn test_ref_machine_irq_wiring() {
     // Verify CPU mip: MEI (11) should be low.
     let cpus = m.cpus_lock();
     let cpu = cpus[0].as_ref().unwrap();
-    assert_eq!(
-        cpu.csr.mip & (1 << 11),
-        0,
-        "MEI should be low initially"
-    );
+    assert_eq!(cpu.csr.mip & (1 << 11), 0, "MEI should be low initially");
 }
 
 #[test]
@@ -232,11 +214,7 @@ fn test_uart_tx_through_machine() {
         let mut uart = m.uart().lock().unwrap();
         uart.write(0, 0x58); // 'X'
         let lsr = uart.read(5);
-        assert_ne!(
-            lsr & 0x20,
-            0,
-            "THRE should remain set after TX"
-        );
+        assert_ne!(lsr & 0x20, 0, "THRE should remain set after TX");
     }
 }
 
@@ -255,10 +233,7 @@ fn test_uart_rx_irq_to_plic() {
     {
         let mut uart = m.uart().lock().unwrap();
         uart.receive(0x42);
-        assert!(
-            uart.irq_pending(),
-            "UART IRQ should be pending"
-        );
+        assert!(uart.irq_pending(), "UART IRQ should be pending");
     }
 
     // Verify PLIC has pending bit 10 set.
@@ -276,10 +251,7 @@ fn test_uart_rx_irq_to_plic() {
     {
         let mut uart = m.uart().lock().unwrap();
         let _ = uart.read(0);
-        assert!(
-            !uart.irq_pending(),
-            "UART IRQ should be cleared after read"
-        );
+        assert!(!uart.irq_pending(), "UART IRQ should be cleared after read");
     }
 
     // PLIC pending bit should now be clear.
@@ -324,26 +296,15 @@ fn test_take_cpu_preserves_boot_state() {
     m.init(&opts).expect("init failed");
     m.boot().expect("boot failed");
 
-    let cpu =
-        m.take_cpu(0).expect("take_cpu failed");
+    let cpu = m.take_cpu(0).expect("take_cpu failed");
     assert_eq!(cpu.pc, MROM_BASE, "pc preserved");
-    assert_eq!(
-        cpu.priv_level,
-        PrivLevel::Machine,
-        "priv preserved"
-    );
+    assert_eq!(cpu.priv_level, PrivLevel::Machine, "priv preserved");
 
     let cpus = m.cpus_lock();
-    assert!(
-        cpus[0].is_none(),
-        "cpus[0] must be None after take"
-    );
+    assert!(cpus[0].is_none(), "cpus[0] must be None after take");
 
     drop(cpus);
-    assert!(
-        m.take_cpu(0).is_none(),
-        "double take must return None"
-    );
+    assert!(m.take_cpu(0).is_none(), "double take must return None");
 }
 
 #[test]
@@ -353,8 +314,7 @@ fn test_fdt_has_phandle() {
     let fdt = m.fdt_blob();
 
     let needle = b"phandle";
-    let found =
-        fdt.windows(needle.len()).any(|w| w == needle);
+    let found = fdt.windows(needle.len()).any(|w| w == needle);
     assert!(found, "FDT should contain phandle property");
 }
 
@@ -365,12 +325,8 @@ fn test_fdt_has_interrupts_extended() {
     let fdt = m.fdt_blob();
 
     let needle = b"interrupts-extended";
-    let found =
-        fdt.windows(needle.len()).any(|w| w == needle);
-    assert!(
-        found,
-        "FDT should contain interrupts-extended"
-    );
+    let found = fdt.windows(needle.len()).any(|w| w == needle);
+    assert!(found, "FDT should contain interrupts-extended");
 }
 
 #[test]
@@ -429,41 +385,28 @@ fn test_mrom_reset_vector_content() {
 
     let as_ = m.address_space();
     // First instruction: auipc t0, 0
-    let insn0 =
-        as_.read(GPA::new(MROM_BASE), 4) as u32;
+    let insn0 = as_.read(GPA::new(MROM_BASE), 4) as u32;
     assert_eq!(insn0, 0x0000_0297, "auipc t0, 0");
     // Second: addi a2, t0, 0x28
-    let insn1 =
-        as_.read(GPA::new(MROM_BASE + 4), 4) as u32;
-    assert_eq!(
-        insn1, 0x0282_8613,
-        "addi a2, t0, 0x28"
-    );
+    let insn1 = as_.read(GPA::new(MROM_BASE + 4), 4) as u32;
+    assert_eq!(insn1, 0x0282_8613, "addi a2, t0, 0x28");
     // Third: csrr a0, mhartid
-    let insn2 =
-        as_.read(GPA::new(MROM_BASE + 8), 4) as u32;
-    assert_eq!(
-        insn2, 0xf140_2573,
-        "csrr a0, mhartid"
-    );
+    let insn2 = as_.read(GPA::new(MROM_BASE + 8), 4) as u32;
+    assert_eq!(insn2, 0xf140_2573, "csrr a0, mhartid");
     // Sixth: jr t0
-    let insn5 =
-        as_.read(GPA::new(MROM_BASE + 0x14), 4) as u32;
+    let insn5 = as_.read(GPA::new(MROM_BASE + 0x14), 4) as u32;
     assert_eq!(insn5, 0x0002_8067, "jr t0");
 
     // start_addr at offset 0x18 (dword).
-    let start =
-        as_.read(GPA::new(MROM_BASE + 0x18), 8);
+    let start = as_.read(GPA::new(MROM_BASE + 0x18), 8);
     assert_eq!(start, RAM_BASE, "start_addr = RAM_BASE");
 
     // fdt_addr at offset 0x20 (dword): within RAM.
-    let fdt =
-        as_.read(GPA::new(MROM_BASE + 0x20), 8);
+    let fdt = as_.read(GPA::new(MROM_BASE + 0x20), 8);
     assert!(fdt >= RAM_BASE, "fdt_addr within RAM");
 
     // fw_dynamic_info magic at offset 0x28.
-    let magic =
-        as_.read(GPA::new(MROM_BASE + 0x28), 8);
+    let magic = as_.read(GPA::new(MROM_BASE + 0x28), 8);
     assert_eq!(magic, 0x4942534f, "OSBI magic");
 }
 
@@ -475,10 +418,7 @@ fn test_sifive_test_mmio_read_returns_zero() {
     m.init(&default_opts()).expect("init failed");
     let as_ = m.address_space();
     let val = as_.read(GPA::new(0x10_0000), 4);
-    assert_eq!(
-        val, 0,
-        "SiFive Test MMIO read must return 0"
-    );
+    assert_eq!(val, 0, "SiFive Test MMIO read must return 0");
 }
 
 #[test]
@@ -487,12 +427,8 @@ fn test_sifive_test_dtb_has_node() {
     m.init(&default_opts()).expect("init failed");
     let fdt = m.fdt_blob();
     let needle = b"sifive,test0";
-    let found =
-        fdt.windows(needle.len()).any(|w| w == needle);
-    assert!(
-        found,
-        "FDT must contain 'sifive,test0' compatible"
-    );
+    let found = fdt.windows(needle.len()).any(|w| w == needle);
+    assert!(found, "FDT must contain 'sifive,test0' compatible");
 }
 
 #[test]

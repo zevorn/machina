@@ -2,9 +2,7 @@ use machina_hw_core::fdt::FdtBuilder;
 
 /// Read a big-endian u32 from a byte slice at `offset`.
 fn read_be_u32(blob: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes(
-        blob[offset..offset + 4].try_into().unwrap(),
-    )
+    u32::from_be_bytes(blob[offset..offset + 4].try_into().unwrap())
 }
 
 #[test]
@@ -50,10 +48,6 @@ fn test_fdt_string_property() {
     // The string "riscv-virtio\0" must appear in the
     // structure block as the property value.
     let needle = b"riscv-virtio\0";
-    let found =
-        blob.windows(needle.len()).any(|w| w == needle);
-    assert!(
-        found,
-        "string property value must be null-terminated"
-    );
+    let found = blob.windows(needle.len()).any(|w| w == needle);
+    assert!(found, "string property value must be null-terminated");
 }

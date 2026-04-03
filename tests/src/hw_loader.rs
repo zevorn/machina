@@ -19,8 +19,8 @@ fn make_ram_as(size: u64) -> AddressSpace {
 fn test_load_binary() {
     let as_ = make_ram_as(0x1000);
     let data: Vec<u8> = (0u8..16).collect();
-    let info = load_binary(&data, GPA::new(0x100), &as_)
-        .expect("load_binary failed");
+    let info =
+        load_binary(&data, GPA::new(0x100), &as_).expect("load_binary failed");
     assert_eq!(info.entry, GPA::new(0x100));
     assert_eq!(info.size, 16);
 
@@ -36,16 +36,13 @@ fn test_load_binary_alignment() {
     let as_ = make_ram_as(0x1000);
     // 5 bytes -- not a multiple of 4.
     let data = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
-    let info = load_binary(&data, GPA::new(0x200), &as_)
-        .expect("load_binary failed");
+    let info =
+        load_binary(&data, GPA::new(0x200), &as_).expect("load_binary failed");
     assert_eq!(info.size, 5);
 
     // First 4 bytes form one u32 write.
     let v0 = as_.read_u32(GPA::new(0x200));
-    assert_eq!(
-        v0,
-        u32::from_le_bytes([0xAA, 0xBB, 0xCC, 0xDD]),
-    );
+    assert_eq!(v0, u32::from_le_bytes([0xAA, 0xBB, 0xCC, 0xDD]),);
     // Remaining 1 byte is written as a partial u32.
     let v1 = as_.read_u32(GPA::new(0x204));
     assert_eq!(v1, 0xEE);
@@ -61,8 +58,8 @@ fn test_load_binary_odd_size() {
     as_.write(GPA::new(0x105), 1, 0xFF);
 
     let data: [u8; 5] = [0x10, 0x20, 0x30, 0x40, 0x50];
-    let info = load_binary(&data, GPA::new(0x100), &as_)
-        .expect("load_binary failed");
+    let info =
+        load_binary(&data, GPA::new(0x100), &as_).expect("load_binary failed");
     assert_eq!(info.size, 5);
 
     // Byte 4 (index 4) must be 0x50.
@@ -81,8 +78,7 @@ fn test_load_elf_simple() {
     let as_ = make_ram_as(0x10000);
 
     let entry: u64 = 0x1000;
-    let payload: [u8; 7] =
-        [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x42];
+    let payload: [u8; 7] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x42];
     let p_paddr: u64 = 0x2000;
 
     // -- ELF header (64 bytes) --
@@ -112,42 +108,30 @@ fn test_load_elf_simple() {
     // -- Program header (56 bytes at offset 64) --
     let ph = 64usize;
     // p_type = PT_LOAD (1)
-    elf[ph..ph + 4]
-        .copy_from_slice(&1u32.to_le_bytes());
+    elf[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes());
     // p_offset = end of headers (64 + 56 = 120)
     let p_offset: u64 = 120;
-    elf[ph + 8..ph + 16]
-        .copy_from_slice(&p_offset.to_le_bytes());
+    elf[ph + 8..ph + 16].copy_from_slice(&p_offset.to_le_bytes());
     // p_vaddr
-    elf[ph + 16..ph + 24]
-        .copy_from_slice(&p_paddr.to_le_bytes());
+    elf[ph + 16..ph + 24].copy_from_slice(&p_paddr.to_le_bytes());
     // p_paddr
-    elf[ph + 24..ph + 32]
-        .copy_from_slice(&p_paddr.to_le_bytes());
+    elf[ph + 24..ph + 32].copy_from_slice(&p_paddr.to_le_bytes());
     // p_filesz
     let filesz = payload.len() as u64;
-    elf[ph + 32..ph + 40]
-        .copy_from_slice(&filesz.to_le_bytes());
+    elf[ph + 32..ph + 40].copy_from_slice(&filesz.to_le_bytes());
     // p_memsz (same as filesz, no BSS)
-    elf[ph + 40..ph + 48]
-        .copy_from_slice(&filesz.to_le_bytes());
+    elf[ph + 40..ph + 48].copy_from_slice(&filesz.to_le_bytes());
 
     // Append payload
     elf.extend_from_slice(&payload);
 
-    let info =
-        load_elf(&elf, &as_).expect("load_elf failed");
+    let info = load_elf(&elf, &as_).expect("load_elf failed");
     assert_eq!(info.entry, GPA::new(entry));
     assert_eq!(info.size, payload.len() as u64);
 
     // Verify loaded bytes.
     for (i, &expected) in payload.iter().enumerate() {
-        let actual =
-            as_.read(GPA::new(p_paddr + i as u64), 1)
-                as u8;
-        assert_eq!(
-            actual, expected,
-            "mismatch at offset {i}"
-        );
+        let actual = as_.read(GPA::new(p_paddr + i as u64), 1) as u8;
+        assert_eq!(actual, expected, "mismatch at offset {i}");
     }
 }

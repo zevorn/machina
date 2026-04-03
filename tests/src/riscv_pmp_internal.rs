@@ -1,6 +1,4 @@
-use machina_guest_riscv::riscv::pmp::{
-    napot_range, PmpAddrMatch,
-};
+use machina_guest_riscv::riscv::pmp::{napot_range, PmpAddrMatch};
 
 #[test]
 fn test_napot_decode() {
@@ -21,20 +19,8 @@ fn test_napot_decode() {
 
 #[test]
 fn test_pmp_addr_match_from_cfg() {
-    assert_eq!(
-        PmpAddrMatch::from_cfg(0x00),
-        PmpAddrMatch::Off,
-    );
-    assert_eq!(
-        PmpAddrMatch::from_cfg(0x08),
-        PmpAddrMatch::Tor,
-    );
-    assert_eq!(
-        PmpAddrMatch::from_cfg(0x10),
-        PmpAddrMatch::Na4,
-    );
-    assert_eq!(
-        PmpAddrMatch::from_cfg(0x18),
-        PmpAddrMatch::Napot,
-    );
+    assert_eq!(PmpAddrMatch::from_cfg(0x00), PmpAddrMatch::Off,);
+    assert_eq!(PmpAddrMatch::from_cfg(0x08), PmpAddrMatch::Tor,);
+    assert_eq!(PmpAddrMatch::from_cfg(0x10), PmpAddrMatch::Na4,);
+    assert_eq!(PmpAddrMatch::from_cfg(0x18), PmpAddrMatch::Napot,);
 }

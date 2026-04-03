@@ -1,7 +1,9 @@
 use std::any::Any;
 
 use machina_core::address::GPA;
+use machina_core::mobject::{MObject, MObjectState};
 use machina_hw_core::bus::SysBus;
+use machina_hw_core::mdev::{MDevice, MDeviceLifecycle};
 use machina_hw_core::qdev::{Device, DeviceState};
 use machina_memory::region::MemoryRegion;
 
@@ -20,21 +22,28 @@ impl TestDevice {
 }
 
 impl Device for TestDevice {
-    fn name(&self) -> &str {
-        &self.state.name
+    fn realize(&mut self) -> Result<(), machina_hw_core::mdev::MDeviceError> {
+        self.state.mark_realized()?;
+        Ok(())
     }
 
-    fn realize(&mut self) -> Result<(), String> {
-        self.state.realized = true;
+    fn unrealize(&mut self) -> Result<(), machina_hw_core::mdev::MDeviceError> {
+        self.state.mark_unrealized()?;
         Ok(())
     }
 
     fn reset(&mut self) {
         self.counter = 0;
     }
+}
 
-    fn realized(&self) -> bool {
-        self.state.realized
+impl MObject for TestDevice {
+    fn mobject_state(&self) -> &MObjectState {
+        self.state.object()
+    }
+
+    fn mobject_state_mut(&mut self) -> &mut MObjectState {
+        self.state.object_mut()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -43,6 +52,16 @@ impl Device for TestDevice {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl MDevice for TestDevice {
+    fn mdevice_state(&self) -> &DeviceState {
+        &self.state
+    }
+
+    fn mdevice_state_mut(&mut self) -> &mut DeviceState {
+        &mut self.state
     }
 }
 
@@ -76,9 +95,8 @@ fn test_device_as_any_downcast() {
     dev.realize().unwrap();
     dev.counter = 7;
 
-    let any_ref = dev.as_any();
-    let downcasted =
-        any_ref.downcast_ref::<TestDevice>().unwrap();
+    let any_ref = MObject::as_any(&dev);
+    let downcasted = any_ref.downcast_ref::<TestDevice>().unwrap();
     assert_eq!(downcasted.counter, 7);
 }
 
@@ -93,8 +111,23 @@ fn test_parent_bus_default_none() {
 #[test]
 fn test_parent_bus_set_and_get() {
     let mut state = DeviceState::new("dev0");
-    state.set_parent_bus("sysbus0");
+    state.set_parent_bus("sysbus0").unwrap();
     assert_eq!(state.parent_bus(), Some("sysbus0"));
+}
+
+#[test]
+fn test_device_unrealize() {
+    let mut dev = TestDevice::new("test-dev");
+    dev.realize().unwrap();
+    assert!(dev.realized());
+    dev.unrealize().unwrap();
+    assert!(!dev.realized());
+}
+
+#[test]
+fn test_mdevice_lifecycle_created() {
+    let state = DeviceState::new("dev0");
+    assert_eq!(state.lifecycle(), MDeviceLifecycle::Created);
 }
 
 // -- SysBus tests --
@@ -109,15 +142,11 @@ fn test_sysbus_empty() {
 #[test]
 fn test_sysbus_add_mapping() {
     let mut bus = SysBus::new("sysbus");
-    let region =
-        MemoryRegion::container("uart-mmio", 0x100);
+    let region = MemoryRegion::container("uart-mmio", 0x100);
     bus.add_mapping(region, GPA::new(0x1000_0000));
 
     assert_eq!(bus.mappings().len(), 1);
-    assert_eq!(
-        bus.mappings()[0].base,
-        GPA::new(0x1000_0000)
-    );
+    assert_eq!(bus.mappings()[0].base, GPA::new(0x1000_0000));
     assert_eq!(bus.mappings()[0].region.name, "uart-mmio");
 }
 

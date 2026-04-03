@@ -17,42 +17,22 @@ fn test_pmp_napot_match() {
 
     // S-mode read within range succeeds.
     assert!(pmp
-        .check_access(
-            0,
-            4,
-            AccessType::Read,
-            PrivLevel::Supervisor,
-        )
+        .check_access(0, 4, AccessType::Read, PrivLevel::Supervisor,)
         .is_ok());
 
     // S-mode write at offset 128 succeeds.
     assert!(pmp
-        .check_access(
-            128,
-            8,
-            AccessType::Write,
-            PrivLevel::Supervisor,
-        )
+        .check_access(128, 8, AccessType::Write, PrivLevel::Supervisor,)
         .is_ok());
 
     // S-mode execute at offset 252 (last 4 bytes).
     assert!(pmp
-        .check_access(
-            252,
-            4,
-            AccessType::Execute,
-            PrivLevel::Supervisor,
-        )
+        .check_access(252, 4, AccessType::Execute, PrivLevel::Supervisor,)
         .is_ok());
 
     // S-mode read outside the region is denied.
     assert_eq!(
-        pmp.check_access(
-            256,
-            4,
-            AccessType::Read,
-            PrivLevel::Supervisor,
-        ),
+        pmp.check_access(256, 4, AccessType::Read, PrivLevel::Supervisor,),
         Err(Exception::LoadAccessFault),
     );
 }
@@ -74,43 +54,23 @@ fn test_pmp_tor_match() {
 
     // S-mode read within [0, 0x400) succeeds.
     assert!(pmp
-        .check_access(
-            0,
-            4,
-            AccessType::Read,
-            PrivLevel::Supervisor,
-        )
+        .check_access(0, 4, AccessType::Read, PrivLevel::Supervisor,)
         .is_ok());
 
     // S-mode execute within range succeeds.
     assert!(pmp
-        .check_access(
-            0x3FC,
-            4,
-            AccessType::Execute,
-            PrivLevel::Supervisor,
-        )
+        .check_access(0x3FC, 4, AccessType::Execute, PrivLevel::Supervisor,)
         .is_ok());
 
     // S-mode write is denied (no W bit).
     assert_eq!(
-        pmp.check_access(
-            0,
-            4,
-            AccessType::Write,
-            PrivLevel::Supervisor,
-        ),
+        pmp.check_access(0, 4, AccessType::Write, PrivLevel::Supervisor,),
         Err(Exception::StoreAccessFault),
     );
 
     // S-mode read outside the region is denied.
     assert_eq!(
-        pmp.check_access(
-            0x400,
-            4,
-            AccessType::Read,
-            PrivLevel::Supervisor,
-        ),
+        pmp.check_access(0x400, 4, AccessType::Read, PrivLevel::Supervisor,),
         Err(Exception::LoadAccessFault),
     );
 }
@@ -123,32 +83,17 @@ fn test_pmp_no_match_deny_s_mode() {
 
     // S-mode access with no matching entries is denied.
     assert_eq!(
-        pmp.check_access(
-            0x1000,
-            4,
-            AccessType::Read,
-            PrivLevel::Supervisor,
-        ),
+        pmp.check_access(0x1000, 4, AccessType::Read, PrivLevel::Supervisor,),
         Err(Exception::LoadAccessFault),
     );
 
     assert_eq!(
-        pmp.check_access(
-            0x1000,
-            4,
-            AccessType::Write,
-            PrivLevel::User,
-        ),
+        pmp.check_access(0x1000, 4, AccessType::Write, PrivLevel::User,),
         Err(Exception::StoreAccessFault),
     );
 
     assert_eq!(
-        pmp.check_access(
-            0x1000,
-            4,
-            AccessType::Execute,
-            PrivLevel::User,
-        ),
+        pmp.check_access(0x1000, 4, AccessType::Execute, PrivLevel::User,),
         Err(Exception::InstructionAccessFault),
     );
 }
@@ -160,30 +105,15 @@ fn test_pmp_m_mode_default_allow() {
     let pmp = Pmp::new();
 
     assert!(pmp
-        .check_access(
-            0x1000,
-            4,
-            AccessType::Read,
-            PrivLevel::Machine,
-        )
+        .check_access(0x1000, 4, AccessType::Read, PrivLevel::Machine,)
         .is_ok());
 
     assert!(pmp
-        .check_access(
-            0x2000,
-            4,
-            AccessType::Write,
-            PrivLevel::Machine,
-        )
+        .check_access(0x2000, 4, AccessType::Write, PrivLevel::Machine,)
         .is_ok());
 
     assert!(pmp
-        .check_access(
-            0x3000,
-            4,
-            AccessType::Execute,
-            PrivLevel::Machine,
-        )
+        .check_access(0x3000, 4, AccessType::Execute, PrivLevel::Machine,)
         .is_ok());
 }
 
@@ -200,44 +130,24 @@ fn test_pmp_locked_restricts_m_mode() {
 
     // M-mode read within the locked region (R=1).
     assert!(pmp
-        .check_access(
-            0,
-            4,
-            AccessType::Read,
-            PrivLevel::Machine,
-        )
+        .check_access(0, 4, AccessType::Read, PrivLevel::Machine,)
         .is_ok());
 
     // M-mode write denied (W=0, lock enforces).
     assert_eq!(
-        pmp.check_access(
-            0,
-            4,
-            AccessType::Write,
-            PrivLevel::Machine,
-        ),
+        pmp.check_access(0, 4, AccessType::Write, PrivLevel::Machine,),
         Err(Exception::StoreAccessFault),
     );
 
     // M-mode execute denied (X=0).
     assert_eq!(
-        pmp.check_access(
-            0,
-            4,
-            AccessType::Execute,
-            PrivLevel::Machine,
-        ),
+        pmp.check_access(0, 4, AccessType::Execute, PrivLevel::Machine,),
         Err(Exception::InstructionAccessFault),
     );
 
     // M-mode access outside (no match) still allowed.
     assert!(pmp
-        .check_access(
-            0x1000,
-            4,
-            AccessType::Read,
-            PrivLevel::Machine,
-        )
+        .check_access(0x1000, 4, AccessType::Read, PrivLevel::Machine,)
         .is_ok());
 }
 
@@ -260,33 +170,18 @@ fn test_pmp_sync_from_csr_tor_deny() {
 
     // S-mode read in range: allowed.
     assert!(pmp
-        .check_access(
-            0,
-            4,
-            AccessType::Read,
-            PrivLevel::Supervisor,
-        )
+        .check_access(0, 4, AccessType::Read, PrivLevel::Supervisor,)
         .is_ok());
 
     // S-mode execute in range: denied (no X).
     assert_eq!(
-        pmp.check_access(
-            0,
-            4,
-            AccessType::Execute,
-            PrivLevel::Supervisor,
-        ),
+        pmp.check_access(0, 4, AccessType::Execute, PrivLevel::Supervisor,),
         Err(Exception::InstructionAccessFault),
     );
 
     // S-mode read outside range: denied (no match).
     assert_eq!(
-        pmp.check_access(
-            0x500,
-            4,
-            AccessType::Read,
-            PrivLevel::Supervisor,
-        ),
+        pmp.check_access(0x500, 4, AccessType::Read, PrivLevel::Supervisor,),
         Err(Exception::LoadAccessFault),
     );
 }

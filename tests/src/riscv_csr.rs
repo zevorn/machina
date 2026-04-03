@@ -18,10 +18,7 @@ fn test_mstatus_read_write() {
     // Write MIE (bit 3) + MPIE (bit 7).
     cpu.csr_write(CSR_MSTATUS, (1 << 3) | (1 << 7));
     let v = cpu.csr_read(CSR_MSTATUS);
-    assert_eq!(
-        v & ((1 << 3) | (1 << 7)),
-        (1 << 3) | (1 << 7)
-    );
+    assert_eq!(v & ((1 << 3) | (1 << 7)), (1 << 3) | (1 << 7));
 
     // Non-writable bits are WARL/read-only.
     cpu.csr_write(CSR_MSTATUS, 3u64 << 32);
@@ -124,10 +121,7 @@ fn test_sstatus_alias() {
 
     // Write MIE (bit 3) via mstatus -- not visible in
     // sstatus.
-    cpu.csr_write(
-        CSR_MSTATUS,
-        (1 << 1) | (1 << 3),
-    );
+    cpu.csr_write(CSR_MSTATUS, (1 << 1) | (1 << 3));
     let ss = cpu.csr_read(CSR_SSTATUS);
     assert_ne!(ss & (1 << 1), 0);
     assert_eq!(ss & (1 << 3), 0);
@@ -200,10 +194,7 @@ fn test_fcsr_composite() {
     // Write individual fields and read back via FCSR.
     cpu.csr_write(CSR_FFLAGS, 0x05);
     cpu.csr_write(CSR_FRM, 0x03);
-    assert_eq!(
-        cpu.csr_read(CSR_FCSR),
-        (0x03 << 5) | 0x05
-    );
+    assert_eq!(cpu.csr_read(CSR_FCSR), (0x03 << 5) | 0x05);
 }
 
 // -- Counter CSRs --
@@ -226,10 +217,7 @@ fn test_mepc_alignment() {
     let mut cpu = RiscvCpu::new();
 
     // Bit 0 is always cleared (2-byte alignment min).
-    cpu.csr_write(
-        CSR_MEPC,
-        0xFFFF_FFFF_FFFF_FFFF,
-    );
+    cpu.csr_write(CSR_MEPC, 0xFFFF_FFFF_FFFF_FFFF);
     assert_eq!(cpu.csr_read(CSR_MEPC) & 1, 0);
 }
 

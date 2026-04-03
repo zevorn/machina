@@ -18,8 +18,7 @@ impl TestIrqSink {
     }
 
     fn level(&self, irq: u32) -> bool {
-        self.levels[irq as usize]
-            .load(Ordering::Relaxed)
+        self.levels[irq as usize].load(Ordering::Relaxed)
     }
 }
 
@@ -115,10 +114,7 @@ fn test_plic_set_irq_propagates() {
     // Connect output for context 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let out_irq = 11u32; // MEI
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        out_irq,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, out_irq);
     plic.connect_context_output(0, line);
 
     // Set priority[1] = 1, enable IRQ 1 for ctx 0.
@@ -126,17 +122,11 @@ fn test_plic_set_irq_propagates() {
     plic.write(0x2000, 4, 0x02);
 
     // No interrupt yet.
-    assert!(
-        !sink.level(out_irq),
-        "output should be low before set_irq"
-    );
+    assert!(!sink.level(out_irq), "output should be low before set_irq");
 
     // Assert source 1.
     plic.set_irq(1, true);
-    assert!(
-        sink.level(out_irq),
-        "output should go high after set_irq"
-    );
+    assert!(sink.level(out_irq), "output should go high after set_irq");
 
     // Deassert source 1.
     plic.set_irq(1, false);
@@ -156,10 +146,7 @@ fn test_plic_claim_on_read() {
 
     // MMIO read at claim offset should perform the claim.
     let claimed = plic.read(0x200004, 4);
-    assert_eq!(
-        claimed, 1,
-        "MMIO claim read should return IRQ 1"
-    );
+    assert_eq!(claimed, 1, "MMIO claim read should return IRQ 1");
 
     // Pending bit should now be cleared.
     let pending = plic.read(0x1000, 4);
@@ -181,10 +168,7 @@ fn test_plic_level_triggered_resample() {
     // Connect output for context 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let out_irq = 11u32; // MEI
-    let line = IrqLine::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        out_irq,
-    );
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, out_irq);
     plic.connect_context_output(0, line);
 
     // priority[1] = 1, enable IRQ 1 for ctx 0.

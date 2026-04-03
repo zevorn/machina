@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use machina_core::address::GPA;
-use machina_core::machine::{Machine, MachineOpts};
+use machina_core::machine::{Machine, MachineOpts, MachineState};
 use machina_core::wfi::WfiWaker;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_hw_char::uart::Uart16550;
@@ -166,6 +166,7 @@ impl MmioOps for UartMmio {
 
 pub struct RefMachine {
     name: String,
+    machine_state: MachineState,
     ram_size: u64,
     cpu_count: u32,
     address_space: Option<AddressSpace>,
@@ -198,6 +199,7 @@ impl RefMachine {
     pub fn new() -> Self {
         Self {
             name: "riscv64-ref".to_string(),
+            machine_state: MachineState::new_root("machine"),
             ram_size: 0,
             cpu_count: 0,
             address_space: None,
@@ -495,6 +497,14 @@ impl Default for RefMachine {
 impl Machine for RefMachine {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn machine_state(&self) -> &MachineState {
+        &self.machine_state
+    }
+
+    fn machine_state_mut(&mut self) -> &mut MachineState {
+        &mut self.machine_state
     }
 
     fn init(
