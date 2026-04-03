@@ -55,7 +55,7 @@ fn test_aclint_mtime_write_resets_epoch() {
     let t = aclint.read(0xBFF8, 8);
     // Should be close to 1_000_000 (just written).
     assert!(
-        t >= 1_000_000 && t < 1_100_000,
+        (1_000_000..1_100_000).contains(&t),
         "mtime {} not near written value 1_000_000",
         t
     );
@@ -171,7 +171,7 @@ fn test_aclint_clint_layout() {
     aclint.write(0xBFF8, 8, 999);
     let t = aclint.read(0xBFF8, 8);
     assert!(
-        t >= 999 && t < 999 + 100_000,
+        (999..999 + 100_000).contains(&t),
         "mtime {} not near written value 999",
         t
     );

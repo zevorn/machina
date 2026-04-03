@@ -90,7 +90,7 @@ fn test_bare_mode_passthrough() {
             0,
             4,
             None,
-            &dummy,
+            dummy,
             no_write,
         );
         assert_eq!(pa, Ok(gva));
