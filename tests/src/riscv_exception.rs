@@ -1,10 +1,11 @@
-//! Integration tests for the RISC-V exception and interrupt model.
+//! Integration tests for the RISC-V exception and
+//! interrupt model.
 
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_guest_riscv::riscv::exception::Exception;
 
-// ── Helpers ─────────────────────────────────────────────────────
+// -- Helpers --
 
 fn make_cpu() -> RiscvCpu {
     let mut cpu = RiscvCpu::new();
@@ -14,7 +15,7 @@ fn make_cpu() -> RiscvCpu {
     cpu
 }
 
-// ── Exception tests ─────────────────────────────────────────────
+// -- Exception tests --
 
 /// Exception from S-mode goes to M-mode (no delegation).
 #[test]
@@ -24,12 +25,15 @@ fn test_exception_to_m_mode() {
     cpu.priv_level = PrivLevel::Supervisor;
     cpu.pc = 0x1000;
     cpu.csr.mtvec = 0x8000_0000;
-    // No delegation — medeleg is 0.
+    // No delegation -- medeleg is 0.
     cpu.csr.medeleg = 0;
     // Enable MIE so we can verify it gets cleared.
     cpu.csr.mstatus |= 1 << 3; // MIE
 
-    cpu.raise_exception(Exception::IllegalInstruction, 0xDEAD);
+    cpu.raise_exception(
+        Exception::IllegalInstruction,
+        0xDEAD,
+    );
 
     // Should trap to M-mode.
     assert_eq!(cpu.priv_level, PrivLevel::Machine);
@@ -59,7 +63,10 @@ fn test_exception_delegated_to_s_mode() {
     // Enable SIE so we can verify it gets cleared.
     cpu.csr.mstatus |= 1 << 1; // SIE
 
-    cpu.raise_exception(Exception::IllegalInstruction, 0xBEEF);
+    cpu.raise_exception(
+        Exception::IllegalInstruction,
+        0xBEEF,
+    );
 
     // Should trap to S-mode.
     assert_eq!(cpu.priv_level, PrivLevel::Supervisor);
@@ -75,7 +82,7 @@ fn test_exception_delegated_to_s_mode() {
     assert_eq!(cpu.csr.mstatus & (1 << 1), 0);
 }
 
-// ── MRET / SRET tests ──────────────────────────────────────────
+// -- MRET / SRET tests --
 
 /// MRET restores privilege and PC correctly.
 #[test]
@@ -120,7 +127,7 @@ fn test_sret() {
     assert_eq!(cpu.csr.mstatus & (1 << 8), 0);
 }
 
-// ── Interrupt priority test ─────────────────────────────────────
+// -- Interrupt priority test --
 
 /// MEI is taken before STI when both are pending.
 #[test]
@@ -136,7 +143,7 @@ fn test_interrupt_priority() {
     cpu.csr.mie = (1 << 11) | (1 << 5);
     // Pend both MEI (bit 11) and STI (bit 5) in mip.
     cpu.csr.mip = (1 << 11) | (1 << 5);
-    // Do NOT delegate MEI — leave mideleg = 0.
+    // Do NOT delegate MEI -- leave mideleg = 0.
     cpu.csr.mideleg = 0;
 
     let taken = cpu.handle_interrupt();

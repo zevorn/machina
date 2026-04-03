@@ -18,7 +18,8 @@ impl TestIrqSink {
     }
 
     fn level(&self, irq: u32) -> bool {
-        self.levels[irq as usize].load(Ordering::Relaxed)
+        self.levels[irq as usize]
+            .load(Ordering::Relaxed)
     }
 }
 
@@ -48,12 +49,10 @@ fn test_plic_claim_highest() {
     let mut plic = Plic::new(64, 2);
 
     // Set priorities: IRQ 1 = 2, IRQ 2 = 5.
-    plic.write(0x04, 4, 2); // priority[1] = 2
-    plic.write(0x08, 4, 5); // priority[2] = 5
+    plic.write(0x04, 4, 2);
+    plic.write(0x08, 4, 5);
 
     // Enable IRQ 1 and IRQ 2 for context 0.
-    // Enable bitmap at 0x2000 + 0x80*0 = 0x2000.
-    // Both IRQs are in word 0: bits 1 and 2.
     plic.write(0x2000, 4, 0x06);
 
     // Set both pending.
@@ -69,15 +68,14 @@ fn test_plic_claim_highest() {
 fn test_plic_complete() {
     let mut plic = Plic::new(64, 1);
 
-    plic.write(0x04, 4, 1); // priority[1] = 1
-    plic.write(0x2000, 4, 0x02); // enable IRQ 1, ctx 0
+    plic.write(0x04, 4, 1);
+    plic.write(0x2000, 4, 0x02);
     plic.set_pending(1, true);
 
     let claimed = plic.claim_irq(0);
     assert_eq!(claimed, Some(1));
 
-    // Complete via MMIO: write IRQ number to
-    // claim/complete register at 0x200004.
+    // Complete via MMIO.
     plic.write(0x200004, 4, 1);
 
     // After completion, claim register should be 0.
@@ -88,15 +86,14 @@ fn test_plic_complete() {
 fn test_plic_threshold() {
     let mut plic = Plic::new(64, 1);
 
-    plic.write(0x04, 4, 3); // priority[1] = 3
-    plic.write(0x2000, 4, 0x02); // enable IRQ 1, ctx 0
+    plic.write(0x04, 4, 3);
+    plic.write(0x2000, 4, 0x02);
     plic.set_pending(1, true);
 
-    // Set threshold for context 0 to 5 (above priority).
+    // Set threshold for context 0 to 5.
     plic.write(0x200000, 4, 5);
 
-    // IRQ 1 has priority 3 which is <= threshold 5,
-    // so it should not be claimable.
+    // IRQ 1 priority 3 <= threshold 5 -> not claimable.
     assert_eq!(plic.claim_irq(0), None);
 }
 
@@ -104,8 +101,8 @@ fn test_plic_threshold() {
 fn test_plic_no_pending() {
     let mut plic = Plic::new(64, 1);
 
-    plic.write(0x04, 4, 1); // priority[1] = 1
-    plic.write(0x2000, 4, 0x02); // enable IRQ 1, ctx 0
+    plic.write(0x04, 4, 1);
+    plic.write(0x2000, 4, 0x02);
 
     // Nothing pending.
     assert_eq!(plic.claim_irq(0), None);
@@ -118,7 +115,10 @@ fn test_plic_set_irq_propagates() {
     // Connect output for context 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let out_irq = 11u32; // MEI
-    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, out_irq);
+    let line = IrqLine::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        out_irq,
+    );
     plic.connect_context_output(0, line);
 
     // Set priority[1] = 1, enable IRQ 1 for ctx 0.
@@ -126,11 +126,17 @@ fn test_plic_set_irq_propagates() {
     plic.write(0x2000, 4, 0x02);
 
     // No interrupt yet.
-    assert!(!sink.level(out_irq), "output should be low before set_irq");
+    assert!(
+        !sink.level(out_irq),
+        "output should be low before set_irq"
+    );
 
     // Assert source 1.
     plic.set_irq(1, true);
-    assert!(sink.level(out_irq), "output should go high after set_irq");
+    assert!(
+        sink.level(out_irq),
+        "output should go high after set_irq"
+    );
 
     // Deassert source 1.
     plic.set_irq(1, false);
@@ -144,15 +150,16 @@ fn test_plic_set_irq_propagates() {
 fn test_plic_claim_on_read() {
     let mut plic = Plic::new(64, 1);
 
-    // priority[1] = 1, enable IRQ 1 for ctx 0.
     plic.write(0x04, 4, 1);
     plic.write(0x2000, 4, 0x02);
     plic.set_pending(1, true);
 
-    // MMIO read at claim offset (0x200004) should
-    // perform the claim and return IRQ 1.
+    // MMIO read at claim offset should perform the claim.
     let claimed = plic.read(0x200004, 4);
-    assert_eq!(claimed, 1, "MMIO claim read should return IRQ 1");
+    assert_eq!(
+        claimed, 1,
+        "MMIO claim read should return IRQ 1"
+    );
 
     // Pending bit should now be cleared.
     let pending = plic.read(0x1000, 4);
@@ -162,7 +169,7 @@ fn test_plic_claim_on_read() {
         "pending bit should be cleared after claim"
     );
 
-    // Second claim read should return 0 (nothing pending).
+    // Second claim read should return 0.
     let claimed2 = plic.read(0x200004, 4);
     assert_eq!(claimed2, 0, "second claim should return 0");
 }
@@ -174,30 +181,33 @@ fn test_plic_level_triggered_resample() {
     // Connect output for context 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let out_irq = 11u32; // MEI
-    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, out_irq);
+    let line = IrqLine::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        out_irq,
+    );
     plic.connect_context_output(0, line);
 
     // priority[1] = 1, enable IRQ 1 for ctx 0.
     plic.write(0x04, 4, 1);
     plic.write(0x2000, 4, 0x02);
 
-    // Assert source 1 (level-triggered: wire stays high).
+    // Assert source 1 (level-triggered).
     plic.set_irq(1, true);
     assert!(sink.level(out_irq), "output should be high");
 
-    // Claim via MMIO — clears pending.
+    // Claim via MMIO.
     let claimed = plic.read(0x200004, 4);
     assert_eq!(claimed, 1);
 
-    // Complete without lowering source — should re-pend.
+    // Complete without lowering source -- should re-pend.
     plic.write(0x200004, 4, 1);
 
-    // Pending must be re-set because source is still high.
     let pending = plic.read(0x1000, 4);
     assert_ne!(
         pending & (1 << 1),
         0,
-        "pending should be re-set after complete while source high"
+        "pending should be re-set after complete \
+         while source high"
     );
     assert!(
         sink.level(out_irq),
@@ -207,7 +217,6 @@ fn test_plic_level_triggered_resample() {
     // Now lower the source, claim and complete again.
     plic.set_irq(1, false);
 
-    // Re-assert so we can claim again.
     plic.set_irq(1, true);
     let claimed2 = plic.read(0x200004, 4);
     assert_eq!(claimed2, 1);
@@ -216,7 +225,6 @@ fn test_plic_level_triggered_resample() {
     plic.set_irq(1, false);
     plic.write(0x200004, 4, 1);
 
-    // Should NOT re-pend because source was lowered.
     let pending2 = plic.read(0x1000, 4);
     assert_eq!(
         pending2 & (1 << 1),

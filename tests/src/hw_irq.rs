@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use machina_hw_core::irq::{IrqLine, IrqSink, OrIrq, SplitIrq};
+use machina_hw_core::irq::{
+    IrqLine, IrqSink, OrIrq, SplitIrq,
+};
 
 /// Simple test sink that records the last level and
 /// the number of set_irq calls.
@@ -127,8 +129,7 @@ fn test_irq_no_spurious() {
     line.lower();
     assert!(!sink.level());
 
-    // The sink was called, but level stays false — no
-    // spurious high transition occurred.
+    // The sink was called, but level stays false.
     assert_eq!(sink.calls(), before + 1);
     assert!(!sink.level());
 }

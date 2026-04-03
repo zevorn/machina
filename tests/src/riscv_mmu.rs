@@ -5,7 +5,7 @@ use machina_guest_riscv::riscv::exception::Exception;
 use machina_guest_riscv::riscv::mmu::{AccessType, Mmu};
 use machina_guest_riscv::riscv::pmp::Pmp;
 
-// ── Helpers ────────────────────────────────────────────────────
+// -- Helpers --
 
 /// Write a 64-bit PTE into the flat memory array.
 fn write_pte(mem: &mut [u8], addr: u64, pte: u64) {
@@ -17,26 +17,35 @@ fn write_pte(mem: &mut [u8], addr: u64, pte: u64) {
 fn mem_reader(mem: &[u8]) -> impl Fn(u64) -> u64 + '_ {
     move |addr: u64| {
         let off = addr as usize;
-        u64::from_le_bytes(mem[off..off + 8].try_into().unwrap())
+        u64::from_le_bytes(
+            mem[off..off + 8].try_into().unwrap(),
+        )
     }
 }
 
 /// Build a `mem_read` closure over a RefCell byte slice
 /// (for tests that also need `mem_write`).
-fn mem_reader_rc(mem: &RefCell<Vec<u8>>) -> impl Fn(u64) -> u64 + '_ {
+fn mem_reader_rc(
+    mem: &RefCell<Vec<u8>>,
+) -> impl Fn(u64) -> u64 + '_ {
     move |addr: u64| {
         let m = mem.borrow();
         let off = addr as usize;
-        u64::from_le_bytes(m[off..off + 8].try_into().unwrap())
+        u64::from_le_bytes(
+            m[off..off + 8].try_into().unwrap(),
+        )
     }
 }
 
 /// Build a `mem_write` closure over a RefCell byte slice.
-fn mem_writer_rc(mem: &RefCell<Vec<u8>>) -> impl FnMut(u64, u64) + '_ {
+fn mem_writer_rc(
+    mem: &RefCell<Vec<u8>>,
+) -> impl FnMut(u64, u64) + '_ {
     move |addr: u64, val: u64| {
         let mut m = mem.borrow_mut();
         let off = addr as usize;
-        m[off..off + 8].copy_from_slice(&val.to_le_bytes());
+        m[off..off + 8]
+            .copy_from_slice(&val.to_le_bytes());
     }
 }
 
@@ -44,7 +53,7 @@ fn mem_writer_rc(mem: &RefCell<Vec<u8>>) -> impl FnMut(u64, u64) + '_ {
 /// updates.
 fn no_write(_addr: u64, _val: u64) {}
 
-// ── Sv39 PTE flag helpers ──────────────────────────────────────
+// -- Sv39 PTE flag helpers --
 
 const PTE_V: u64 = 1 << 0;
 const PTE_R: u64 = 1 << 1;
@@ -71,7 +80,7 @@ fn satp_sv39(asid: u16, root_ppn: u64) -> u64 {
     (8u64 << 60) | ((asid as u64) << 44) | root_ppn
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+// -- Tests --
 
 #[test]
 fn test_bare_mode_passthrough() {
@@ -81,7 +90,8 @@ fn test_bare_mode_passthrough() {
     assert_eq!(mmu.get_satp(), 0);
 
     let dummy = |_addr: u64| -> u64 { 0 };
-    let addrs: &[u64] = &[0, 0x1000, 0x8000_0000, u64::MAX];
+    let addrs: &[u64] =
+        &[0, 0x1000, 0x8000_0000, u64::MAX];
     for &gva in addrs {
         let pa = mmu.translate(
             gva,
@@ -104,7 +114,8 @@ fn test_sv39_identity_map() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags =
+        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -144,7 +155,8 @@ fn test_sv39_page_fault() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags =
+        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -166,7 +178,7 @@ fn test_sv39_page_fault() {
         )
         .is_ok());
 
-    // Flush TLB so we force a walk for the next address
+    // Flush TLB so we force a walk
     mmu.flush();
 
     // Page 1 (VA 0x1000) is unmapped -> LoadPageFault
@@ -218,7 +230,8 @@ fn test_tlb_hit() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags =
+        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -265,7 +278,13 @@ fn test_superpage() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     let mega_ppn: u64 = 0x200;
-    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+    let flags = PTE_V
+        | PTE_R
+        | PTE_W
+        | PTE_X
+        | PTE_U
+        | PTE_A
+        | PTE_D;
     write_pte(&mut mem, 0x2000, leaf_pte(mega_ppn, flags));
 
     let mut mmu = Mmu::new();
@@ -312,12 +331,11 @@ fn test_superpage() {
     assert_eq!(pa, Ok(0x003F_FFFF));
 }
 
-// ── A/D bit update tests ──────────────────────────────────────
+// -- A/D bit update tests --
 
 #[test]
 fn test_ad_bit_update_on_read() {
     // PTE has V|R|W|X but NOT A or D.
-    // A read should set A=1 via hardware update.
     let mem_size = 0x10000;
     let mem = RefCell::new(vec![0u8; mem_size]);
 
@@ -325,7 +343,6 @@ fn test_ad_bit_update_on_read() {
         let mut m = mem.borrow_mut();
         write_pte(&mut m, 0x1000, ptr_pte(2));
         write_pte(&mut m, 0x2000, ptr_pte(3));
-        // Leaf without A or D
         let flags = PTE_V | PTE_R | PTE_W | PTE_X;
         write_pte(&mut m, 0x3000, leaf_pte(0, flags));
     }
@@ -348,16 +365,21 @@ fn test_ad_bit_update_on_read() {
     // Verify PTE now has A=1, D still 0.
     let updated_pte = {
         let m = mem.borrow();
-        u64::from_le_bytes(m[0x3000..0x3008].try_into().unwrap())
+        u64::from_le_bytes(
+            m[0x3000..0x3008].try_into().unwrap(),
+        )
     };
     assert_ne!(updated_pte & PTE_A, 0, "A bit must be set");
-    assert_eq!(updated_pte & PTE_D, 0, "D bit must remain clear on read");
+    assert_eq!(
+        updated_pte & PTE_D,
+        0,
+        "D bit must remain clear on read"
+    );
 }
 
 #[test]
 fn test_ad_bit_update_on_write() {
     // PTE has V|R|W|X but NOT A or D.
-    // A write should set both A=1 and D=1.
     let mem_size = 0x10000;
     let mem = RefCell::new(vec![0u8; mem_size]);
 
@@ -387,13 +409,15 @@ fn test_ad_bit_update_on_write() {
     // Verify PTE now has A=1 and D=1.
     let updated_pte = {
         let m = mem.borrow();
-        u64::from_le_bytes(m[0x3000..0x3008].try_into().unwrap())
+        u64::from_le_bytes(
+            m[0x3000..0x3008].try_into().unwrap(),
+        )
     };
     assert_ne!(updated_pte & PTE_A, 0, "A bit must be set");
     assert_ne!(updated_pte & PTE_D, 0, "D bit must be set");
 }
 
-// ── SUM semantics tests ───────────────────────────────────────
+// -- SUM semantics tests --
 
 #[test]
 fn test_sum_blocks_s_mode_execute_on_u_page() {
@@ -403,7 +427,13 @@ fn test_sum_blocks_s_mode_execute_on_u_page() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+    let flags = PTE_V
+        | PTE_R
+        | PTE_W
+        | PTE_X
+        | PTE_U
+        | PTE_A
+        | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -436,7 +466,13 @@ fn test_sum_allows_s_mode_read_on_u_page() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+    let flags = PTE_V
+        | PTE_R
+        | PTE_W
+        | PTE_X
+        | PTE_U
+        | PTE_A
+        | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -461,7 +497,7 @@ fn test_sum_allows_s_mode_read_on_u_page() {
     );
 }
 
-// ── PMP integration test ──────────────────────────────────────
+// -- PMP integration test --
 
 #[test]
 fn test_pmp_deny_after_translation() {
@@ -471,7 +507,8 @@ fn test_pmp_deny_after_translation() {
 
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags =
+        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
@@ -485,8 +522,7 @@ fn test_pmp_deny_after_translation() {
 
     let reader = mem_reader(&mem);
 
-    // S-mode read to PA within PMP region that lacks R
-    // permission — PMP should deny.
+    // S-mode read to PA within PMP region that lacks R.
     let err = mmu.translate(
         0x0000,
         AccessType::Read,
@@ -507,27 +543,24 @@ fn test_pmp_deny_after_translation() {
 #[test]
 fn test_pmp_subpage_deny() {
     // PMP entry covers only 4 bytes (NA4 at PA 0x80).
-    // A 4-byte access to [0x80, 0x84) should be denied (no R),
-    // but a 4-byte access to [0x84, 0x88) on the same page
-    // should be allowed (no PMP match, M-mode default allow).
     let mem_size = 0x10000;
     let mut mem = vec![0u8; mem_size];
 
-    // Identity-map page 0 (VA 0..0xFFF -> PA 0..0xFFF).
+    // Identity-map page 0.
     write_pte(&mut mem, 0x1000, ptr_pte(2));
     write_pte(&mut mem, 0x2000, ptr_pte(3));
-    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    let flags =
+        PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
     write_pte(&mut mem, 0x3000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
     mmu.set_satp(satp_sv39(0, 1));
 
     // NA4 at addr 0x80: pmpaddr = 0x80 >> 2 = 0x20.
-    // cfg = NA4 | L (locked, so it applies to M-mode too),
-    // no R/W/X => 0x10 | 0x80 = 0x90.
+    // cfg = L=1 | NA4, no R/W/X => 0x90.
     let mut pmp = Pmp::new();
-    pmp.set_cfg(0, 0x90); // L=1 | NA4, no R/W/X
-    pmp.set_addr(0, 0x20); // PA 0x80
+    pmp.set_cfg(0, 0x90);
+    pmp.set_addr(0, 0x20);
 
     let reader = mem_reader(&mem);
 
@@ -551,8 +584,7 @@ fn test_pmp_subpage_deny() {
     // Flush TLB so the next call does a fresh walk.
     mmu.flush();
 
-    // 4-byte read at PA 0x84 must succeed (outside NA4
-    // region, M-mode default allow).
+    // 4-byte read at PA 0x84 must succeed.
     let pa = mmu.translate(
         0x0084,
         AccessType::Read,

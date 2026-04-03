@@ -77,11 +77,12 @@ fn test_device_as_any_downcast() {
     dev.counter = 7;
 
     let any_ref = dev.as_any();
-    let downcasted = any_ref.downcast_ref::<TestDevice>().unwrap();
+    let downcasted =
+        any_ref.downcast_ref::<TestDevice>().unwrap();
     assert_eq!(downcasted.counter, 7);
 }
 
-// -- parent_bus tests ---------------------------------------------
+// -- parent_bus tests --
 
 #[test]
 fn test_parent_bus_default_none() {
@@ -96,7 +97,7 @@ fn test_parent_bus_set_and_get() {
     assert_eq!(state.parent_bus(), Some("sysbus0"));
 }
 
-// -- SysBus tests -------------------------------------------------
+// -- SysBus tests --
 
 #[test]
 fn test_sysbus_empty() {
@@ -108,11 +109,15 @@ fn test_sysbus_empty() {
 #[test]
 fn test_sysbus_add_mapping() {
     let mut bus = SysBus::new("sysbus");
-    let region = MemoryRegion::container("uart-mmio", 0x100);
+    let region =
+        MemoryRegion::container("uart-mmio", 0x100);
     bus.add_mapping(region, GPA::new(0x1000_0000));
 
     assert_eq!(bus.mappings().len(), 1);
-    assert_eq!(bus.mappings()[0].base, GPA::new(0x1000_0000));
+    assert_eq!(
+        bus.mappings()[0].base,
+        GPA::new(0x1000_0000)
+    );
     assert_eq!(bus.mappings()[0].region.name, "uart-mmio");
 }
 

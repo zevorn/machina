@@ -21,7 +21,8 @@ impl TestIrqSink {
     }
 
     fn level(&self, irq: u32) -> bool {
-        self.levels[irq as usize].load(Ordering::Relaxed)
+        self.levels[irq as usize]
+            .load(Ordering::Relaxed)
     }
 }
 
@@ -47,8 +48,6 @@ fn test_uart_write_thr() {
     let mut uart = Uart16550::new();
     uart.write(0, 0x41); // write 'A'
     let lsr = uart.read(5);
-    // In emulation THR is immediately "sent", so
-    // THRE stays set.
     assert_ne!(lsr & 0x20, 0, "THRE should remain set");
 }
 
@@ -89,8 +88,6 @@ fn test_uart_dlab() {
 
     // Clear DLAB, verify normal register access.
     uart.write(3, 0x00);
-    // Offset 0 is now RBR (should be 0, no data).
-    // Offset 1 is IER.
     uart.write(1, 0x01); // IER = enable RX
     assert_eq!(uart.read(1), 0x01);
 }
@@ -124,7 +121,7 @@ fn test_uart_irq_on_receive() {
     // No data yet, no IRQ.
     assert!(!uart.irq_pending());
 
-    // Receive a byte — should raise IRQ.
+    // Receive a byte -- should raise IRQ.
     uart.receive(0x55);
     assert!(uart.irq_pending());
 
@@ -132,7 +129,7 @@ fn test_uart_irq_on_receive() {
     let iir = uart.read(2);
     assert_eq!(iir, 0x04);
 
-    // Read the byte — IRQ should clear.
+    // Read the byte -- IRQ should clear.
     let _ = uart.read(0);
     assert!(!uart.irq_pending());
 }
@@ -141,8 +138,7 @@ fn test_uart_irq_on_receive() {
 fn test_uart_tx_to_chardev() {
     let mut uart = Uart16550::new();
     let buf_ref = Arc::new(Mutex::new(Vec::<u8>::new()));
-    // Chardev takes ownership, so use a wrapper that
-    // shares the buffer via Arc<Mutex<>>.
+
     struct SharedChardev {
         buf: Arc<Mutex<Vec<u8>>>,
     }
@@ -165,12 +161,20 @@ fn test_uart_tx_to_chardev() {
     // Write 'A' to THR.
     uart.write(0, 0x41);
     let got = buf_ref.lock().unwrap().clone();
-    assert_eq!(got, vec![0x41], "chardev should receive 'A'");
+    assert_eq!(
+        got,
+        vec![0x41],
+        "chardev should receive 'A'"
+    );
 
     // Write another byte.
     uart.write(0, 0x42);
     let got = buf_ref.lock().unwrap().clone();
-    assert_eq!(got, vec![0x41, 0x42], "chardev should receive both bytes");
+    assert_eq!(
+        got,
+        vec![0x41, 0x42],
+        "chardev should receive both bytes"
+    );
 }
 
 #[test]
@@ -180,20 +184,29 @@ fn test_uart_rx_irq_line() {
     // Create test IRQ sink and attach line.
     let sink = Arc::new(TestIrqSink::new(16));
     let irq_num = 10u32;
-    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, irq_num);
+    let line = IrqLine::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        irq_num,
+    );
     uart.attach_irq(line);
 
     // Enable RX available interrupt.
     uart.write(1, 0x01);
 
     // IRQ line should be low before data arrives.
-    assert!(!sink.level(irq_num), "IRQ should be low before receive");
+    assert!(
+        !sink.level(irq_num),
+        "IRQ should be low before receive"
+    );
 
-    // Receive a byte — IRQ should assert.
+    // Receive a byte -- IRQ should assert.
     uart.receive(0x55);
-    assert!(sink.level(irq_num), "IRQ should be raised after receive");
+    assert!(
+        sink.level(irq_num),
+        "IRQ should be raised after receive"
+    );
 
-    // Read the byte — IRQ should deassert.
+    // Read the byte -- IRQ should deassert.
     let _ = uart.read(0);
     assert!(
         !sink.level(irq_num),

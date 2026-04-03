@@ -43,7 +43,10 @@ fn test_ram_block_alloc() {
             *ptr.add(i as usize) = (i & 0xff) as u8;
         }
         for i in 0..4096u64 {
-            assert_eq!(*ptr.add(i as usize), (i & 0xff) as u8,);
+            assert_eq!(
+                *ptr.add(i as usize),
+                (i & 0xff) as u8,
+            );
         }
     }
 }
@@ -52,7 +55,8 @@ fn test_ram_block_alloc() {
 fn test_flat_view_single_ram() {
     let (ram, _block) = MemoryRegion::ram("dram", 0x1_0000);
 
-    let mut root = MemoryRegion::container("system", 0x10_0000);
+    let mut root =
+        MemoryRegion::container("system", 0x10_0000);
     root.add_subregion(ram, GPA::new(0x8_0000));
 
     let fv = FlatView::from_region(&root);
@@ -73,16 +77,23 @@ fn test_flat_view_single_ram() {
 #[test]
 fn test_flat_view_overlap_priority() {
     // Low-priority RAM spanning 0..0x10000.
-    let (ram_lo, _blk_lo) = MemoryRegion::ram("lo-ram", 0x1_0000);
+    let (ram_lo, _blk_lo) =
+        MemoryRegion::ram("lo-ram", 0x1_0000);
 
     // High-priority IO covering 0x1000..0x2000 (4 KiB)
     // overlapping the RAM.
     let uart = MockUart::new();
-    let io_hi = MemoryRegion::io("uart", 0x1000, Box::new(uart));
+    let io_hi =
+        MemoryRegion::io("uart", 0x1000, Box::new(uart));
 
-    let mut root = MemoryRegion::container("root", 0x10_0000);
+    let mut root =
+        MemoryRegion::container("root", 0x10_0000);
     root.add_subregion(ram_lo, GPA::new(0));
-    root.add_subregion_with_priority(io_hi, GPA::new(0x1000), 10);
+    root.add_subregion_with_priority(
+        io_hi,
+        GPA::new(0x1000),
+        10,
+    );
 
     let fv = FlatView::from_region(&root);
 
@@ -110,8 +121,10 @@ fn test_flat_view_overlap_priority() {
 
 #[test]
 fn test_address_space_read_write() {
-    let (ram, _block) = MemoryRegion::ram("dram", 0x1_0000);
-    let mut root = MemoryRegion::container("root", 0x10_0000);
+    let (ram, _block) =
+        MemoryRegion::ram("dram", 0x1_0000);
+    let mut root =
+        MemoryRegion::container("root", 0x10_0000);
     root.add_subregion(ram, GPA::new(0));
 
     let a = AddressSpace::new(root);

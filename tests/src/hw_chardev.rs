@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use machina_hw_core::chardev::{
-    CharFrontend, Chardev, NullChardev, SocketChardev, StdioChardev,
+    CharFrontend, Chardev, NullChardev, SocketChardev,
+    StdioChardev,
 };
 
 #[test]
@@ -23,7 +24,7 @@ fn test_null_chardev_can_read_false() {
     assert!(!c.can_read());
 }
 
-// -- Helper: in-memory chardev for frontend tests -----
+// -- Helper: in-memory chardev for frontend tests --
 
 struct MemChardev {
     tx_buf: Arc<Mutex<Vec<u8>>>,
@@ -56,7 +57,10 @@ fn test_char_frontend_write_through() {
     let mut fe = CharFrontend::new(Box::new(backend));
 
     fe.write(b"hello");
-    assert_eq!(*sink.lock().unwrap(), b"hello".to_vec());
+    assert_eq!(
+        *sink.lock().unwrap(),
+        b"hello".to_vec()
+    );
 }
 
 #[test]
@@ -72,7 +76,7 @@ fn test_char_frontend_start_input() {
             recv_clone.lock().unwrap().push(byte);
         }));
     // start_input on MemChardev is a no-op (default
-    // impl), so callback won't fire — just verify no
+    // impl), so callback won't fire -- just verify no
     // panic.
     fe.start_input(cb);
 }

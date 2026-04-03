@@ -1,7 +1,7 @@
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::csr::*;
 
-// ── mstatus read/write ──────────────────────────────────────────
+// -- mstatus read/write --
 
 #[test]
 fn test_mstatus_read_write() {
@@ -18,9 +18,12 @@ fn test_mstatus_read_write() {
     // Write MIE (bit 3) + MPIE (bit 7).
     cpu.csr_write(CSR_MSTATUS, (1 << 3) | (1 << 7));
     let v = cpu.csr_read(CSR_MSTATUS);
-    assert_eq!(v & ((1 << 3) | (1 << 7)), (1 << 3) | (1 << 7));
+    assert_eq!(
+        v & ((1 << 3) | (1 << 7)),
+        (1 << 3) | (1 << 7)
+    );
 
-    // Non-writable bits are WARL/read-only. RV64 reads back UXL=2.
+    // Non-writable bits are WARL/read-only.
     cpu.csr_write(CSR_MSTATUS, 3u64 << 32);
     let v = cpu.csr_read(CSR_MSTATUS);
     assert_eq!(v & (3u64 << 32), 2u64 << 32);
@@ -42,7 +45,7 @@ fn test_mstatus_sd_bit() {
     assert_eq!(v & (1u64 << 63), 0);
 }
 
-// ── Privilege checks ────────────────────────────────────────────
+// -- Privilege checks --
 
 #[test]
 fn test_csr_privilege_check() {
@@ -74,12 +77,13 @@ fn test_csr_privilege_check() {
 #[test]
 fn test_read_only_csr_write_rejected() {
     let mut cpu = RiscvCpu::new();
-    // CSR_CYCLE (0xC00) has bits [11:10] = 0b11 => read-only.
+    // CSR_CYCLE (0xC00) has bits [11:10] = 0b11 =>
+    // read-only.
     assert!(cpu.try_csr_read(CSR_CYCLE).is_ok());
     assert!(cpu.try_csr_write(CSR_CYCLE, 42).is_err());
 }
 
-// ── Delegation ──────────────────────────────────────────────────
+// -- Delegation --
 
 #[test]
 fn test_medeleg_delegation() {
@@ -106,7 +110,7 @@ fn test_mideleg_delegation() {
     assert_eq!(v, (1 << 1) | (1 << 5) | (1 << 9));
 }
 
-// ── sstatus alias ───────────────────────────────────────────────
+// -- sstatus alias --
 
 #[test]
 fn test_sstatus_alias() {
@@ -118,8 +122,12 @@ fn test_sstatus_alias() {
     let ms = cpu.csr_read(CSR_MSTATUS);
     assert_ne!(ms & (1 << 1), 0);
 
-    // Write MIE (bit 3) via mstatus — not visible in sstatus.
-    cpu.csr_write(CSR_MSTATUS, (1 << 1) | (1 << 3));
+    // Write MIE (bit 3) via mstatus -- not visible in
+    // sstatus.
+    cpu.csr_write(
+        CSR_MSTATUS,
+        (1 << 1) | (1 << 3),
+    );
     let ss = cpu.csr_read(CSR_SSTATUS);
     assert_ne!(ss & (1 << 1), 0);
     assert_eq!(ss & (1 << 3), 0);
@@ -130,7 +138,7 @@ fn test_sstatus_alias() {
     assert_eq!(ss & (3u64 << 13), 3u64 << 13);
 }
 
-// ── sip/sie alias ───────────────────────────────────────────────
+// -- sip/sie alias --
 
 #[test]
 fn test_sip_sie_alias() {
@@ -159,7 +167,7 @@ fn test_sip_sie_alias() {
     assert_ne!(mie & (1 << 1), 0);
 }
 
-// ── FP CSRs ─────────────────────────────────────────────────────
+// -- FP CSRs --
 
 #[test]
 fn test_fp_csr_read_write() {
@@ -192,10 +200,13 @@ fn test_fcsr_composite() {
     // Write individual fields and read back via FCSR.
     cpu.csr_write(CSR_FFLAGS, 0x05);
     cpu.csr_write(CSR_FRM, 0x03);
-    assert_eq!(cpu.csr_read(CSR_FCSR), (0x03 << 5) | 0x05);
+    assert_eq!(
+        cpu.csr_read(CSR_FCSR),
+        (0x03 << 5) | 0x05
+    );
 }
 
-// ── Counter CSRs ────────────────────────────────────────────────
+// -- Counter CSRs --
 
 #[test]
 fn test_counter_csrs() {
@@ -208,18 +219,21 @@ fn test_counter_csrs() {
     assert_eq!(cpu.csr_read(CSR_INSTRET), 100);
 }
 
-// ── MEPC alignment ──────────────────────────────────────────────
+// -- MEPC alignment --
 
 #[test]
 fn test_mepc_alignment() {
     let mut cpu = RiscvCpu::new();
 
     // Bit 0 is always cleared (2-byte alignment min).
-    cpu.csr_write(CSR_MEPC, 0xFFFF_FFFF_FFFF_FFFF);
+    cpu.csr_write(
+        CSR_MEPC,
+        0xFFFF_FFFF_FFFF_FFFF,
+    );
     assert_eq!(cpu.csr_read(CSR_MEPC) & 1, 0);
 }
 
-// ── MISA read-only ──────────────────────────────────────────────
+// -- MISA read-only --
 
 #[test]
 fn test_misa_read_only() {
@@ -241,7 +255,7 @@ fn test_misa_read_only() {
     assert_eq!(cpu.csr_read(CSR_MISA), original);
 }
 
-// ── Unknown CSR ─────────────────────────────────────────────────
+// -- Unknown CSR --
 
 #[test]
 fn test_unknown_csr_returns_error() {
