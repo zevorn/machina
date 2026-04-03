@@ -317,7 +317,7 @@ fn test_superpage() {
 #[test]
 fn test_ad_bit_update_on_read() {
     // PTE has V|R|W|X but NOT A or D.
-    // A software-managed MMU should fault instead of updating A in hardware.
+    // A read should set A=1 via hardware update.
     let mem_size = 0x10000;
     let mem = RefCell::new(vec![0u8; mem_size]);
 
@@ -343,21 +343,21 @@ fn test_ad_bit_update_on_read() {
         mem_reader_rc(&mem),
         mem_writer_rc(&mem),
     );
-    assert_eq!(pa, Err(Exception::LoadPageFault));
+    assert_eq!(pa, Ok(0x0042));
 
-    // Verify PTE remains unchanged.
+    // Verify PTE now has A=1, D still 0.
     let updated_pte = {
         let m = mem.borrow();
         u64::from_le_bytes(m[0x3000..0x3008].try_into().unwrap())
     };
-    assert_eq!(updated_pte & PTE_A, 0, "A bit must remain clear");
-    assert_eq!(updated_pte & PTE_D, 0, "D bit must remain clear");
+    assert_ne!(updated_pte & PTE_A, 0, "A bit must be set");
+    assert_eq!(updated_pte & PTE_D, 0, "D bit must remain clear on read");
 }
 
 #[test]
 fn test_ad_bit_update_on_write() {
     // PTE has V|R|W|X but NOT A or D.
-    // A software-managed MMU should fault instead of updating A/D in hardware.
+    // A write should set both A=1 and D=1.
     let mem_size = 0x10000;
     let mem = RefCell::new(vec![0u8; mem_size]);
 
@@ -382,15 +382,15 @@ fn test_ad_bit_update_on_write() {
         mem_reader_rc(&mem),
         mem_writer_rc(&mem),
     );
-    assert_eq!(pa, Err(Exception::StorePageFault));
+    assert_eq!(pa, Ok(0x0042));
 
-    // Verify PTE remains unchanged.
+    // Verify PTE now has A=1 and D=1.
     let updated_pte = {
         let m = mem.borrow();
         u64::from_le_bytes(m[0x3000..0x3008].try_into().unwrap())
     };
-    assert_eq!(updated_pte & PTE_A, 0, "A bit must remain clear");
-    assert_eq!(updated_pte & PTE_D, 0, "D bit must remain clear");
+    assert_ne!(updated_pte & PTE_A, 0, "A bit must be set");
+    assert_ne!(updated_pte & PTE_D, 0, "D bit must be set");
 }
 
 // ── SUM semantics tests ───────────────────────────────────────

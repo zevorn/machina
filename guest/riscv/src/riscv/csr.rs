@@ -80,9 +80,6 @@ const MSTATUS_MXR: u64 = 1 << 19;
 const MSTATUS_TVM: u64 = 1 << 20;
 const MSTATUS_TW: u64 = 1 << 21;
 const MSTATUS_TSR: u64 = 1 << 22;
-const MSTATUS_UXL: u64 = 3 << 32;
-#[allow(dead_code)]
-const MSTATUS_SXL: u64 = 3 << 34;
 const MSTATUS_SD: u64 = 1 << 63;
 
 /// UXL=2 (64-bit) and SXL=2 (64-bit) for RV64.
@@ -288,12 +285,10 @@ impl CsrFile {
         }
         match addr {
             // -- M-level --
-            CSR_MSTATUS => Ok(
-                self.mstatus
-                    | self.sd_bit()
-                    | MSTATUS_UXL_64
-                    | MSTATUS_SXL_64,
-            ),
+            CSR_MSTATUS => Ok(self.mstatus
+                | self.sd_bit()
+                | MSTATUS_UXL_64
+                | MSTATUS_SXL_64),
             CSR_MISA => Ok(self.misa),
             CSR_MEDELEG => Ok(self.medeleg),
             CSR_MIDELEG => Ok(self.mideleg),
@@ -324,12 +319,10 @@ impl CsrFile {
             }
 
             // -- S-level (aliased) --
-            CSR_SSTATUS => Ok(
-                (self.mstatus
-                    | self.sd_bit()
-                    | MSTATUS_UXL_64)
-                    & SSTATUS_MASK,
-            ),
+            CSR_SSTATUS => {
+                Ok((self.mstatus | self.sd_bit() | MSTATUS_UXL_64)
+                    & SSTATUS_MASK)
+            }
             CSR_SIE => Ok(self.mie & self.mideleg & SIP_MASK),
             CSR_STVEC => Ok(self.stvec),
             CSR_SCOUNTEREN => Ok(self.scounteren),
@@ -353,8 +346,8 @@ impl CsrFile {
             CSR_MINSTRET => Ok(self.instret),
 
             // -- Debug/Trace trigger stubs --
-            CSR_TSELECT | CSR_TDATA1 | CSR_TDATA2
-            | CSR_TDATA3 | CSR_TCONTROL => Ok(0),
+            CSR_TSELECT | CSR_TDATA1 | CSR_TDATA2 | CSR_TDATA3
+            | CSR_TCONTROL => Ok(0),
 
             // -- FP --
             CSR_FFLAGS => Ok(self.fflags & FFLAGS_MASK),
@@ -538,8 +531,8 @@ impl CsrFile {
             }
 
             // Debug/Trace trigger stubs (write-ignore)
-            CSR_TSELECT | CSR_TDATA1 | CSR_TDATA2
-            | CSR_TDATA3 | CSR_TCONTROL => Ok(()),
+            CSR_TSELECT | CSR_TDATA1 | CSR_TDATA2 | CSR_TDATA3
+            | CSR_TCONTROL => Ok(()),
 
             // Machine HPM counters and event selectors:
             // silently ignore writes.

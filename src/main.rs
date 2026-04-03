@@ -34,12 +34,8 @@ fn usage() {
         "  --difftest    Instruction-level difftest \
          vs QEMU"
     );
-    eprintln!(
-        "  -drive file=<path>  Attach raw disk image"
-    );
-    eprintln!(
-        "  -monitor stdio|tcp:host:port  Monitor console"
-    );
+    eprintln!("  -drive file=<path>  Attach raw disk image");
+    eprintln!("  -monitor stdio|tcp:host:port  Monitor console");
     eprintln!("  -h, --help    Show this help");
 }
 
@@ -48,7 +44,6 @@ struct CliArgs {
     ram_mib: u64,
     bios: Option<PathBuf>,
     kernel: Option<PathBuf>,
-    #[allow(dead_code)]
     nographic: bool,
     difftest: bool,
     drive: Option<PathBuf>,
@@ -115,25 +110,18 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "-drive" => {
                 i += 1;
-                let s = args
-                    .get(i)
-                    .ok_or("-drive requires argument")?;
+                let s = args.get(i).ok_or("-drive requires argument")?;
                 // Parse file=<path> from the option
                 // string (ignore if=, format=, id=).
                 let mut path = None;
                 for part in s.split(',') {
-                    if let Some(p) =
-                        part.strip_prefix("file=")
-                    {
+                    if let Some(p) = part.strip_prefix("file=") {
                         path = Some(p.to_string());
                     }
                 }
                 cli.drive = path.map(PathBuf::from);
                 if cli.drive.is_none() {
-                    return Err(
-                        "-drive: missing file=<path>"
-                            .to_string(),
-                    );
+                    return Err("-drive: missing file=<path>".to_string());
                 }
             }
             "-device" => {
@@ -142,23 +130,17 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "-monitor" => {
                 i += 1;
-                let s = args
-                    .get(i)
-                    .ok_or("-monitor requires argument")?;
-                if s == "stdio"
-                    || s.starts_with("tcp:")
-                {
+                let s = args.get(i).ok_or("-monitor requires argument")?;
+                if s == "stdio" || s.starts_with("tcp:") {
                     cli.monitor = Some(s.clone());
                 } else {
-                    return Err(format!(
-                        "-monitor: unsupported: {}",
-                        s
-                    ));
+                    return Err(format!("-monitor: unsupported: {}", s));
                 }
             }
             "-h" | "--help" => {
                 usage();
-                machina_hw_core::chardev::restore_terminal(); process::exit(0);
+                machina_hw_core::chardev::restore_terminal();
+                process::exit(0);
             }
             other => {
                 return Err(format!("Unknown option: {}", other));
@@ -172,10 +154,8 @@ fn parse_args() -> Result<CliArgs, String> {
 fn install_crash_handler() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction =
-            crash_handler as *const () as usize;
-        sa.sa_flags =
-            libc::SA_SIGINFO | libc::SA_NODEFER;
+        sa.sa_sigaction = crash_handler as *const () as usize;
+        sa.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
         libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
     }
 }
@@ -188,23 +168,14 @@ extern "C" fn crash_handler(
     let pc = LAST_TB_PC.load(Ordering::Relaxed);
     let fault_addr = unsafe { (*info).si_addr() };
     let uctx = ctx as *const libc::ucontext_t;
-    let rbp = unsafe {
-        (*uctx).uc_mcontext.gregs
-            [libc::REG_RBP as usize]
-    };
-    let rip = unsafe {
-        (*uctx).uc_mcontext.gregs
-            [libc::REG_RIP as usize]
-    };
+    let rbp = unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RBP as usize] };
+    let rip = unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] };
     machina_hw_core::chardev::restore_terminal();
     eprintln!(
         "\nmachina: SIGSEGV at host {:#x}\n\
          rip={:#x} rbp={:#x}\n\
          last TB pc={:#x}",
-        fault_addr as u64,
-        rip as u64,
-        rbp as u64,
-        pc,
+        fault_addr as u64, rip as u64, rbp as u64, pc,
     );
     machina_hw_core::chardev::restore_terminal();
     std::process::exit(139);
@@ -216,13 +187,9 @@ extern "C" fn crash_handler(
 fn run_machine_cycle(
     opts: &MachineOpts,
     ram_size: u64,
-    monitor_state: Option<
-        Arc<machina_core::monitor::MonitorState>,
-    >,
+    monitor_state: Option<Arc<machina_core::monitor::MonitorState>>,
     monitor_svc: Arc<
-        std::sync::Mutex<
-            machina_monitor::service::MonitorService,
-        >,
+        std::sync::Mutex<machina_monitor::service::MonitorService>,
     >,
     htif_tohost: Option<u64>,
 ) -> Option<ShutdownReason> {
@@ -238,39 +205,25 @@ fn run_machine_cycle(
         // Ctrl+A C: route input bytes to HMP console.
         // Buffer bytes into lines, dispatch via HMP.
         let mon_svc = Arc::clone(&monitor_svc);
-        let line_buf = Arc::new(
-            std::sync::Mutex::new(String::new()),
-        );
-        let mon_cb: Arc<
-            std::sync::Mutex<dyn FnMut(u8) + Send>,
-        > = Arc::new(std::sync::Mutex::new(
-            move |byte: u8| {
+        let line_buf = Arc::new(std::sync::Mutex::new(String::new()));
+        let mon_cb: Arc<std::sync::Mutex<dyn FnMut(u8) + Send>> =
+            Arc::new(std::sync::Mutex::new(move |byte: u8| {
                 use std::io::Write;
                 let ch = byte as char;
-                let mut buf =
-                    line_buf.lock().unwrap();
+                let mut buf = line_buf.lock().unwrap();
                 if ch == '\r' || ch == '\n' {
                     let line = buf.clone();
                     buf.clear();
                     // quit handled
-                    if let Some(output) = machina_monitor::hmp
-                        ::handle_line(&line, &mon_svc) {
-                        let mut out =
-                            std::io::stderr()
-                                .lock();
-                        let _ = write!(
-                            out, "\r{}",
-                            output
-                        );
-                        let _ = write!(
-                            out, "{}",
-                            machina_monitor::hmp
-                                ::PROMPT
-                        );
+                    if let Some(output) =
+                        machina_monitor::hmp::handle_line(&line, &mon_svc)
+                    {
+                        let mut out = std::io::stderr().lock();
+                        let _ = write!(out, "\r{}", output);
+                        let _ = write!(out, "{}", machina_monitor::hmp::PROMPT);
                         let _ = out.flush();
                     }
-                } else if byte == 0x7f || byte == 0x08
-                {
+                } else if byte == 0x7f || byte == 0x08 {
                     // Backspace.
                     buf.pop();
                     eprint!("\x08 \x08");
@@ -278,20 +231,21 @@ fn run_machine_cycle(
                     buf.push(ch);
                     eprint!("{}", ch);
                 }
-            },
-        ));
+            }));
         machine.set_monitor_cb(mon_cb);
     }
 
     if let Err(e) = machine.init(opts) {
         machina_hw_core::chardev::restore_terminal();
         eprintln!("machina: init failed: {}", e);
-        machina_hw_core::chardev::restore_terminal(); process::exit(1);
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
     }
 
     if let Err(e) = machine.boot() {
         eprintln!("machina: boot failed: {}", e);
-        machina_hw_core::chardev::restore_terminal(); process::exit(1);
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
     }
 
     // JIT backend with SoftMMU/TLB config.
@@ -344,8 +298,7 @@ fn run_machine_cycle(
     // Register MROM for instruction fetch at 0x1000.
     {
         use machina_hw_riscv::ref_machine::{MROM_BASE, MROM_SIZE};
-        let mrom_ptr =
-            machine.mrom_block().as_ptr() as *const u8;
+        let mrom_ptr = machine.mrom_block().as_ptr() as *const u8;
         fs_cpu.set_mrom(mrom_ptr, MROM_BASE, MROM_SIZE);
     }
     // Configure HTIF tohost polling if provided.
@@ -394,9 +347,7 @@ fn run_machine_cycle(
         if code == 1 {
             return Some(ShutdownReason::Pass);
         } else {
-            return Some(ShutdownReason::Fail(
-                code as u32,
-            ));
+            return Some(ShutdownReason::Fail(code as u32));
         }
     }
     None
@@ -409,18 +360,21 @@ fn main() {
         Err(e) => {
             eprintln!("machina: {}", e);
             usage();
-            machina_hw_core::chardev::restore_terminal(); process::exit(1);
+            machina_hw_core::chardev::restore_terminal();
+            process::exit(1);
         }
     };
 
     if cli.machine == "?" {
         eprintln!("Available machines:");
         eprintln!("  riscv64-ref    RISC-V reference machine");
-        machina_hw_core::chardev::restore_terminal(); process::exit(0);
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(0);
     }
     if cli.machine != "riscv64-ref" {
         eprintln!("machina: unknown machine: {}", cli.machine);
-        machina_hw_core::chardev::restore_terminal(); process::exit(1);
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
     }
 
     let ram_size = cli.ram_mib * 1024 * 1024;
@@ -435,31 +389,25 @@ fn main() {
     };
 
     // Check -monitor stdio + -nographic conflict.
-    if cli.monitor.as_deref() == Some("stdio")
-        && cli.nographic
-    {
+    if cli.monitor.as_deref() == Some("stdio") && cli.nographic {
         machina_hw_core::chardev::restore_terminal();
         eprintln!(
             "machina: -monitor stdio and -nographic \
              are mutually exclusive"
         );
-        machina_hw_core::chardev::restore_terminal(); process::exit(1);
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
     }
 
     // Find HTIF tohost symbol from kernel ELF.
     let htif_tohost: Option<u64> = cli.kernel.as_ref().and_then(|p| {
         let data = std::fs::read(p).ok()?;
-        machina_hw_core::loader::elf_find_symbol(
-            &data, "tohost",
-        )
+        machina_hw_core::loader::elf_find_symbol(&data, "tohost")
     });
 
     eprintln!("machina: riscv64-ref, {} MiB RAM", cli.ram_mib,);
     if let Some(addr) = htif_tohost {
-        eprintln!(
-            "machina: HTIF tohost at {:#x}",
-            addr
-        );
+        eprintln!("machina: HTIF tohost at {:#x}", addr);
     }
 
     if cli.difftest {
@@ -468,13 +416,11 @@ fn main() {
     }
 
     // Create shared monitor state and service.
-    let monitor_state = Arc::new(
-        machina_core::monitor::MonitorState::new(),
-    );
+    let monitor_state = Arc::new(machina_core::monitor::MonitorState::new());
     let monitor_svc = Arc::new(std::sync::Mutex::new(
-        machina_monitor::service::MonitorService::new(
-            Arc::clone(&monitor_state),
-        ),
+        machina_monitor::service::MonitorService::new(Arc::clone(
+            &monitor_state,
+        )),
     ));
 
     // Start monitor transport thread (if configured).
@@ -482,35 +428,24 @@ fn main() {
         let svc = Arc::clone(&monitor_svc);
         if let Some(addr) = mon.strip_prefix("tcp:") {
             let listener =
-                std::net::TcpListener::bind(addr)
-                    .unwrap_or_else(|e| {
-                        eprintln!(
-                            "machina: monitor tcp: {}",
-                            e
-                        );
-                        machina_hw_core::chardev::restore_terminal(); process::exit(1);
-                    });
+                std::net::TcpListener::bind(addr).unwrap_or_else(|e| {
+                    eprintln!("machina: monitor tcp: {}", e);
+                    machina_hw_core::chardev::restore_terminal();
+                    process::exit(1);
+                });
             let svc2 = Arc::clone(&svc);
             std::thread::spawn(move || {
-                machina_monitor::mmp::run_tcp(
-                    listener, svc2,
-                );
+                machina_monitor::mmp::run_tcp(listener, svc2);
             });
-            eprintln!(
-                "machina: monitor on tcp:{}",
-                addr
-            );
+            eprintln!("machina: monitor on tcp:{}", addr);
         } else if mon == "stdio" {
             let svc2 = Arc::clone(&svc);
             std::thread::spawn(move || {
                 let stdin = std::io::stdin();
                 let stdout = std::io::stdout();
-                let mut r =
-                    std::io::BufReader::new(stdin.lock());
+                let mut r = std::io::BufReader::new(stdin.lock());
                 let mut w = stdout.lock();
-                machina_monitor::hmp::run_interactive(
-                    &mut r, &mut w, svc2,
-                );
+                machina_monitor::hmp::run_interactive(&mut r, &mut w, svc2);
             });
             eprintln!("machina: monitor on stdio");
         }
@@ -519,9 +454,7 @@ fn main() {
     // Outer loop: supports machine reset via SiFive Test.
     loop {
         eprintln!("machina: entering execution loop");
-        let ms = if cli.monitor.is_some()
-            || cli.nographic
-        {
+        let ms = if cli.monitor.is_some() || cli.nographic {
             Some(Arc::clone(&monitor_state))
         } else {
             None
@@ -536,28 +469,25 @@ fn main() {
 
         match reason {
             Some(ShutdownReason::Pass) => {
-                machina_hw_core::chardev
-                    ::restore_terminal();
+                machina_hw_core::chardev::restore_terminal();
                 eprintln!("machina: shutdown (pass)");
-                machina_hw_core::chardev::restore_terminal(); process::exit(0);
+                machina_hw_core::chardev::restore_terminal();
+                process::exit(0);
             }
             Some(ShutdownReason::Reset) => {
                 eprintln!("machina: reset, rebooting...");
             }
             Some(ShutdownReason::Fail(code)) => {
-                machina_hw_core::chardev
-                    ::restore_terminal();
-                eprintln!(
-                    "machina: fail (code {:#x})",
-                    code
-                );
-                machina_hw_core::chardev::restore_terminal(); process::exit(1);
+                machina_hw_core::chardev::restore_terminal();
+                eprintln!("machina: fail (code {:#x})", code);
+                machina_hw_core::chardev::restore_terminal();
+                process::exit(1);
             }
             None => {
-                machina_hw_core::chardev
-                    ::restore_terminal();
+                machina_hw_core::chardev::restore_terminal();
                 eprintln!("machina: execution exited");
-                machina_hw_core::chardev::restore_terminal(); process::exit(0);
+                machina_hw_core::chardev::restore_terminal();
+                process::exit(0);
             }
         }
     }

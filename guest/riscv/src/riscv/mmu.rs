@@ -40,8 +40,6 @@ const PTE_R: u8 = 1 << 1;
 const PTE_W: u8 = 1 << 2;
 const PTE_X: u8 = 1 << 3;
 const PTE_U: u8 = 1 << 4;
-#[allow(dead_code)]
-const PTE_G: u8 = 1 << 5;
 const PTE_A: u8 = 1 << 6;
 const PTE_D: u8 = 1 << 7;
 const PTE_N: u64 = 1 << 63;
@@ -236,16 +234,11 @@ impl Mmu {
     /// Lookup TLB for code fetch and return the guest
     /// physical address (not host address).
     /// Returns None on miss or MMIO.
-    pub fn tlb_lookup_code_phys(
-        &self,
-        gva: u64,
-    ) -> Option<u64> {
+    pub fn tlb_lookup_code_phys(&self, gva: u64) -> Option<u64> {
         let idx = tlb_index(gva);
         let entry = &self.tlb[idx];
         let tag = gva & PAGE_MASK;
-        if entry.addr_code == tag
-            && entry.addend != TLB_MMIO_ADDEND
-        {
+        if entry.addr_code == tag && entry.addend != TLB_MMIO_ADDEND {
             let offset = gva & !PAGE_MASK;
             Some((entry.phys_page << 12) | offset)
         } else {
@@ -470,8 +463,7 @@ impl Mmu {
         }
         entry.addend = addend;
         entry.phys_page = gva >> 12;
-        entry.perm =
-            PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+        entry.perm = PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
         entry.asid = 0;
         entry.page_size = PAGE_SIZE;
     }

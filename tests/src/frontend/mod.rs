@@ -1550,10 +1550,23 @@ fn cfg_rv64i_only() -> RiscvCfg {
         misa: MisaExt::I,
         ext_zicsr: false,
         ext_zifencei: false,
+        ext_zicntr: false,
+        ext_ziccid: false,
+        ext_ziccif: false,
+        ext_zicclsm: false,
+        ext_ziccamoa: false,
+        ext_zicbom: false,
+        ext_zicbop: false,
+        ext_zicboz: false,
         ext_zba: false,
         ext_zbb: false,
         ext_zbc: false,
         ext_zbs: false,
+        ext_zfh: false,
+        ext_zfhmin: false,
+        ext_ssvnapot: false,
+        ext_svadu: false,
+        ext_sstc: false,
     }
 }
 

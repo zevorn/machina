@@ -9,8 +9,8 @@ use machina_accel::ir::TempIdx;
 use machina_accel::GuestCpu;
 use machina_accel::X86_64CodeGen;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
-use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::exception::Exception;
+use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
 use machina_guest_riscv::{translator_loop, DisasJumpType, TranslatorOps};
 
@@ -87,7 +87,7 @@ impl GuestCpu for TestCpu {
         &mut self.cpu as *mut RiscvCpu as *mut u8
     }
 
-    fn handle_exception(&mut self, excp: u32, tval: u64) {
+    fn handle_exception(&mut self, excp: u64, tval: u64) {
         let e = match excp {
             0 => Exception::InstructionMisaligned,
             1 => Exception::InstructionAccessFault,
