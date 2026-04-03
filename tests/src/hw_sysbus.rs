@@ -218,3 +218,33 @@ fn test_sysbus_rejects_late_mutation_after_realize() {
         ))
     );
 }
+
+#[test]
+fn test_sysbus_unrealize_removes_mmio_from_address_space() {
+    let mut bus = SysBus::new("sysbus0");
+    let mut state = SysBusDeviceState::new("uart0");
+    state
+        .register_mmio(
+            MemoryRegion::io(
+                "uart0-mmio",
+                0x100,
+                Box::new(TestMmio {
+                    value: Arc::new(Mutex::new(0)),
+                }),
+            ),
+            GPA::new(0x1000_0000),
+        )
+        .unwrap();
+
+    let mut address_space = make_address_space();
+    state.attach_to_bus(&bus).unwrap();
+    state.realize_onto(&mut bus, &mut address_space).unwrap();
+    assert!(address_space.is_mapped(GPA::new(0x1000_0000), 4));
+    assert_eq!(bus.mappings().len(), 1);
+
+    state.unrealize_from(&mut bus, &mut address_space).unwrap();
+
+    assert!(!address_space.is_mapped(GPA::new(0x1000_0000), 4));
+    assert!(bus.mappings().is_empty());
+    assert!(!state.is_realized());
+}

@@ -189,10 +189,15 @@ impl Uart16550 {
         Ok(())
     }
 
-    pub fn unrealize(&mut self) -> Result<(), MDeviceError> {
+    pub fn unrealize_from(
+        &mut self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+    ) -> Result<(), UartError> {
         self.chardev = None;
         self.irq_line = None;
-        self.state.device_mut().mark_unrealized()
+        self.state.unrealize_from(bus, address_space)?;
+        Ok(())
     }
 
     pub fn reset_runtime(&mut self) {

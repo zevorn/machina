@@ -360,9 +360,11 @@ fn test_uart_unrealize_drops_runtime_wiring() {
             Arc::new(Mutex::new(move |_byte: u8| {}));
         u.realize_onto(&mut bus, &mut address_space, rx_cb).unwrap();
         u.write(0, 0x41);
-        u.unrealize().unwrap();
+        u.unrealize_from(&mut bus, &mut address_space).unwrap();
         u.write(0, 0x42);
     }
 
     assert_eq!(*tx.lock().unwrap(), vec![0x41]);
+    assert!(!address_space.is_mapped(GPA::new(0x1000_0000), 4));
+    assert!(bus.mappings().is_empty());
 }

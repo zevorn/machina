@@ -39,6 +39,7 @@ pub enum SysBusError {
     MissingParentBus,
     ParentBusMismatch { attached: String, expected: String },
     MissingMmio(String),
+    MissingRealizedMapping(String),
     MmioOverlap { existing: String, requested: String },
 }
 
@@ -57,6 +58,9 @@ impl fmt::Display for SysBusError {
             }
             Self::MissingMmio(device) => {
                 write!(f, "sysbus device '{device}' has no MMIO mappings")
+            }
+            Self::MissingRealizedMapping(name) => {
+                write!(f, "sysbus realized mapping '{name}' is missing")
             }
             Self::MmioOverlap {
                 existing,
@@ -201,6 +205,33 @@ impl SysBusDeviceState {
         address_space.update_flat_view();
         Ok(())
     }
+
+    pub fn unrealize_from(
+        &mut self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+    ) -> Result<(), SysBusError> {
+        if !self.device.is_realized() {
+            return Err(MDeviceError::NotRealized.into());
+        }
+
+        for mapping in self.mappings.iter_mut().rev() {
+            let region = address_space
+                .remove_subregion(mapping.desc.base, &mapping.desc.name)
+                .ok_or_else(|| {
+                    SysBusError::MissingRealizedMapping(
+                        mapping.desc.name.clone(),
+                    )
+                })?;
+            mapping.region = Some(region);
+            bus.remove_mapping(&mapping.desc).ok_or_else(|| {
+                SysBusError::MissingRealizedMapping(mapping.desc.name.clone())
+            })?;
+        }
+
+        self.device.mark_unrealized()?;
+        Ok(())
+    }
 }
 
 impl MObject for SysBusDeviceState {
@@ -262,6 +293,15 @@ impl SysBus {
 
     fn record_mapping(&mut self, mapping: SysBusMapping) {
         self.mappings.push(mapping);
+    }
+
+    fn remove_mapping(
+        &mut self,
+        target: &SysBusMapping,
+    ) -> Option<SysBusMapping> {
+        let index =
+            self.mappings.iter().position(|mapping| mapping == target)?;
+        Some(self.mappings.remove(index))
     }
 
     pub fn mappings(&self) -> &[SysBusMapping] {
