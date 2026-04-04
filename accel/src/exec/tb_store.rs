@@ -293,14 +293,23 @@ impl TbStore {
         if page_idx >= CODE_REFCOUNT_PAGES {
             return;
         }
+        let gen = self.global_gen.load(Ordering::Acquire);
+        let len = self.len.load(Ordering::Acquire);
         // Fast path: per-page linked list.
+        // Skip stale TBs (gen mismatch) and guard against
+        // stale page_next indices (from flush interaction).
         let tb_list: Vec<usize> = {
             let heads = self.page_heads.lock().unwrap();
             let mut list = Vec::new();
             let mut cur = heads[page_idx];
             while let Some(idx) = cur {
+                if idx >= len {
+                    break;
+                }
                 let tb = self.get(idx);
-                if !tb.invalid.load(Ordering::Acquire) {
+                if !tb.invalid.load(Ordering::Acquire)
+                    && tb.gen.load(Ordering::Acquire) == gen
+                {
                     list.push(idx);
                 }
                 cur = tb.page_next;
@@ -316,10 +325,10 @@ impl TbStore {
         // Fallback: full scan if refcount says there are
         // TBs on this page but the list was empty.
         if self.is_code_page(phys_page) {
-            let len = self.len.load(Ordering::Acquire);
             for i in 0..len {
                 let tb = self.get(i);
                 if !tb.invalid.load(Ordering::Acquire)
+                    && tb.gen.load(Ordering::Acquire) == gen
                     && (tb.phys_pc >> 12) == phys_page
                 {
                     self.invalidate(i, code_buf, backend);
@@ -337,6 +346,7 @@ impl TbStore {
         tbs.clear();
         self.len.store(0, Ordering::Release);
         self.hash.lock().unwrap().fill(None);
+        self.page_heads.lock().unwrap().fill(None);
         for b in &self.code_pages {
             b.store(0, Ordering::Relaxed);
         }
@@ -390,15 +400,21 @@ impl TbStore {
     }
 
     /// Remove a TB from its per-page linked list.
+    /// Guards against stale page_next indices from
+    /// invalidate_all/flush interaction.
     fn unlink_page(&self, phys_page: u64, tb_idx: usize) {
         let idx = phys_page as usize;
         if idx >= CODE_REFCOUNT_PAGES {
             return;
         }
+        let len = self.len.load(Ordering::Acquire);
         let mut heads = self.page_heads.lock().unwrap();
         let mut prev: Option<usize> = None;
         let mut cur = heads[idx];
         while let Some(i) = cur {
+            if i >= len {
+                break;
+            }
             if i == tb_idx {
                 let next = self.get(i).page_next;
                 if let Some(p) = prev {
@@ -414,7 +430,11 @@ impl TbStore {
                 return;
             }
             prev = cur;
-            cur = self.get(i).page_next;
+            let next = self.get(i).page_next;
+            cur = match next {
+                Some(n) if n < len => Some(n),
+                _ => None,
+            };
         }
     }
 
