@@ -4,6 +4,8 @@ use std::io::Write as _;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
+use machina_core::mobject::{MObject, MObjectState};
+
 /// Shared mutable byte callback.
 pub type ByteCb = Arc<Mutex<dyn FnMut(u8) + Send>>;
 
@@ -50,6 +52,106 @@ impl CharFrontend {
     /// callback is invoked for each byte received.
     pub fn start_input(&mut self, cb: ByteCb) {
         self.backend.start_input(cb);
+    }
+}
+
+#[derive(Debug)]
+pub enum ChardevResolveError {
+    UnknownPath(String),
+    BackendUnavailable(String),
+    BackendAlreadyInstalled(String),
+}
+
+impl std::fmt::Display for ChardevResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownPath(path) => {
+                write!(f, "unknown chardev object '{path}'")
+            }
+            Self::BackendUnavailable(path) => {
+                write!(f, "chardev object '{path}' has no available frontend")
+            }
+            Self::BackendAlreadyInstalled(path) => {
+                write!(
+                    f,
+                    "chardev object '{path}' already has an installed frontend"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ChardevResolveError {}
+
+pub trait ChardevResolver: Send + Sync {
+    fn take_frontend(
+        &self,
+        path: &str,
+    ) -> Result<CharFrontend, ChardevResolveError>;
+
+    fn put_frontend(
+        &self,
+        path: &str,
+        frontend: CharFrontend,
+    ) -> Result<(), ChardevResolveError>;
+}
+
+pub struct ChardevObject {
+    object: MObjectState,
+    frontend: Option<CharFrontend>,
+}
+
+impl ChardevObject {
+    pub fn new_detached(local_id: &str, frontend: CharFrontend) -> Self {
+        Self {
+            object: MObjectState::new_detached(local_id)
+                .expect("chardev local_id must be valid"),
+            frontend: Some(frontend),
+        }
+    }
+
+    pub fn frontend_available(&self) -> bool {
+        self.frontend.is_some()
+    }
+
+    pub fn take_frontend(&mut self) -> Option<CharFrontend> {
+        self.frontend.take()
+    }
+
+    pub fn put_frontend(
+        &mut self,
+        frontend: CharFrontend,
+    ) -> Result<(), ChardevResolveError> {
+        let Some(path) = self.object.object_path() else {
+            return Err(ChardevResolveError::UnknownPath(
+                self.object.local_id().to_string(),
+            ));
+        };
+        if self.frontend.is_some() {
+            return Err(ChardevResolveError::BackendAlreadyInstalled(
+                path.to_string(),
+            ));
+        }
+        self.frontend = Some(frontend);
+        Ok(())
+    }
+}
+
+impl MObject for ChardevObject {
+    fn mobject_state(&self) -> &MObjectState {
+        &self.object
+    }
+
+    fn mobject_state_mut(&mut self) -> &mut MObjectState {
+        &mut self.object
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

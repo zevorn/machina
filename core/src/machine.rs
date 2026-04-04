@@ -1,7 +1,8 @@
 /// Machine model trait and configuration.
+use std::any::Any;
 use std::path::PathBuf;
 
-use crate::mobject::MObjectState;
+use crate::mobject::{MObject, MObjectState};
 
 // TODO: use GPA in Machine trait methods (e.g. ram_base)
 // use crate::address::GPA;
@@ -34,6 +35,24 @@ impl MachineState {
 
     pub fn object_mut(&mut self) -> &mut MObjectState {
         &mut self.object
+    }
+}
+
+impl MObject for MachineState {
+    fn mobject_state(&self) -> &MObjectState {
+        self.object()
+    }
+
+    fn mobject_state_mut(&mut self) -> &mut MObjectState {
+        self.object_mut()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 

@@ -10,14 +10,17 @@
 // future value, a timer thread sleeps until the deadline
 // and then asserts MTI via the IRQ line.
 
+use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use machina_core::address::GPA;
+use machina_core::mobject::MObject;
 use machina_core::wfi::WfiWaker;
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::irq::IrqLine;
+use machina_hw_core::mdev::{MDevice, MDeviceState};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
@@ -74,7 +77,7 @@ impl Aclint {
         }
     }
 
-    pub fn attach_to_bus(&mut self, bus: &SysBus) -> Result<(), SysBusError> {
+    pub fn attach_to_bus(&mut self, bus: &mut SysBus) -> Result<(), SysBusError> {
         self.state.attach_to_bus(bus)
     }
 
@@ -311,5 +314,35 @@ impl MmioOps for AclintMmio {
 
     fn write(&self, offset: u64, size: u32, val: u64) {
         self.0.lock().unwrap().write(offset, size, val);
+    }
+}
+
+impl MObject for Aclint {
+    fn mobject_state(&self) -> &machina_core::mobject::MObjectState {
+        self.state.mobject_state()
+    }
+
+    fn mobject_state_mut(
+        &mut self,
+    ) -> &mut machina_core::mobject::MObjectState {
+        self.state.mobject_state_mut()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl MDevice for Aclint {
+    fn mdevice_state(&self) -> &MDeviceState {
+        self.state.device()
+    }
+
+    fn mdevice_state_mut(&mut self) -> &mut MDeviceState {
+        self.state.device_mut()
     }
 }

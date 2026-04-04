@@ -4,11 +4,14 @@
 // and delegates device-specific operations to a VirtioBlk
 // backend.
 
+use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
+use machina_core::mobject::MObject;
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::irq::IrqLine;
+use machina_hw_core::mdev::{MDevice, MDeviceState};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::MemoryRegion;
 use machina_memory::region::MmioOps;
@@ -178,7 +181,7 @@ impl VirtioMmio {
         }
     }
 
-    pub fn attach_to_bus(&mut self, bus: &SysBus) -> Result<(), SysBusError> {
+    pub fn attach_to_bus(&mut self, bus: &mut SysBus) -> Result<(), SysBusError> {
         self.device.attach_to_bus(bus)
     }
 
@@ -415,5 +418,35 @@ impl MmioOps for VirtioMmioRegion {
     fn write(&self, offset: u64, _size: u32, val: u64) {
         let mut state = self.0.lock().unwrap();
         VirtioMmio::write_locked(&mut state, offset, val);
+    }
+}
+
+impl MObject for VirtioMmio {
+    fn mobject_state(&self) -> &machina_core::mobject::MObjectState {
+        self.device.mobject_state()
+    }
+
+    fn mobject_state_mut(
+        &mut self,
+    ) -> &mut machina_core::mobject::MObjectState {
+        self.device.mobject_state_mut()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl MDevice for VirtioMmio {
+    fn mdevice_state(&self) -> &MDeviceState {
+        self.device.device()
+    }
+
+    fn mdevice_state_mut(&mut self) -> &mut MDeviceState {
+        self.device.device_mut()
     }
 }

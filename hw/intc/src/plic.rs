@@ -6,11 +6,14 @@
 //   0x002000 + 0x80*ctx   enable bitmap per context
 //   0x200000 + 0x1000*ctx threshold (off 0), claim/complete (off 4)
 
+use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
+use machina_core::mobject::MObject;
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::irq::IrqLine;
+use machina_hw_core::mdev::{MDevice, MDeviceState};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
@@ -64,7 +67,7 @@ impl Plic {
         }
     }
 
-    pub fn attach_to_bus(&mut self, bus: &SysBus) -> Result<(), SysBusError> {
+    pub fn attach_to_bus(&mut self, bus: &mut SysBus) -> Result<(), SysBusError> {
         self.state.attach_to_bus(bus)
     }
 
@@ -351,5 +354,35 @@ pub struct PlicIrqSink(pub Arc<Mutex<Plic>>);
 impl machina_hw_core::irq::IrqSink for PlicIrqSink {
     fn set_irq(&self, irq: u32, level: bool) {
         self.0.lock().unwrap().set_irq(irq, level);
+    }
+}
+
+impl MObject for Plic {
+    fn mobject_state(&self) -> &machina_core::mobject::MObjectState {
+        self.state.mobject_state()
+    }
+
+    fn mobject_state_mut(
+        &mut self,
+    ) -> &mut machina_core::mobject::MObjectState {
+        self.state.mobject_state_mut()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl MDevice for Plic {
+    fn mdevice_state(&self) -> &MDeviceState {
+        self.state.device()
+    }
+
+    fn mdevice_state_mut(&mut self) -> &mut MDeviceState {
+        self.state.device_mut()
     }
 }

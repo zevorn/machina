@@ -2,6 +2,14 @@ use std::any::Any;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MObjectInfo {
+    pub local_id: String,
+    pub object_path: Option<String>,
+    pub parent_path: Option<String>,
+    pub child_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MObjectError {
     EmptyLocalId,
     ParentDetached,
@@ -93,6 +101,15 @@ impl MObjectState {
         self.object_path.is_some()
     }
 
+    pub fn info(&self) -> MObjectInfo {
+        MObjectInfo {
+            local_id: self.local_id.clone(),
+            object_path: self.object_path.clone(),
+            parent_path: self.parent_path.clone(),
+            child_paths: self.child_paths.clone(),
+        }
+    }
+
     pub fn attach_child(
         &mut self,
         child: &mut MObjectState,
@@ -158,6 +175,46 @@ pub trait MObject: Any + Send + Sync {
 
     fn is_type<T: Any>(&self) -> bool {
         self.as_any().is::<T>()
+    }
+
+    fn object_info(&self) -> MObjectInfo {
+        self.mobject_state().info()
+    }
+}
+
+pub struct MObjectNode {
+    state: MObjectState,
+}
+
+impl MObjectNode {
+    pub fn new_root(local_id: &str) -> Result<Self, MObjectError> {
+        Ok(Self {
+            state: MObjectState::new_root(local_id)?,
+        })
+    }
+
+    pub fn new_detached(local_id: &str) -> Result<Self, MObjectError> {
+        Ok(Self {
+            state: MObjectState::new_detached(local_id)?,
+        })
+    }
+}
+
+impl MObject for MObjectNode {
+    fn mobject_state(&self) -> &MObjectState {
+        &self.state
+    }
+
+    fn mobject_state_mut(&mut self) -> &mut MObjectState {
+        &mut self.state
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 

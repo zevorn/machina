@@ -10,15 +10,18 @@
 //   6: MSR
 //   7: SCR
 
+use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
+use machina_core::mobject::{MObject, MObjectInfo};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::chardev::ByteCb;
-use machina_hw_core::chardev::CharFrontend;
+use machina_hw_core::chardev::{
+    ByteCb, CharFrontend, ChardevResolveError, ChardevResolver,
+};
 use machina_hw_core::irq::IrqLine;
-use machina_hw_core::mdev::MDeviceError;
+use machina_hw_core::mdev::{MDevice, MDeviceError, MDeviceState};
 use machina_hw_core::property::{MPropertySpec, MPropertyType, MPropertyValue};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
@@ -45,6 +48,7 @@ const FIFO_SIZE: usize = 16;
 pub enum UartError {
     Device(MDeviceError),
     SysBus(SysBusError),
+    Resolve(ChardevResolveError),
 }
 
 impl std::fmt::Display for UartError {
@@ -52,6 +56,7 @@ impl std::fmt::Display for UartError {
         match self {
             Self::Device(err) => write!(f, "{err}"),
             Self::SysBus(err) => write!(f, "{err}"),
+            Self::Resolve(err) => write!(f, "{err}"),
         }
     }
 }
@@ -67,6 +72,12 @@ impl From<MDeviceError> for UartError {
 impl From<SysBusError> for UartError {
     fn from(value: SysBusError) -> Self {
         Self::SysBus(value)
+    }
+}
+
+impl From<ChardevResolveError> for UartError {
+    fn from(value: ChardevResolveError) -> Self {
+        Self::Resolve(value)
     }
 }
 
@@ -89,6 +100,7 @@ pub struct Uart16550 {
     irq_line: Option<IrqLine>,
     chardev: Option<CharFrontend>,
     configured_chardev: Option<CharFrontend>,
+    resolved_chardev_path: Option<String>,
 }
 
 impl Uart16550 {
@@ -122,6 +134,7 @@ impl Uart16550 {
             irq_line: None,
             chardev: None,
             configured_chardev: None,
+            resolved_chardev_path: None,
         }
     }
 
@@ -145,7 +158,7 @@ impl Uart16550 {
         self.state.device().is_realized()
     }
 
-    pub fn attach_to_bus(&mut self, bus: &SysBus) -> Result<(), SysBusError> {
+    pub fn attach_to_bus(&mut self, bus: &mut SysBus) -> Result<(), SysBusError> {
         self.state.attach_to_bus(bus)
     }
 
@@ -178,12 +191,23 @@ impl Uart16550 {
         address_space: &mut AddressSpace,
         rx_cb: ByteCb,
     ) -> Result<(), UartError> {
+        self.realize_onto_with_resolver(bus, address_space, rx_cb, None)
+    }
+
+    pub fn realize_onto_with_resolver(
+        &mut self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+        rx_cb: ByteCb,
+        resolver: Option<&dyn ChardevResolver>,
+    ) -> Result<(), UartError> {
         self.state.realize_onto(bus, address_space)?;
         self.irq_line = self.state.irq_outputs().first().cloned();
 
-        if let Some(mut fe) = self.configured_chardev.take() {
+        if let Some((path, mut fe)) = self.resolve_chardev(resolver)? {
             fe.start_input(rx_cb);
             self.chardev = Some(fe);
+            self.resolved_chardev_path = path;
         }
 
         Ok(())
@@ -194,10 +218,49 @@ impl Uart16550 {
         bus: &mut SysBus,
         address_space: &mut AddressSpace,
     ) -> Result<(), UartError> {
-        self.chardev = None;
+        self.unrealize_from_with_resolver(bus, address_space, None)
+    }
+
+    pub fn unrealize_from_with_resolver(
+        &mut self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+        resolver: Option<&dyn ChardevResolver>,
+    ) -> Result<(), UartError> {
+        if let Some(frontend) = self.chardev.take() {
+            if let (Some(path), Some(resolver)) =
+                (self.resolved_chardev_path.take(), resolver)
+            {
+                resolver.put_frontend(&path, frontend)?;
+            }
+        }
         self.irq_line = None;
         self.state.unrealize_from(bus, address_space)?;
         Ok(())
+    }
+
+    fn resolve_chardev(
+        &mut self,
+        resolver: Option<&dyn ChardevResolver>,
+    ) -> Result<Option<(Option<String>, CharFrontend)>, UartError> {
+        if let Some(frontend) = self.configured_chardev.take() {
+            return Ok(Some((None, frontend)));
+        }
+
+        let Some(MPropertyValue::Link(path)) = self.state.device().property("chardev")
+        else {
+            return Ok(None);
+        };
+
+        let Some(resolver) = resolver else {
+            return Ok(None);
+        };
+        let frontend = resolver.take_frontend(path)?;
+        Ok(Some((Some(path.clone()), frontend)))
+    }
+
+    pub fn object_info(&self) -> MObjectInfo {
+        self.state.object_info()
     }
 
     pub fn reset_runtime(&mut self) {
@@ -335,6 +398,36 @@ impl Uart16550 {
         // instantly, so THRE stays set.
         self.lsr |= LSR_THRE | LSR_TEMT;
         self.update_irq();
+    }
+}
+
+impl MObject for Uart16550 {
+    fn mobject_state(&self) -> &machina_core::mobject::MObjectState {
+        self.state.mobject_state()
+    }
+
+    fn mobject_state_mut(
+        &mut self,
+    ) -> &mut machina_core::mobject::MObjectState {
+        self.state.mobject_state_mut()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl MDevice for Uart16550 {
+    fn mdevice_state(&self) -> &MDeviceState {
+        self.state.device()
+    }
+
+    fn mdevice_state_mut(&mut self) -> &mut MDeviceState {
+        self.state.device_mut()
     }
 }
 

@@ -6,15 +6,19 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts, MachineState};
+use machina_core::mobject::{MObject, MObjectInfo, MObjectNode};
 use machina_core::wfi::WfiWaker;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_hw_char::uart::{Uart16550, Uart16550Mmio};
 use machina_hw_core::bus::{SysBus, SysBusMapping};
 use machina_hw_core::chardev::{
-    CharFrontend, Chardev, NullChardev, StdioChardev,
+    CharFrontend, Chardev, ChardevObject, ChardevResolveError,
+    ChardevResolver, NullChardev, StdioChardev,
 };
 use machina_hw_core::fdt::FdtBuilder;
 use machina_hw_core::irq::{IrqLine, IrqSink};
+use machina_hw_core::mdev::MDevice;
+use machina_hw_core::property::{MPropertySpec, MPropertyValue};
 use machina_hw_intc::aclint::{Aclint, AclintMmio};
 use machina_hw_intc::plic::{Plic, PlicIrqSink, PlicMmio};
 use machina_hw_virtio::mmio::VirtioMmio;
@@ -25,6 +29,41 @@ use machina_memory::region::{MemoryRegion, MmioOps};
 use crate::sifive_test::SifiveTest;
 
 type MonitorCallback = Arc<Mutex<dyn FnMut(u8) + Send>>;
+
+struct RefMachineChardevResolver {
+    objects: Vec<Arc<Mutex<ChardevObject>>>,
+}
+
+impl ChardevResolver for RefMachineChardevResolver {
+    fn take_frontend(
+        &self,
+        path: &str,
+    ) -> Result<CharFrontend, ChardevResolveError> {
+        for object in &self.objects {
+            let mut object = object.lock().unwrap();
+            if object.object_path() == Some(path) {
+                return object.take_frontend().ok_or_else(|| {
+                    ChardevResolveError::BackendUnavailable(path.to_string())
+                });
+            }
+        }
+        Err(ChardevResolveError::UnknownPath(path.to_string()))
+    }
+
+    fn put_frontend(
+        &self,
+        path: &str,
+        frontend: CharFrontend,
+    ) -> Result<(), ChardevResolveError> {
+        for object in &self.objects {
+            let mut object = object.lock().unwrap();
+            if object.object_path() == Some(path) {
+                return object.put_frontend(frontend);
+            }
+        }
+        Err(ChardevResolveError::UnknownPath(path.to_string()))
+    }
+}
 
 // QEMU virt memory map base addresses.
 pub const MROM_BASE: u64 = 0x0000_1000;
@@ -118,6 +157,7 @@ pub struct RefMachine {
     machine_state: MachineState,
     ram_size: u64,
     cpu_count: u32,
+    chardev_root: Option<MObjectNode>,
     address_space: Option<AddressSpace>,
     sysbus: Option<SysBus>,
     ram_block: Option<Arc<RamBlock>>,
@@ -125,6 +165,7 @@ pub struct RefMachine {
     plic: Option<Arc<Mutex<Plic>>>,
     aclint: Option<Arc<Mutex<Aclint>>>,
     uart: Option<Arc<Mutex<Uart16550>>>,
+    uart_chardev: Option<Arc<Mutex<ChardevObject>>>,
     virtio_mmio: Option<VirtioMmio>,
     sifive_test: Option<Arc<SifiveTest>>,
     fdt_blob: Option<Vec<u8>>,
@@ -151,6 +192,7 @@ impl RefMachine {
             machine_state: MachineState::new_root("machine"),
             ram_size: 0,
             cpu_count: 0,
+            chardev_root: None,
             address_space: None,
             sysbus: None,
             ram_block: None,
@@ -158,6 +200,7 @@ impl RefMachine {
             plic: None,
             aclint: None,
             uart: None,
+            uart_chardev: None,
             virtio_mmio: None,
             sifive_test: None,
             fdt_blob: None,
@@ -182,12 +225,116 @@ impl RefMachine {
         self.sysbus.as_ref().expect("machine not initialized")
     }
 
+    pub fn lookup_object_by_path(&self, path: &str) -> Option<MObjectInfo> {
+        self.mom_object_infos()
+            .into_iter()
+            .find(|info| info.object_path.as_deref() == Some(path))
+    }
+
+    pub fn lookup_object_by_local_id(
+        &self,
+        local_id: &str,
+    ) -> Option<MObjectInfo> {
+        self.mom_object_infos()
+            .into_iter()
+            .find(|info| info.local_id == local_id)
+    }
+
+    pub fn property_spec(
+        &self,
+        object_ref: &str,
+        property: &str,
+    ) -> Option<MPropertySpec> {
+        self.with_mdevice(object_ref, |device| {
+            device.property_spec(property).cloned()
+        })
+        .flatten()
+    }
+
+    pub fn property_value(
+        &self,
+        object_ref: &str,
+        property: &str,
+    ) -> Option<MPropertyValue> {
+        self.with_mdevice(object_ref, |device| device.property(property).cloned())
+            .flatten()
+    }
+
     fn realized_sysbus_mapping(&self, owner: &str) -> &SysBusMapping {
         self.sysbus()
             .mappings()
             .iter()
             .find(|mapping| mapping.owner == owner)
             .unwrap_or_else(|| panic!("missing sysbus mapping for '{owner}'"))
+    }
+
+    fn mom_object_infos(&self) -> Vec<MObjectInfo> {
+        let mut infos = vec![self.machine_state.object().info()];
+        if let Some(chardev_root) = &self.chardev_root {
+            infos.push(chardev_root.object_info());
+        }
+        if let Some(sysbus) = &self.sysbus {
+            infos.push(sysbus.object_info());
+        }
+        if let Some(chardev) = &self.uart_chardev {
+            infos.push(chardev.lock().unwrap().object_info());
+        }
+        if let Some(plic) = &self.plic {
+            infos.push(plic.lock().unwrap().object_info());
+        }
+        if let Some(aclint) = &self.aclint {
+            infos.push(aclint.lock().unwrap().object_info());
+        }
+        if let Some(uart) = &self.uart {
+            infos.push(uart.lock().unwrap().object_info());
+        }
+        if let Some(virtio_mmio) = &self.virtio_mmio {
+            infos.push(virtio_mmio.object_info());
+        }
+        infos
+    }
+
+    fn object_matches(object_ref: &str, info: &MObjectInfo) -> bool {
+        info.local_id == object_ref || info.object_path.as_deref() == Some(object_ref)
+    }
+
+    fn with_mdevice<T>(
+        &self,
+        object_ref: &str,
+        f: impl FnOnce(&dyn MDevice) -> T,
+    ) -> Option<T> {
+        if let Some(uart) = &self.uart {
+            let uart = uart.lock().unwrap();
+            if Self::object_matches(object_ref, &uart.object_info()) {
+                return Some(f(&*uart));
+            }
+        }
+        if let Some(plic) = &self.plic {
+            let plic = plic.lock().unwrap();
+            if Self::object_matches(object_ref, &plic.object_info()) {
+                return Some(f(&*plic));
+            }
+        }
+        if let Some(aclint) = &self.aclint {
+            let aclint = aclint.lock().unwrap();
+            if Self::object_matches(object_ref, &aclint.object_info()) {
+                return Some(f(&*aclint));
+            }
+        }
+        if let Some(virtio_mmio) = &self.virtio_mmio {
+            if Self::object_matches(object_ref, &virtio_mmio.object_info()) {
+                return Some(f(virtio_mmio));
+            }
+        }
+        None
+    }
+
+    fn chardev_resolver(&self) -> RefMachineChardevResolver {
+        let mut objects = Vec::new();
+        if let Some(chardev) = &self.uart_chardev {
+            objects.push(Arc::clone(chardev));
+        }
+        RefMachineChardevResolver { objects }
     }
 
     fn sysbus_reg_cells(&self, owner: &str) -> [u32; 4] {
