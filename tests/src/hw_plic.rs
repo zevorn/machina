@@ -231,7 +231,7 @@ fn test_plic_realize_via_sysbus_maps_mmio() {
     let plic = Arc::new(Mutex::new(Plic::new_named("plic0", 64, 2)));
     {
         let mut device = plic.lock().unwrap();
-        device.attach_to_bus(&bus).unwrap();
+        device.attach_to_bus(&mut bus).unwrap();
         device
             .register_mmio(
                 MemoryRegion::io(

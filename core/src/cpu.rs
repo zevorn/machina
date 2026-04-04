@@ -113,19 +113,6 @@ pub trait GuestCpu {
 
     // -- GDB support (default no-op) --
 
-    fn gdb_read_registers(&self, _buf: &mut [u8]) -> usize {
-        0
-    }
-    fn gdb_write_registers(&mut self, _buf: &[u8]) -> usize {
-        0
-    }
-    fn gdb_read_register(&self, _reg: usize, _buf: &mut [u8]) -> usize {
-        0
-    }
-    fn gdb_write_register(&mut self, _reg: usize, _buf: &[u8]) -> usize {
-        0
-    }
-
     /// Check if GDB single-step mode is active.
     fn gdb_single_step(&self) -> bool {
         false

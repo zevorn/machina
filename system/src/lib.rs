@@ -2,6 +2,7 @@
 
 pub mod cpus;
 pub mod gdb;
+pub mod gdb_csr;
 
 pub use cpus::FullSystemCpu;
 

@@ -165,7 +165,7 @@ fn test_uart_tx_to_chardev() {
 
     {
         let mut u = uart.lock().unwrap();
-        u.attach_to_bus(&bus).unwrap();
+        u.attach_to_bus(&mut bus).unwrap();
         let region = MemoryRegion::io(
             "uart0",
             0x100,
@@ -202,7 +202,7 @@ fn test_uart_rx_irq_line() {
     let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, irq_num);
     {
         let mut u = uart.lock().unwrap();
-        u.attach_to_bus(&bus).unwrap();
+        u.attach_to_bus(&mut bus).unwrap();
         let region = MemoryRegion::io(
             "uart0",
             0x100,
@@ -279,7 +279,7 @@ fn test_uart_realize_via_sysbus_installs_runtime_wiring() {
     {
         let mut u = uart.lock().unwrap();
         u.set_chardev_property("/machine/chardev/uart0").unwrap();
-        u.attach_to_bus(&bus).unwrap();
+        u.attach_to_bus(&mut bus).unwrap();
         let region = MemoryRegion::io(
             "uart0",
             0x100,
@@ -345,7 +345,7 @@ fn test_uart_unrealize_drops_runtime_wiring() {
 
     {
         let mut u = uart.lock().unwrap();
-        u.attach_to_bus(&bus).unwrap();
+        u.attach_to_bus(&mut bus).unwrap();
         let region = MemoryRegion::io(
             "uart0",
             0x100,

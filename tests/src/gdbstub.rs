@@ -79,10 +79,11 @@ fn test_send_packet_format() {
 
 #[test]
 fn test_recv_packet_valid() {
-    let data = b"+$S05#b8+".to_vec();
+    let data = b"+$OK#9a+".to_vec();
     let mut cursor = std::io::Cursor::new(data);
-    let pkt = protocol::recv_packet(&mut cursor).unwrap();
-    assert_eq!(pkt, "S05");
+    let pkt =
+        protocol::recv_packet(&mut cursor).unwrap();
+    assert_eq!(pkt, "OK");
 }
 
 #[test]
@@ -418,7 +419,7 @@ fn test_handler_vcont_step() {
     let mut t = MockTarget::new();
     assert_eq!(
         h.handle("vCont;s:1", &mut t).unwrap(),
-        "S05",
+        "T05thread:01;",
     );
 }
 
@@ -678,7 +679,7 @@ fn test_gdb_state_snapshot_on_step() {
     let gpr = [0u64; 32];
     let mut fpr = [0u64; 32];
     fpr[0] = 0xcafe;
-    gs.save_snapshot(&gpr, &fpr, 0x8020_0000);
+    gs.save_snapshot(0, &gpr, &fpr, 0x8020_0000, 3, &[]);
     gs.set_stop_reason(StopReason::Step);
 
     let snap = gs.read_snapshot();
@@ -740,7 +741,7 @@ fn test_gdb_step_saves_snapshot() {
         g
     };
     let fpr = [0u64; 32];
-    gs.save_snapshot(&gpr, &fpr, 0x8030_0000);
+    gs.save_snapshot(0, &gpr, &fpr, 0x8030_0000, 3, &[]);
     gs.set_stop_reason(StopReason::Step);
 
     // Verify the snapshot reflects post-step state.
@@ -768,7 +769,7 @@ fn mock_exec_loop(gs: &GdbState) {
     let mut pc: u64 = 0x8020_0000;
 
     // Initial pause: save snapshot and park.
-    gs.save_snapshot(&gpr, &fpr, pc);
+    gs.save_snapshot(0, &gpr, &fpr, pc, 3, &[]);
     if gs.check_and_wait() {
         return;
     }
@@ -781,7 +782,7 @@ fn mock_exec_loop(gs: &GdbState) {
         match gs.run_state() {
             GdbRunState::Stepping => {
                 // Apply dirty register writes from GDB.
-                if let Some(snap) = gs.take_dirty_snapshot()
+                if let Some(snap) = gs.take_dirty_snapshot(0)
                 {
                     for i in 1..32 {
                         gpr[i] = snap.gpr[i];
@@ -793,13 +794,13 @@ fn mock_exec_loop(gs: &GdbState) {
                 }
                 pc += 4;
                 gpr[1] = pc; // ra = stepped addr
-                gs.save_snapshot(&gpr, &fpr, pc);
+                gs.save_snapshot(0, &gpr, &fpr, pc, 3, &[]);
                 gs.set_stop_reason(StopReason::Step);
                 gs.complete_step();
             }
             GdbRunState::Running => {
                 // Apply dirty register writes.
-                if let Some(snap) = gs.take_dirty_snapshot()
+                if let Some(snap) = gs.take_dirty_snapshot(0)
                 {
                     for i in 1..32 {
                         gpr[i] = snap.gpr[i];
@@ -814,7 +815,7 @@ fn mock_exec_loop(gs: &GdbState) {
                         && gs.hit_breakpoint(pc)
                     {
                         gpr[1] = pc;
-                        gs.save_snapshot(&gpr, &fpr, pc);
+                        gs.save_snapshot(0, &gpr, &fpr, pc, 3, &[]);
                         gs.set_stop_reason(
                             StopReason::Breakpoint,
                         );
@@ -826,7 +827,7 @@ fn mock_exec_loop(gs: &GdbState) {
                         || state == GdbRunState::Paused
                     {
                         gpr[1] = pc;
-                        gs.save_snapshot(&gpr, &fpr, pc);
+                        gs.save_snapshot(0, &gpr, &fpr, pc, 3, &[]);
                         gs.set_stop_reason(StopReason::Pause);
                         break;
                     }
@@ -1028,7 +1029,7 @@ fn test_serve_integration_full_path() {
     rsp_send(&mut stream, "s");
     assert_eq!(
         rsp_recv(&mut stream),
-        "S05",
+        "T05thread:01;",
         "step stop reply"
     );
     rsp_send(&mut stream, "p20");
@@ -1432,7 +1433,7 @@ fn test_gdb_production_integration() {
     rsp_send(&mut stream, "s");
     assert_eq!(
         rsp_recv(&mut stream),
-        "S05",
+        "T05thread:01;",
         "step stop reply",
     );
     // Verify PC advanced after step.

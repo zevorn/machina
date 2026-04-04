@@ -5,8 +5,10 @@
 // and pause/resume. Includes register snapshot for
 // cross-thread CPU state access.
 
-use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{
+    AtomicBool, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -17,6 +19,21 @@ pub enum GdbRunState {
     PauseRequested,
     Paused,
     Stepping,
+}
+
+/// Watchpoint type (GDB Z2/Z3/Z4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchType {
+    Write,
+    Read,
+    Access,
+}
+
+/// Watchpoint hit info recorded by memory helpers.
+#[derive(Clone, Copy, Debug)]
+pub struct WatchpointHit {
+    pub addr: u64,
+    pub wtype: WatchType,
 }
 
 /// Snapshot of RISC-V CPU registers for GDB access.
@@ -30,6 +47,11 @@ pub struct GdbCpuSnapshot {
     pub fpr: [u64; 32],
     /// Program counter.
     pub pc: u64,
+    /// Current privilege level (0=U, 1=S, 3=M).
+    pub priv_level: u8,
+    /// CSR values (indexed by GDB CSR register number
+    /// offset, i.e. gdb_reg - 66).
+    pub csr: Vec<u64>,
     /// Set when GDB writes registers that need to be
     /// restored before the CPU resumes.
     pub dirty: bool,
@@ -41,6 +63,8 @@ impl Default for GdbCpuSnapshot {
             gpr: [0u64; 32],
             fpr: [0u64; 32],
             pc: 0,
+            priv_level: 0,
+            csr: Vec::new(),
             dirty: false,
         }
     }
@@ -55,8 +79,10 @@ pub struct GdbState {
     resume_cv: Condvar,
     /// Whether a GDB client is connected.
     connected: AtomicBool,
-    /// CPU register snapshot (valid only when paused).
-    snapshot: Mutex<GdbCpuSnapshot>,
+    /// Per-CPU register snapshots (valid when paused).
+    snapshots: Mutex<Vec<GdbCpuSnapshot>>,
+    /// Number of vCPUs.
+    cpu_count: AtomicUsize,
     /// Host pointer to guest RAM for memory access.
     ram_ptr: AtomicU64,
     /// Guest RAM size in bytes.
@@ -65,13 +91,27 @@ pub struct GdbState {
     ram_end: AtomicU64,
     /// Host pointer to AddressSpace for MMIO.
     as_ptr: AtomicU64,
+    /// Watchpoint count for fast bail-out in helpers.
+    watchpoint_count: AtomicUsize,
+    /// Physical memory mode (bypass MMU for GDB mem).
+    phy_mem_mode: AtomicBool,
 }
 
 struct GdbInner {
     state: GdbRunState,
     stop_reason: StopReason,
+    /// Thread ID that caused the stop (1-indexed).
+    stop_thread: usize,
+    /// Current "g" CPU index (0-indexed).
+    g_cpu_idx: usize,
+    /// Current "c" CPU index (0-indexed).
+    c_cpu_idx: usize,
     breakpoints: BTreeSet<u64>,
     hw_breakpoints: BTreeSet<u64>,
+    /// Watchpoints: addr -> (len, type).
+    watchpoints: BTreeMap<u64, (usize, WatchType)>,
+    /// Last watchpoint hit (for stop reply).
+    watchpoint_hit: Option<WatchpointHit>,
     detached: bool,
 }
 
@@ -81,19 +121,81 @@ impl GdbState {
             inner: Mutex::new(GdbInner {
                 state: GdbRunState::Paused,
                 stop_reason: StopReason::Pause,
+                stop_thread: 1,
+                g_cpu_idx: 0,
+                c_cpu_idx: 0,
                 breakpoints: BTreeSet::new(),
                 hw_breakpoints: BTreeSet::new(),
+                watchpoints: BTreeMap::new(),
+                watchpoint_hit: None,
                 detached: false,
             }),
             pause_cv: Condvar::new(),
             resume_cv: Condvar::new(),
             connected: AtomicBool::new(false),
-            snapshot: Mutex::new(GdbCpuSnapshot::default()),
+            snapshots: Mutex::new(vec![
+                GdbCpuSnapshot::default(),
+            ]),
+            cpu_count: AtomicUsize::new(1),
             ram_ptr: AtomicU64::new(0),
             ram_size: AtomicU64::new(0),
             ram_end: AtomicU64::new(0),
             as_ptr: AtomicU64::new(0),
+            watchpoint_count: AtomicUsize::new(0),
+            phy_mem_mode: AtomicBool::new(false),
         }
+    }
+
+    /// Set the number of vCPUs.
+    pub fn set_cpu_count(&self, count: usize) {
+        self.cpu_count
+            .store(count, Ordering::SeqCst);
+        let mut snaps = self.snapshots.lock().unwrap();
+        snaps.resize_with(count, GdbCpuSnapshot::default);
+    }
+
+    pub fn cpu_count(&self) -> usize {
+        self.cpu_count.load(Ordering::SeqCst)
+    }
+
+    /// Get the current "g" CPU index (0-indexed).
+    pub fn g_cpu_idx(&self) -> usize {
+        self.inner.lock().unwrap().g_cpu_idx
+    }
+
+    /// Set the "g" CPU index. Returns false if invalid.
+    pub fn set_g_cpu(&self, idx: usize) -> bool {
+        let count = self.cpu_count();
+        if idx >= count {
+            return false;
+        }
+        self.inner.lock().unwrap().g_cpu_idx = idx;
+        true
+    }
+
+    /// Get the current "c" CPU index (0-indexed).
+    pub fn c_cpu_idx(&self) -> usize {
+        self.inner.lock().unwrap().c_cpu_idx
+    }
+
+    /// Set the "c" CPU index. Returns false if invalid.
+    pub fn set_c_cpu(&self, idx: usize) -> bool {
+        let count = self.cpu_count();
+        if idx >= count {
+            return false;
+        }
+        self.inner.lock().unwrap().c_cpu_idx = idx;
+        true
+    }
+
+    /// Set the thread that caused the stop (1-indexed).
+    pub fn set_stop_thread(&self, tid: usize) {
+        self.inner.lock().unwrap().stop_thread = tid;
+    }
+
+    /// Get the stop thread ID (1-indexed).
+    pub fn stop_thread(&self) -> usize {
+        self.inner.lock().unwrap().stop_thread
     }
 
     pub fn set_connected(&self, connected: bool) {
@@ -218,49 +320,134 @@ impl GdbState {
 
     // -- Register snapshot --
 
-    /// Save CPU register state into the snapshot.
-    /// Called by the exec loop when the CPU pauses.
-    pub fn save_snapshot(&self, gpr: &[u64; 32], fpr: &[u64; 32], pc: u64) {
-        let mut snap = self.snapshot.lock().unwrap();
+    /// Save CPU register state into snapshot for cpu_idx.
+    pub fn save_snapshot(
+        &self,
+        cpu_idx: usize,
+        gpr: &[u64; 32],
+        fpr: &[u64; 32],
+        pc: u64,
+        priv_level: u8,
+        csr: &[u64],
+    ) {
+        let mut snaps = self.snapshots.lock().unwrap();
+        if cpu_idx >= snaps.len() {
+            snaps.resize_with(
+                cpu_idx + 1,
+                GdbCpuSnapshot::default,
+            );
+        }
+        let snap = &mut snaps[cpu_idx];
         snap.gpr.copy_from_slice(gpr);
         snap.fpr.copy_from_slice(fpr);
         snap.pc = pc;
+        snap.priv_level = priv_level;
+        snap.csr = csr.to_vec();
         snap.dirty = false;
     }
 
-    /// Get a clone of the current register snapshot.
+    /// Read the snapshot for the current "g" CPU.
     pub fn read_snapshot(&self) -> GdbCpuSnapshot {
-        self.snapshot.lock().unwrap().clone()
+        let idx =
+            self.inner.lock().unwrap().g_cpu_idx;
+        self.read_snapshot_for(idx)
     }
 
-    /// Write back modified registers from the snapshot.
-    /// Called by the exec loop before resuming.
-    /// Returns the snapshot if dirty (registers need
-    /// restoring), None otherwise.
-    pub fn take_dirty_snapshot(&self) -> Option<GdbCpuSnapshot> {
-        let mut snap = self.snapshot.lock().unwrap();
-        if snap.dirty {
-            snap.dirty = false;
-            Some(snap.clone())
-        } else {
-            None
+    /// Read the snapshot for a specific CPU.
+    pub fn read_snapshot_for(
+        &self,
+        cpu_idx: usize,
+    ) -> GdbCpuSnapshot {
+        let snaps = self.snapshots.lock().unwrap();
+        snaps
+            .get(cpu_idx)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Take dirty snapshot for cpu_idx if modified.
+    pub fn take_dirty_snapshot(
+        &self,
+        cpu_idx: usize,
+    ) -> Option<GdbCpuSnapshot> {
+        let mut snaps = self.snapshots.lock().unwrap();
+        if let Some(snap) = snaps.get_mut(cpu_idx) {
+            if snap.dirty {
+                snap.dirty = false;
+                return Some(snap.clone());
+            }
         }
+        None
     }
 
-    /// Write a single register in the snapshot.
-    /// reg: 0-31=GPR, 32=PC, 33-64=FPR.
+    /// Write a single register in the current "g" CPU
+    /// snapshot.
+    /// reg: 0-31=GPR, 32=PC, 33-64=FPR, 65=priv,
+    /// 66+=CSR.
     pub fn write_register(
         &self,
         reg: usize,
         val: u64,
     ) -> bool {
-        let mut snap = self.snapshot.lock().unwrap();
+        let idx =
+            self.inner.lock().unwrap().g_cpu_idx;
+        let mut snaps = self.snapshots.lock().unwrap();
+        let snap = match snaps.get_mut(idx) {
+            Some(s) => s,
+            None => return false,
+        };
         match reg {
             0 => { /* x0 hardwired to 0 */ }
             1..=31 => snap.gpr[reg] = val,
             32 => snap.pc = val,
             33..=64 => snap.fpr[reg - 33] = val,
+            65 => { /* priv level read-only */ }
+            r if r >= 66 => {
+                let csr_idx = r - 66;
+                if csr_idx < snap.csr.len() {
+                    snap.csr[csr_idx] = val;
+                } else {
+                    return false;
+                }
+            }
             _ => return false,
+        }
+        snap.dirty = true;
+        true
+    }
+
+    /// Write all registers from GDB G packet data.
+    pub fn write_all_registers(
+        &self,
+        data: &[u8],
+    ) -> bool {
+        let idx =
+            self.inner.lock().unwrap().g_cpu_idx;
+        let mut snaps = self.snapshots.lock().unwrap();
+        let snap = match snaps.get_mut(idx) {
+            Some(s) => s,
+            None => return false,
+        };
+        // Need at least 65 * 8 bytes (32 GPR + PC + 32
+        // FPR).
+        let need = 65 * 8;
+        if data.len() < need {
+            return false;
+        }
+        for i in 0..32 {
+            let off = i * 8;
+            snap.gpr[i] = u64::from_le_bytes(
+                data[off..off + 8].try_into().unwrap(),
+            );
+        }
+        snap.pc = u64::from_le_bytes(
+            data[256..264].try_into().unwrap(),
+        );
+        for i in 0..32 {
+            let off = (33 + i) * 8;
+            snap.fpr[i] = u64::from_le_bytes(
+                data[off..off + 8].try_into().unwrap(),
+            );
         }
         snap.dirty = true;
         true
@@ -269,22 +456,44 @@ impl GdbState {
     // -- Breakpoint management --
 
     pub fn set_breakpoint(&self, addr: u64) -> bool {
-        self.inner.lock().unwrap().breakpoints.insert(addr);
+        self.inner
+            .lock()
+            .unwrap()
+            .breakpoints
+            .insert(addr);
         true
     }
 
     pub fn remove_breakpoint(&self, addr: u64) -> bool {
-        self.inner.lock().unwrap().breakpoints.remove(&addr);
+        self.inner
+            .lock()
+            .unwrap()
+            .breakpoints
+            .remove(&addr);
         true
     }
 
-    pub fn set_hw_breakpoint(&self, addr: u64) -> bool {
-        self.inner.lock().unwrap().hw_breakpoints.insert(addr);
+    pub fn set_hw_breakpoint(
+        &self,
+        addr: u64,
+    ) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .hw_breakpoints
+            .insert(addr);
         true
     }
 
-    pub fn remove_hw_breakpoint(&self, addr: u64) -> bool {
-        self.inner.lock().unwrap().hw_breakpoints.remove(&addr);
+    pub fn remove_hw_breakpoint(
+        &self,
+        addr: u64,
+    ) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .hw_breakpoints
+            .remove(&addr);
         true
     }
 
@@ -298,6 +507,92 @@ impl GdbState {
         let inner = self.inner.lock().unwrap();
         !inner.breakpoints.is_empty()
             || !inner.hw_breakpoints.is_empty()
+    }
+
+    // -- Watchpoint management --
+
+    pub fn set_watchpoint(
+        &self,
+        addr: u64,
+        len: usize,
+        wtype: WatchType,
+    ) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        inner.watchpoints.insert(addr, (len, wtype));
+        self.watchpoint_count
+            .store(inner.watchpoints.len(), Ordering::SeqCst);
+        true
+    }
+
+    pub fn remove_watchpoint(&self, addr: u64) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let removed = inner.watchpoints.remove(&addr);
+        self.watchpoint_count
+            .store(inner.watchpoints.len(), Ordering::SeqCst);
+        removed.is_some()
+    }
+
+    /// Check if an address range hits a watchpoint.
+    /// Returns the matching watchpoint if found.
+    pub fn check_watchpoint(
+        &self,
+        addr: u64,
+        size: u32,
+        is_write: bool,
+    ) -> Option<WatchpointHit> {
+        if self.watchpoint_count.load(Ordering::Relaxed)
+            == 0
+        {
+            return None;
+        }
+        let inner = self.inner.lock().unwrap();
+        let access_end = addr + size as u64;
+        for (&wp_addr, &(wp_len, wtype)) in
+            &inner.watchpoints
+        {
+            let wp_end = wp_addr + wp_len as u64;
+            if addr < wp_end && access_end > wp_addr {
+                let hit = match wtype {
+                    WatchType::Write => is_write,
+                    WatchType::Read => !is_write,
+                    WatchType::Access => true,
+                };
+                if hit {
+                    return Some(WatchpointHit {
+                        addr: wp_addr,
+                        wtype,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Record a watchpoint hit for the stop reply.
+    pub fn set_watchpoint_hit(
+        &self,
+        hit: WatchpointHit,
+    ) {
+        self.inner.lock().unwrap().watchpoint_hit =
+            Some(hit);
+    }
+
+    /// Take the last watchpoint hit (clears it).
+    pub fn take_watchpoint_hit(
+        &self,
+    ) -> Option<WatchpointHit> {
+        self.inner.lock().unwrap().watchpoint_hit.take()
+    }
+
+    // -- Physical memory mode --
+
+    pub fn set_phy_mem_mode(&self, enabled: bool) {
+        self.phy_mem_mode
+            .store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn phy_mem_mode(&self) -> bool {
+        self.phy_mem_mode.load(Ordering::SeqCst)
     }
 
     // -- Run state management --
@@ -448,11 +743,14 @@ impl<'a> GdbStateTarget<'a> {
 impl GdbTarget for GdbStateTarget<'_> {
     fn read_registers(&self) -> Vec<u8> {
         let snap = self.gs.read_snapshot();
-        let mut buf = Vec::with_capacity(GDB_NUM_REGS * 8);
+        let mut buf =
+            Vec::with_capacity(GDB_NUM_REGS * 8);
         for &val in &snap.gpr {
             buf.extend_from_slice(&val.to_le_bytes());
         }
-        buf.extend_from_slice(&snap.pc.to_le_bytes());
+        buf.extend_from_slice(
+            &snap.pc.to_le_bytes(),
+        );
         for &val in &snap.fpr {
             buf.extend_from_slice(&val.to_le_bytes());
         }
@@ -461,20 +759,35 @@ impl GdbTarget for GdbStateTarget<'_> {
 
     fn write_registers(
         &mut self,
-        _data: &[u8],
+        data: &[u8],
     ) -> bool {
-        // Not supported through snapshot; would need
-        // per-register dirty tracking.
-        false
+        self.gs.write_all_registers(data)
     }
 
     fn read_register(&self, reg: usize) -> Vec<u8> {
         let snap = self.gs.read_snapshot();
         match reg {
-            0..=31 => snap.gpr[reg].to_le_bytes().to_vec(),
+            0..=31 => {
+                snap.gpr[reg].to_le_bytes().to_vec()
+            }
             32 => snap.pc.to_le_bytes().to_vec(),
             33..=64 => {
-                snap.fpr[reg - 33].to_le_bytes().to_vec()
+                snap.fpr[reg - 33]
+                    .to_le_bytes()
+                    .to_vec()
+            }
+            65 => {
+                (snap.priv_level as u64)
+                    .to_le_bytes()
+                    .to_vec()
+            }
+            r if r >= 66 => {
+                let idx = r - 66;
+                if idx < snap.csr.len() {
+                    snap.csr[idx].to_le_bytes().to_vec()
+                } else {
+                    Vec::new()
+                }
             }
             _ => Vec::new(),
         }
@@ -514,11 +827,26 @@ impl GdbTarget for GdbStateTarget<'_> {
         &mut self,
         type_: u8,
         addr: u64,
-        _kind: u32,
+        kind: u32,
     ) -> bool {
         match type_ {
             0 => self.gs.set_breakpoint(addr),
             1 => self.gs.set_hw_breakpoint(addr),
+            2 => self.gs.set_watchpoint(
+                addr,
+                kind as usize,
+                WatchType::Write,
+            ),
+            3 => self.gs.set_watchpoint(
+                addr,
+                kind as usize,
+                WatchType::Read,
+            ),
+            4 => self.gs.set_watchpoint(
+                addr,
+                kind as usize,
+                WatchType::Access,
+            ),
             _ => false,
         }
     }
@@ -532,19 +860,18 @@ impl GdbTarget for GdbStateTarget<'_> {
         match type_ {
             0 => self.gs.remove_breakpoint(addr),
             1 => self.gs.remove_hw_breakpoint(addr),
+            2 | 3 | 4 => {
+                self.gs.remove_watchpoint(addr)
+            }
             _ => false,
         }
     }
 
     fn resume(&mut self) {
-        // Non-blocking: just signal resume. The serve()
-        // loop owns the wait-for-stop cycle.
         self.gs.request_resume();
     }
 
     fn step(&mut self) {
-        // Non-blocking: just signal step. The serve()
-        // loop owns the wait-for-stop cycle.
         self.gs.request_step();
     }
 
@@ -554,6 +881,51 @@ impl GdbTarget for GdbStateTarget<'_> {
 
     fn get_stop_reason(&self) -> StopReason {
         self.gs.get_stop_reason()
+    }
+
+    fn cpu_count(&self) -> usize {
+        self.gs.cpu_count()
+    }
+
+    fn set_g_cpu(&mut self, idx: usize) -> bool {
+        self.gs.set_g_cpu(idx)
+    }
+
+    fn set_c_cpu(&mut self, idx: usize) -> bool {
+        self.gs.set_c_cpu(idx)
+    }
+
+    fn thread_alive(&self, tid: usize) -> bool {
+        tid > 0 && tid <= self.gs.cpu_count()
+    }
+
+    fn set_phy_mem_mode(
+        &mut self,
+        enabled: bool,
+    ) -> bool {
+        self.gs.set_phy_mem_mode(enabled);
+        true
+    }
+
+    fn phy_mem_mode(&self) -> bool {
+        self.gs.phy_mem_mode()
+    }
+
+    fn stop_thread(&self) -> usize {
+        self.gs.stop_thread()
+    }
+
+    fn take_watchpoint_hit(
+        &mut self,
+    ) -> Option<(u64, u8)> {
+        self.gs.take_watchpoint_hit().map(|hit| {
+            let code = match hit.wtype {
+                WatchType::Write => 0,
+                WatchType::Read => 1,
+                WatchType::Access => 2,
+            };
+            (hit.addr, code)
+        })
     }
 }
 
@@ -595,13 +967,38 @@ fn check_resume_packet(packet: &str) -> Option<ResumeAction> {
 }
 
 /// Format a GDB stop reply for the given reason.
-fn stop_reply(reason: StopReason) -> String {
+fn stop_reply(
+    reason: StopReason,
+    gs: &GdbState,
+) -> String {
+    let tid = gs.stop_thread();
     match reason {
         StopReason::Breakpoint => {
-            "T05thread:01;swbreak:;".to_string()
+            format!(
+                "T05thread:{:02x};swbreak:;",
+                tid,
+            )
         }
-        StopReason::Step => "S05".to_string(),
-        StopReason::Pause => "T02thread:01;".to_string(),
+        StopReason::Watchpoint {
+            addr,
+            wtype,
+        } => {
+            let prefix = match wtype {
+                0 => "watch",
+                1 => "rwatch",
+                _ => "awatch",
+            };
+            format!(
+                "T05thread:{:02x};{}:{:x};",
+                tid, prefix, addr,
+            )
+        }
+        StopReason::Step => {
+            format!("T05thread:{:02x};", tid)
+        }
+        StopReason::Pause => {
+            format!("T02thread:{:02x};", tid)
+        }
         StopReason::Terminated => "W00".to_string(),
     }
 }
@@ -671,10 +1068,13 @@ pub fn serve(
     gs.wait_paused();
 
     let mut target = GdbStateTarget::new(gs);
-    let mut handler = GdbHandler::new();
-    // Initial stop reply: SIGTRAP on attach, no false
-    // swbreak claim. The actual stop is a synthetic
-    // pause for GDB attach, not a breakpoint hit.
+    let xml = crate::gdb_csr::build_target_xml();
+    let handler =
+        GdbHandler::with_target_xml(
+            Box::leak(xml.into_boxed_str()),
+        );
+    let mut handler = handler;
+    // Initial stop reply on attach.
     protocol::send_packet(
         &mut stream,
         "T05thread:01;",
@@ -705,7 +1105,8 @@ pub fn serve(
                         wait_for_stop_with_ctrl_c(
                             gs, &mut stream,
                         )?;
-                    let reply = stop_reply(reason);
+                    let reply =
+                        stop_reply(reason, gs);
                     protocol::send_packet(
                         &mut stream, &reply,
                     )?;
@@ -714,8 +1115,10 @@ pub fn serve(
                 ResumeAction::Step => {
                     gs.request_step();
                     gs.wait_paused();
-                    let reason = gs.get_stop_reason();
-                    let reply = stop_reply(reason);
+                    let reason =
+                        gs.get_stop_reason();
+                    let reply =
+                        stop_reply(reason, gs);
                     protocol::send_packet(
                         &mut stream, &reply,
                     )?;
@@ -730,7 +1133,8 @@ pub fn serve(
             gs.set_stop_reason(StopReason::Pause);
             gs.request_pause();
             gs.wait_paused();
-            let reply = stop_reply(StopReason::Pause);
+            let reply =
+                stop_reply(StopReason::Pause, gs);
             protocol::send_packet(
                 &mut stream, &reply,
             )?;
@@ -755,7 +1159,7 @@ pub fn serve(
             &mut stream,
             &response,
         ) {
-            eprintln!("machina: gdb send error: {}", e);
+            let _ = e;
             break;
         }
     }

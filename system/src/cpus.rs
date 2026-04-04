@@ -714,30 +714,32 @@ impl GuestCpu for FullSystemCpu {
     }
 
     fn check_monitor_pause(&self) -> bool {
-        // GDB pause takes priority (check first).
         if let Some(ref gs) = self.gdb_state {
             if gs.is_connected() {
-                // Check for initial pause (-S startup).
                 let state = gs.run_state();
-                if state == crate::gdb::GdbRunState::Paused
-                    || state == crate::gdb::GdbRunState::PauseRequested
+                if state
+                    == crate::gdb::GdbRunState::Paused
+                    || state
+                        == crate::gdb::GdbRunState::PauseRequested
                 {
-                    // Save CPU snapshot before parking so
-                    // the GDB server can read registers.
+                    let csrs =
+                        self.collect_gdb_csrs();
                     gs.save_snapshot(
+                        0,
                         &self.cpu.gpr,
                         &self.cpu.fpr,
                         self.cpu.pc,
+                        self.cpu.priv_level as u8,
+                        &csrs,
                     );
                     let quit = gs.check_and_wait();
-                    // Restore dirty registers from snapshot
-                    // (e.g. PC changed by GDB).
                     if let Some(snap) =
-                        gs.take_dirty_snapshot()
+                        gs.take_dirty_snapshot(0)
                     {
                         unsafe {
                             let cpu_ptr =
-                                &self.cpu as *const RiscvCpu
+                                &self.cpu
+                                    as *const RiscvCpu
                                     as *mut RiscvCpu;
                             for i in 1..32 {
                                 (*cpu_ptr).gpr[i] =
@@ -749,6 +751,7 @@ impl GuestCpu for FullSystemCpu {
                                     snap.fpr[i];
                             }
                         }
+                        self.restore_csrs(&snap.csr);
                     }
                     return quit;
                 }
@@ -840,12 +843,14 @@ impl GuestCpu for FullSystemCpu {
 
     fn gdb_complete_step(&self) {
         if let Some(ref gs) = self.gdb_state {
-            // Save snapshot before pausing so GDB can read
-            // the post-step register state.
+            let csrs = self.collect_gdb_csrs();
             gs.save_snapshot(
+                0,
                 &self.cpu.gpr,
                 &self.cpu.fpr,
                 self.cpu.pc,
+                self.cpu.priv_level as u8,
+                &csrs,
             );
             gs.set_stop_reason(
                 machina_gdbstub::handler::StopReason::Step,
@@ -1215,22 +1220,9 @@ pub unsafe extern "C" fn machina_mem_read(
                 cpu.mem_fault_tval = gva;
                 return 0;
             }
-            let val = read_phys_sized(cpu, pa, size);
-            eprintln!(
-                "[mem_read] OK: gva={:#x} pa={:#x} size={} \
-                 val={:#x}",
-                gva, pa, size, val,
-            );
-            val
+            read_phys_sized(cpu, pa, size)
         }
-        None => {
-            eprintln!(
-                "[mem_read] FAULT: gva={:#x} size={} \
-                 translate failed cause={}",
-                gva, size, cpu.mem_fault_cause,
-            );
-            0
-        }
+        None => 0
     }
 }
 
@@ -1401,6 +1393,44 @@ fn gdb_write_phys(ram_ptr: *const u8, _ram_size: u64, _guest_base: u64, ram_end:
 }
 
 impl FullSystemCpu {
+    /// Collect CSR values for GDB snapshot.
+    fn collect_gdb_csrs(&self) -> Vec<u64> {
+        use crate::gdb_csr::GDB_CSRS;
+        let priv_level = self.cpu.priv_level;
+        GDB_CSRS
+            .iter()
+            .map(|entry| {
+                self.cpu
+                    .csr
+                    .read(entry.addr, priv_level)
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    /// Restore CSR values from GDB snapshot.
+    fn restore_csrs(&self, csrs: &[u64]) {
+        use crate::gdb_csr::GDB_CSRS;
+        let priv_level = self.cpu.priv_level;
+        let cpu_ptr = &self.cpu as *const RiscvCpu
+            as *mut RiscvCpu;
+        for (i, entry) in
+            GDB_CSRS.iter().enumerate()
+        {
+            if let Some(&val) = csrs.get(i) {
+                unsafe {
+                    let _ = (*cpu_ptr)
+                        .csr
+                        .write(
+                            entry.addr,
+                            val,
+                            priv_level,
+                        );
+                }
+            }
+        }
+    }
+
     /// Check GDB breakpoint at PC. Returns true if hit.
     /// Called from exec loop before executing a TB.
     /// Sets stop_reason=Breakpoint and requests pause as
@@ -1480,25 +1510,71 @@ impl GdbTarget for FullSystemCpu {
 
     fn read_register(&self, reg: usize) -> Vec<u8> {
         match reg {
-            0..=31 => self.cpu.gpr[reg].to_le_bytes().to_vec(),
+            0..=31 => {
+                self.cpu.gpr[reg].to_le_bytes().to_vec()
+            }
             32 => self.cpu.pc.to_le_bytes().to_vec(),
             33..=64 => {
-                self.cpu.fpr[reg - 33].to_le_bytes().to_vec()
+                self.cpu.fpr[reg - 33]
+                    .to_le_bytes()
+                    .to_vec()
+            }
+            65 => {
+                (self.cpu.priv_level as u64)
+                    .to_le_bytes()
+                    .to_vec()
+            }
+            r if r >= 66 => {
+                use crate::gdb_csr::csr_by_gdb_reg;
+                match csr_by_gdb_reg(r) {
+                    Some(entry) => {
+                        let val = self
+                            .cpu
+                            .csr
+                            .read(
+                                entry.addr,
+                                self.cpu.priv_level,
+                            )
+                            .unwrap_or(0);
+                        val.to_le_bytes().to_vec()
+                    }
+                    None => Vec::new(),
+                }
             }
             _ => Vec::new(),
         }
     }
 
-    fn write_register(&mut self, reg: usize, val: &[u8]) -> bool {
+    fn write_register(
+        &mut self,
+        reg: usize,
+        val: &[u8],
+    ) -> bool {
         if val.len() < 8 {
             return false;
         }
-        let v = u64::from_le_bytes(val[..8].try_into().unwrap());
+        let v = u64::from_le_bytes(
+            val[..8].try_into().unwrap(),
+        );
         match reg {
-            0 => { /* x0 is hardwired to 0 */ }
+            0 => {}
             1..=31 => self.cpu.gpr[reg] = v,
             32 => self.cpu.pc = v,
             33..=64 => self.cpu.fpr[reg - 33] = v,
+            65 => {}
+            r if r >= 66 => {
+                use crate::gdb_csr::csr_by_gdb_reg;
+                match csr_by_gdb_reg(r) {
+                    Some(entry) => {
+                        let _ = self.cpu.csr.write(
+                            entry.addr,
+                            v,
+                            self.cpu.priv_level,
+                        );
+                    }
+                    None => return false,
+                }
+            }
             _ => return false,
         }
         true

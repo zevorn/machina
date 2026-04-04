@@ -282,7 +282,7 @@ fn test_aclint_realize_via_sysbus_maps_mmio() {
     let aclint = Arc::new(Mutex::new(Aclint::new_named("aclint0", 2)));
     {
         let mut device = aclint.lock().unwrap();
-        device.attach_to_bus(&bus).unwrap();
+        device.attach_to_bus(&mut bus).unwrap();
         device
             .register_mmio(
                 MemoryRegion::io(

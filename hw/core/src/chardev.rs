@@ -13,7 +13,7 @@ pub type ByteCb = Arc<Mutex<dyn FnMut(u8) + Send>>;
 ///
 /// A chardev provides byte-level I/O used by serial ports,
 /// consoles, and similar devices.
-pub trait Chardev: Send {
+pub trait Chardev: Send + Sync {
     /// Read one byte if available.
     fn read(&mut self) -> Option<u8>;
 

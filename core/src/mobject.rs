@@ -173,7 +173,10 @@ pub trait MObject: Any + Send + Sync {
         self.mobject_state().child_paths()
     }
 
-    fn is_type<T: Any>(&self) -> bool {
+    fn is_type<T: Any>(&self) -> bool
+    where
+        Self: Sized,
+    {
         self.as_any().is::<T>()
     }
 

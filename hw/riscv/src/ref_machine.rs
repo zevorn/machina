@@ -668,7 +668,7 @@ impl Machine for RefMachine {
         )));
         {
             let mut p = plic.lock().unwrap();
-            p.attach_to_bus(&sysbus)?;
+            p.attach_to_bus(&mut sysbus)?;
             let plic_region = MemoryRegion::io(
                 "plic",
                 PLIC_SIZE,
@@ -683,7 +683,7 @@ impl Machine for RefMachine {
             Arc::new(Mutex::new(Aclint::new_named("aclint0", opts.cpu_count)));
         {
             let mut a = aclint.lock().unwrap();
-            a.attach_to_bus(&sysbus)?;
+            a.attach_to_bus(&mut sysbus)?;
             let aclint_region = MemoryRegion::io(
                 "clint",
                 ACLINT_SIZE,
@@ -698,7 +698,7 @@ impl Machine for RefMachine {
         {
             let mut u = uart.lock().unwrap();
             u.set_chardev_property("/machine/chardev/uart0")?;
-            u.attach_to_bus(&sysbus)?;
+            u.attach_to_bus(&mut sysbus)?;
             let uart_region = MemoryRegion::io(
                 "uart0",
                 UART0_SIZE,
@@ -747,7 +747,7 @@ impl Machine for RefMachine {
                 RAM_BASE,
                 opts.ram_size,
             );
-            virtio_mmio.attach_to_bus(&sysbus)?;
+            virtio_mmio.attach_to_bus(&mut sysbus)?;
             let virtio_region =
                 virtio_mmio.make_mmio_region("virtio-mmio0", VIRTIO0_SIZE);
             virtio_mmio.register_mmio(virtio_region, GPA::new(VIRTIO0_BASE))?;

@@ -200,12 +200,6 @@ impl SysBusDeviceState {
             None => return Err(SysBusError::MissingParentBus),
         }
 
-        if !self.device.object().is_attached() {
-            return Err(SysBusError::DetachedObject(
-                self.device.local_id().to_string(),
-            ));
-        }
-
         for mapping in &self.mappings {
             bus.validate_mapping(&mapping.desc)?;
         }
@@ -294,7 +288,7 @@ pub struct SysBus {
 impl SysBus {
     pub fn new(name: &str) -> Self {
         Self {
-            object: MObjectState::new_detached(name)
+            object: MObjectState::new_root(name)
                 .expect("sysbus local_id must be valid"),
             name: name.to_string(),
             mappings: Vec::new(),

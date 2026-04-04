@@ -16,9 +16,10 @@ use super::{ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING};
 use crate::cpu::GuestCpu;
 use crate::ir::context::Context;
 use crate::ir::tb::{
-    decode_tb_exit, TranslationBlock, EXCP_EBREAK, EXCP_ECALL, EXCP_FENCE_I,
-    EXCP_MRET, EXCP_PRIV_CSR, EXCP_SFENCE_VMA, EXCP_SRET, EXCP_WFI,
-    EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
+    cflags::{CF_SINGLE_STEP},
+    decode_tb_exit, TranslationBlock, EXCP_EBREAK, EXCP_ECALL,
+    EXCP_FENCE_I, EXCP_MRET, EXCP_PRIV_CSR, EXCP_SFENCE_VMA,
+    EXCP_SRET, EXCP_WFI, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
 };
 use crate::translate::translate;
 use crate::HostCodeGen;
@@ -87,44 +88,58 @@ where
         }
         per_cpu.stats.loop_iters += 1;
 
-        // Check interrupts BEFORE executing the next TB
-        // (matching QEMU's cpu_handle_interrupt).
-        if cpu.pending_interrupt() {
+        let stepping = cpu.gdb_single_step();
+
+        // Suppress interrupts during GDB single-step
+        // (IRQ delivery would corrupt step semantics).
+        if !stepping && cpu.pending_interrupt() {
             cpu.handle_interrupt();
             next_tb_hint = None;
         }
 
-        let tb_idx = match next_tb_hint.take() {
-            Some(idx) => {
-                per_cpu.stats.hint_used += 1;
-                idx
+        let tb_idx = if stepping {
+            // Single-step: translate a fresh 1-insn TB,
+            // bypassing all caches.
+            let pc = cpu.get_pc();
+            let flags = cpu.get_flags();
+            let cf = CF_SINGLE_STEP | 1;
+            match tb_gen_code_cflags(
+                shared, per_cpu, cpu, pc, flags, cf,
+            ) {
+                Some(idx) => idx,
+                None => {
+                    if cpu.check_mem_fault() {
+                        continue;
+                    }
+                    return ExitReason::BufferFull;
+                }
             }
-            None => {
-                let pc = cpu.get_pc();
-                let flags = cpu.get_flags();
-                match tb_find(shared, per_cpu, cpu, pc, flags) {
-                    Some(idx) => idx,
-                    None => {
-                        if cpu.check_mem_fault() {
-                            continue;
+        } else {
+            match next_tb_hint.take() {
+                Some(idx) => {
+                    per_cpu.stats.hint_used += 1;
+                    idx
+                }
+                None => {
+                    let pc = cpu.get_pc();
+                    let flags = cpu.get_flags();
+                    match tb_find(
+                        shared, per_cpu, cpu, pc, flags,
+                    ) {
+                        Some(idx) => idx,
+                        None => {
+                            if cpu.check_mem_fault() {
+                                continue;
+                            }
+                            return ExitReason::BufferFull;
                         }
-                        return ExitReason::BufferFull;
                     }
                 }
             }
         };
 
-        // GDB breakpoint check: if a software or hardware
-        // breakpoint is set at the current PC, skip TB
-        // execution and proceed to the pause/resume cycle.
-        // gdb_check_breakpoint sets the stop reason to
-        // Breakpoint as a side effect.
-        {
-            let _dbg_pc = cpu.get_pc();
-            if _dbg_pc >= 0x8000_0000 && _dbg_pc < 0x8000_1000 {
-                eprintln!("[exec] bp check pc={:#x}", _dbg_pc);
-            }
-        }
+        // GDB breakpoint check: if a breakpoint is set at
+        // the current PC, skip TB execution and park.
         if cpu.gdb_check_breakpoint(cpu.get_pc()) {
             // Save snapshot and park via check_monitor_pause.
             if cpu.check_monitor_pause() {
@@ -133,14 +148,14 @@ where
             continue;
         }
 
-        let _atomic_guard = if shared.tb_store.get(tb_idx).contains_atomic {
-            Some(shared.atomic_lock.lock().unwrap())
-        } else {
-            None
-        };
+        let _atomic_guard =
+            if shared.tb_store.get(tb_idx).contains_atomic {
+                Some(shared.atomic_lock.lock().unwrap())
+            } else {
+                None
+            };
         let raw_exit = cpu_tb_exec(shared, cpu, tb_idx);
         drop(_atomic_guard);
-        eprintln!("[exec] TB at idx={}, raw_exit={}", tb_idx, raw_exit);
         let (last_tb, exit_code) = decode_tb_exit(raw_exit);
 
         let src_tb = last_tb.unwrap_or(tb_idx);
@@ -201,14 +216,6 @@ where
             }
             v if v == TB_EXIT_NOCHAIN as usize => {
                 per_cpu.stats.nochain_exit += 1;
-                eprintln!("[exec] NOCHAIN: pc={:#x}, tb_idx={}", cpu.get_pc(), tb_idx);
-                if cpu.check_mem_fault() {
-                    eprintln!("[exec] NOCHAIN after mem_fault: pc={:#x}", cpu.get_pc());
-                    continue;
-                }
-                let pc = cpu.get_pc();
-                eprintln!("[exec] NOCHAIN tb_find: pc={:#x}", pc);
-
                 if cpu.check_mem_fault() {
                     continue;
                 }
@@ -385,19 +392,25 @@ where
             }
         }
 
+        // GDB single-step: complete step immediately
+        // after the 1-insn TB executes, before any
+        // interrupt delivery or monitor checks.
+        if stepping {
+            cpu.gdb_complete_step();
+            continue;
+        }
+
         // Deliver latched memory faults from JIT helpers.
         // Must precede interrupt check: faults have higher
         // priority and must be delivered precisely.
-        // If a fault was delivered, skip interrupt check
-        // this iteration to preserve priority.
-        if !cpu.check_mem_fault() && cpu.pending_interrupt() {
+        if !cpu.check_mem_fault()
+            && cpu.pending_interrupt()
+        {
             cpu.handle_interrupt();
             next_tb_hint = None;
         }
 
-        // External stop check BEFORE monitor pause,
-        // so guest shutdown/reset is not blocked by
-        // a concurrent monitor stop request.
+        // External stop check BEFORE monitor pause.
         if cpu.should_exit() {
             return ExitReason::Halted;
         }
@@ -405,13 +418,6 @@ where
         // Monitor pause check (blocks if paused).
         if cpu.check_monitor_pause() {
             return ExitReason::Halted;
-        }
-
-        // GDB single-step: after executing one TB in
-        // stepping mode, pause and wait for the next
-        // GDB command.
-        if cpu.gdb_single_step() {
-            cpu.gdb_complete_step();
         }
     }
 }
@@ -458,9 +464,8 @@ where
         }
     }
 
-    // Miss: translate a new TB
+    // Miss: translate a new TB.
     per_cpu.stats.translate += 1;
-    eprintln!("[exec] tb_gen_code: pc={:#x}, flags={:#x}", pc, flags);
     tb_gen_code(shared, per_cpu, cpu, pc, flags)
 }
 
@@ -595,6 +600,134 @@ where
 
     shared.tb_store.insert(tb_idx);
     per_cpu.jump_cache.insert(pc, tb_idx);
+
+    Some(tb_idx)
+}
+
+/// Translate a single-step TB with explicit cflags.
+/// The TB is allocated but NOT inserted into the hash
+/// table or jump cache (ephemeral, one-shot use).
+fn tb_gen_code_cflags<B, C>(
+    shared: &SharedState<B>,
+    per_cpu: &mut PerCpuState,
+    cpu: &mut C,
+    pc: u64,
+    flags: u32,
+    cflags: u32,
+) -> Option<usize>
+where
+    B: HostCodeGen,
+    C: GuestCpu<IrContext = Context>,
+{
+    if shared.code_buf().remaining()
+        < MIN_CODE_BUF_REMAINING
+    {
+        return None;
+    }
+
+    let mut guard =
+        shared.translate_lock.lock().unwrap();
+
+    let max_insns = TranslationBlock::max_insns(cflags);
+
+    let mut jmp_buf: SigJmpBuf =
+        unsafe { std::mem::zeroed() };
+    let jmp_ptr = &mut jmp_buf as *mut SigJmpBuf;
+    let saved_offset = shared.code_buf().offset();
+    let mut cur_max = max_insns;
+
+    loop {
+        let rc = unsafe { sigsetjmp(jmp_ptr, 0) };
+        if rc == -2 {
+            unsafe {
+                shared.code_buf_mut().jmp_trans =
+                    std::ptr::null_mut();
+                shared.code_buf_mut().set_offset(
+                    saved_offset,
+                );
+            }
+            cur_max = (cur_max / 2).max(1);
+            if cur_max == 1 && max_insns == 1 {
+                return None;
+            }
+            continue;
+        }
+        break;
+    }
+
+    let tb_idx = unsafe {
+        shared.tb_store.alloc(pc, flags, cflags)
+    }?;
+
+    guard.ir_ctx.reset();
+    guard.ir_ctx.tb_idx = tb_idx as u32;
+    let guest_size =
+        cpu.gen_code(&mut guard.ir_ctx, pc, cur_max);
+    if guest_size == 0 {
+        unsafe {
+            let tb = shared.tb_store.get_mut(tb_idx);
+            tb.invalid
+                .store(true, Ordering::Release);
+        }
+        return None;
+    }
+    let phys_pc = cpu.last_phys_pc();
+    unsafe {
+        let tb = shared.tb_store.get_mut(tb_idx);
+        tb.size = guest_size;
+        tb.phys_pc = phys_pc;
+        tb.gen.store(
+            shared.tb_store.global_gen(),
+            Ordering::Release,
+        );
+    }
+    shared
+        .tb_store
+        .mark_code_page(phys_pc >> 12, tb_idx);
+
+    shared.backend.clear_goto_tb_offsets();
+    unsafe {
+        shared.code_buf_mut().jmp_trans =
+            jmp_ptr as *mut u8;
+    }
+
+    let code_buf_mut =
+        unsafe { shared.code_buf_mut() };
+    let host_offset = translate(
+        &mut guard.ir_ctx,
+        &shared.backend,
+        code_buf_mut,
+    );
+
+    unsafe {
+        shared.code_buf_mut().jmp_trans =
+            std::ptr::null_mut();
+    }
+
+    let host_size =
+        shared.code_buf().offset() - host_offset;
+    unsafe {
+        let tb = shared.tb_store.get_mut(tb_idx);
+        tb.host_offset = host_offset;
+        tb.host_size = host_size;
+        tb.contains_atomic =
+            guard.ir_ctx.contains_atomic;
+    }
+
+    let offsets = shared.backend.goto_tb_offsets();
+    unsafe {
+        let tb = shared.tb_store.get_mut(tb_idx);
+        for (i, &(jmp, reset)) in
+            offsets.iter().enumerate().take(2)
+        {
+            tb.set_jmp_insn_offset(i, jmp as u32);
+            tb.set_jmp_reset_offset(i, reset as u32);
+        }
+    }
+
+    // Do NOT insert into hash table or jump cache.
+    // Single-step TBs are ephemeral.
+    per_cpu.stats.translate += 1;
 
     Some(tb_idx)
 }
