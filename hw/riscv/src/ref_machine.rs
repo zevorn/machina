@@ -16,7 +16,7 @@ use machina_hw_core::chardev::{
     NullChardev, StdioChardev,
 };
 use machina_hw_core::fdt::FdtBuilder;
-use machina_hw_core::irq::{IrqLine, IrqSink};
+use machina_hw_core::irq::{InterruptSource, IrqLine, IrqSink};
 use machina_hw_core::mdev::MDevice;
 use machina_hw_core::property::{MPropertySpec, MPropertyValue};
 use machina_hw_intc::aclint::{Aclint, AclintMmio};
@@ -162,7 +162,7 @@ pub struct RefMachine {
     sysbus: Option<SysBus>,
     ram_block: Option<Arc<RamBlock>>,
     mrom_block: Option<Arc<RamBlock>>,
-    plic: Option<Arc<Mutex<Plic>>>,
+    plic: Option<Arc<Plic>>,
     aclint: Option<Arc<Mutex<Aclint>>>,
     uart: Option<Arc<Mutex<Uart16550>>>,
     uart_chardev: Option<Arc<Mutex<ChardevObject>>>,
@@ -282,7 +282,7 @@ impl RefMachine {
             infos.push(chardev.lock().unwrap().object_info());
         }
         if let Some(plic) = &self.plic {
-            infos.push(plic.lock().unwrap().object_info());
+            infos.push(plic.object_info());
         }
         if let Some(aclint) = &self.aclint {
             infos.push(aclint.lock().unwrap().object_info());
@@ -313,9 +313,8 @@ impl RefMachine {
             }
         }
         if let Some(plic) = &self.plic {
-            let plic = plic.lock().unwrap();
             if Self::object_matches(object_ref, &plic.object_info()) {
-                return Some(f(&*plic));
+                return Some(plic.with_mdevice(f));
             }
         }
         if let Some(aclint) = &self.aclint {
@@ -350,7 +349,7 @@ impl RefMachine {
         ]
     }
 
-    pub fn plic(&self) -> &Arc<Mutex<Plic>> {
+    pub fn plic(&self) -> &Arc<Plic> {
         self.plic.as_ref().expect("machine not initialized")
     }
 
@@ -664,21 +663,18 @@ impl Machine for RefMachine {
 
         // PLIC: 2 contexts per hart (M-mode + S-mode).
         let plic_num_contexts = 2 * opts.cpu_count;
-        let plic = Arc::new(Mutex::new(Plic::new_named(
+        let plic = Arc::new(Plic::new_named(
             "plic0",
             PLIC_NUM_SOURCES,
             plic_num_contexts,
-        )));
-        {
-            let mut p = plic.lock().unwrap();
-            p.attach_to_bus(&mut sysbus)?;
-            let plic_region = MemoryRegion::io(
-                "plic",
-                PLIC_SIZE,
-                Arc::new(PlicMmio(Arc::clone(&plic))),
-            );
-            p.register_mmio(plic_region, GPA::new(PLIC_BASE))?;
-        }
+        ));
+        plic.attach_to_bus(&mut sysbus)?;
+        let plic_region = MemoryRegion::io(
+            "plic",
+            PLIC_SIZE,
+            Arc::new(PlicMmio(Arc::clone(&plic))),
+        );
+        plic.register_mmio(plic_region, GPA::new(PLIC_BASE))?;
         self.plic = Some(Arc::clone(&plic));
 
         // ACLINT (CLINT-compatible).
@@ -760,7 +756,7 @@ impl Machine for RefMachine {
         // ---- IRQ wiring ----
         // Per-hart CPU IRQ sinks update real csr.mip bits.
 
-        // UART IRQ source 10 → PLIC.
+        // UART IRQ source 10 -> PLIC.
         let plic_as_sink =
             Arc::new(PlicIrqSink(Arc::clone(self.plic.as_ref().unwrap())));
         let uart_irq_line = IrqLine::new(
@@ -776,23 +772,22 @@ impl Machine for RefMachine {
         {
             let mip = &self.shared_mip;
             let wk = &self.wfi_waker;
-            let mut p = self.plic.as_ref().unwrap().lock().unwrap();
+            let p = self.plic.as_ref().unwrap();
             for hart in 0..opts.cpu_count as usize {
-                let _ = hart;
-                let mei_sink = Arc::new(RiscvCpuIrqSink::new(
-                    Arc::clone(mip),
-                    Arc::clone(wk),
-                ));
-                let mei_line =
-                    IrqLine::new(mei_sink as Arc<dyn IrqSink>, IRQ_MEI);
-                p.connect_context_output((2 * hart) as u32, mei_line);
-                let sei_sink = Arc::new(RiscvCpuIrqSink::new(
-                    Arc::clone(mip),
-                    Arc::clone(wk),
-                ));
-                let sei_line =
-                    IrqLine::new(sei_sink as Arc<dyn IrqSink>, IRQ_SEI);
-                p.connect_context_output((2 * hart + 1) as u32, sei_line);
+                let mei_sink: Arc<dyn IrqSink> = Arc::new(
+                    RiscvCpuIrqSink::new(Arc::clone(mip), Arc::clone(wk)),
+                );
+                p.connect_context_output(
+                    (2 * hart) as u32,
+                    InterruptSource::new(Arc::clone(&mei_sink), IRQ_MEI),
+                );
+                let sei_sink: Arc<dyn IrqSink> = Arc::new(
+                    RiscvCpuIrqSink::new(Arc::clone(mip), Arc::clone(wk)),
+                );
+                p.connect_context_output(
+                    (2 * hart + 1) as u32,
+                    InterruptSource::new(Arc::clone(&sei_sink), IRQ_SEI),
+                );
             }
         }
 
@@ -828,8 +823,6 @@ impl Machine for RefMachine {
             let address_space = self.address_space.as_mut().unwrap();
             self.plic
                 .as_ref()
-                .unwrap()
-                .lock()
                 .unwrap()
                 .realize_onto(&mut sysbus, address_space)?;
             self.aclint
@@ -889,7 +882,7 @@ impl Machine for RefMachine {
 
     fn reset(&mut self) {
         if let Some(plic) = &self.plic {
-            plic.lock().unwrap().reset_runtime();
+            plic.reset_runtime();
         }
         if let Some(aclint) = &self.aclint {
             aclint.lock().unwrap().reset_runtime();

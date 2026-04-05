@@ -281,8 +281,7 @@ fn test_ref_machine_irq_wiring() {
     // Raise UART IRQ (source 10) -> PLIC pending bit 10.
     m.uart_irq().raise();
     {
-        let mut plic = m.plic().lock().unwrap();
-        let pending = plic.read(0x1000, 4);
+        let pending = m.plic().read(0x1000, 4);
         assert_ne!(
             pending & (1 << 10),
             0,
@@ -293,8 +292,7 @@ fn test_ref_machine_irq_wiring() {
     // Lower UART IRQ -> pending bit cleared.
     m.uart_irq().lower();
     {
-        let mut plic = m.plic().lock().unwrap();
-        let pending = plic.read(0x1000, 4);
+        let pending = m.plic().read(0x1000, 4);
         assert_eq!(
             pending & (1 << 10),
             0,
@@ -357,8 +355,7 @@ fn test_uart_rx_irq_to_plic() {
 
     // Verify PLIC has pending bit 10 set.
     {
-        let mut plic = m.plic().lock().unwrap();
-        let pending = plic.read(0x1000, 4);
+        let pending = m.plic().read(0x1000, 4);
         assert_ne!(
             pending & (1 << 10),
             0,
@@ -375,8 +372,7 @@ fn test_uart_rx_irq_to_plic() {
 
     // PLIC pending bit should now be clear.
     {
-        let mut plic = m.plic().lock().unwrap();
-        let pending = plic.read(0x1000, 4);
+        let pending = m.plic().read(0x1000, 4);
         assert_eq!(
             pending & (1 << 10),
             0,

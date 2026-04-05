@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use machina_core::address::GPA;
 use machina_hw_core::bus::SysBus;
-use machina_hw_core::irq::{IrqLine, IrqSink};
+use machina_hw_core::irq::{InterruptSource, IrqSink};
 use machina_hw_intc::plic::{Plic, PlicMmio};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::MemoryRegion;
@@ -40,7 +40,7 @@ fn make_address_space() -> AddressSpace {
 
 #[test]
 fn test_plic_set_priority() {
-    let mut plic = Plic::new(64, 2);
+    let plic = Plic::new(64, 2);
 
     // Write priority for IRQ 1 via MMIO (offset 4).
     plic.write(0x04, 4, 7);
@@ -53,7 +53,7 @@ fn test_plic_set_priority() {
 
 #[test]
 fn test_plic_claim_highest() {
-    let mut plic = Plic::new(64, 2);
+    let plic = Plic::new(64, 2);
 
     // Set priorities: IRQ 1 = 2, IRQ 2 = 5.
     plic.write(0x04, 4, 2);
@@ -73,7 +73,7 @@ fn test_plic_claim_highest() {
 
 #[test]
 fn test_plic_complete() {
-    let mut plic = Plic::new(64, 1);
+    let plic = Plic::new(64, 1);
 
     plic.write(0x04, 4, 1);
     plic.write(0x2000, 4, 0x02);
@@ -91,7 +91,7 @@ fn test_plic_complete() {
 
 #[test]
 fn test_plic_threshold() {
-    let mut plic = Plic::new(64, 1);
+    let plic = Plic::new(64, 1);
 
     plic.write(0x04, 4, 3);
     plic.write(0x2000, 4, 0x02);
@@ -106,7 +106,7 @@ fn test_plic_threshold() {
 
 #[test]
 fn test_plic_no_pending() {
-    let mut plic = Plic::new(64, 1);
+    let plic = Plic::new(64, 1);
 
     plic.write(0x04, 4, 1);
     plic.write(0x2000, 4, 0x02);
@@ -117,13 +117,14 @@ fn test_plic_no_pending() {
 
 #[test]
 fn test_plic_set_irq_propagates() {
-    let mut plic = Plic::new(64, 2);
+    let plic = Plic::new(64, 2);
 
     // Connect output for context 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let out_irq = 11u32; // MEI
-    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, out_irq);
-    plic.connect_context_output(0, line);
+    let isrc =
+        InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, out_irq);
+    plic.connect_context_output(0, isrc);
 
     // Set priority[1] = 1, enable IRQ 1 for ctx 0.
     plic.write(0x04, 4, 1);
@@ -146,7 +147,7 @@ fn test_plic_set_irq_propagates() {
 
 #[test]
 fn test_plic_claim_on_read() {
-    let mut plic = Plic::new(64, 1);
+    let plic = Plic::new(64, 1);
 
     plic.write(0x04, 4, 1);
     plic.write(0x2000, 4, 0x02);
@@ -171,13 +172,14 @@ fn test_plic_claim_on_read() {
 
 #[test]
 fn test_plic_level_triggered_resample() {
-    let mut plic = Plic::new(64, 1);
+    let plic = Plic::new(64, 1);
 
     // Connect output for context 0.
     let sink = Arc::new(TestIrqSink::new(16));
     let out_irq = 11u32; // MEI
-    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, out_irq);
-    plic.connect_context_output(0, line);
+    let isrc =
+        InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, out_irq);
+    plic.connect_context_output(0, isrc);
 
     // priority[1] = 1, enable IRQ 1 for ctx 0.
     plic.write(0x04, 4, 1);
@@ -228,27 +230,20 @@ fn test_plic_level_triggered_resample() {
 #[test]
 fn test_plic_realize_via_sysbus_maps_mmio() {
     let mut bus = SysBus::new("sysbus0");
-    let plic = Arc::new(Mutex::new(Plic::new_named("plic0", 64, 2)));
-    {
-        let mut device = plic.lock().unwrap();
-        device.attach_to_bus(&mut bus).unwrap();
-        device
-            .register_mmio(
-                MemoryRegion::io(
-                    "plic",
-                    0x0400_0000,
-                    Arc::new(PlicMmio(Arc::clone(&plic))),
-                ),
-                GPA::new(0x0C00_0000),
-            )
-            .unwrap();
-    }
+    let plic = Arc::new(Plic::new_named("plic0", 64, 2));
+    plic.attach_to_bus(&mut bus).unwrap();
+    plic.register_mmio(
+        MemoryRegion::io(
+            "plic",
+            0x0400_0000,
+            Arc::new(PlicMmio(Arc::clone(&plic))),
+        ),
+        GPA::new(0x0C00_0000),
+    )
+    .unwrap();
 
     let mut address_space = make_address_space();
-    plic.lock()
-        .unwrap()
-        .realize_onto(&mut bus, &mut address_space)
-        .unwrap();
+    plic.realize_onto(&mut bus, &mut address_space).unwrap();
 
     assert!(address_space.is_mapped(GPA::new(0x0C00_0000), 4));
     address_space.write(GPA::new(0x0C00_0004), 4, 7);
