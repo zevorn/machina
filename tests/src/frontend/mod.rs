@@ -1666,3 +1666,140 @@ fn test_ext_c_insn_rejected_without_c() {
     let exit = run_rvc_with_cfg(&mut cpu, c_li(1, 42), cfg);
     assert_eq!(exit, EXCP_UNDEF as usize);
 }
+
+// ── Zicbom / Zicboz — CBO instruction encoders ─────
+
+const OP_MISC_MEM: u32 = 0b0001111;
+
+fn cbo_inval(rs1: u32) -> u32 {
+    (0x000 << 20) | (rs1 << 15) | (0b010 << 12) | OP_MISC_MEM
+}
+fn cbo_clean(rs1: u32) -> u32 {
+    (0x001 << 20) | (rs1 << 15) | (0b010 << 12) | OP_MISC_MEM
+}
+fn cbo_flush(rs1: u32) -> u32 {
+    (0x002 << 20) | (rs1 << 15) | (0b010 << 12) | OP_MISC_MEM
+}
+fn cbo_zero(rs1: u32) -> u32 {
+    (0x004 << 20) | (rs1 << 15) | (0b010 << 12) | OP_MISC_MEM
+}
+
+#[test]
+fn test_cbo_clean_accepted() {
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[5] = 0x1000;
+    let cfg = RiscvCfg {
+        ext_zicbom: true,
+        ..cfg_rv64i_only()
+    };
+    run_rv_with_cfg(&mut cpu, cbo_clean(5), cfg);
+    assert_eq!(cpu.gpr[5], 0x1000);
+}
+
+#[test]
+fn test_cbo_flush_accepted() {
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[5] = 0x2000;
+    let cfg = RiscvCfg {
+        ext_zicbom: true,
+        ..cfg_rv64i_only()
+    };
+    run_rv_with_cfg(&mut cpu, cbo_flush(5), cfg);
+    assert_eq!(cpu.gpr[5], 0x2000);
+}
+
+#[test]
+fn test_cbo_inval_accepted() {
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[5] = 0x3000;
+    let cfg = RiscvCfg {
+        ext_zicbom: true,
+        ..cfg_rv64i_only()
+    };
+    run_rv_with_cfg(&mut cpu, cbo_inval(5), cfg);
+    assert_eq!(cpu.gpr[5], 0x3000);
+}
+
+#[test]
+fn test_cbo_zero_accepted() {
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[5] = 0x4000;
+    let cfg = RiscvCfg {
+        ext_zicboz: true,
+        ..cfg_rv64i_only()
+    };
+    run_rv_with_cfg(&mut cpu, cbo_zero(5), cfg);
+    assert_eq!(cpu.gpr[5], 0x4000);
+}
+
+#[test]
+fn test_cbo_clean_rejected_without_zicbom() {
+    let mut cpu = RiscvCpu::new();
+    let exit =
+        run_rv_with_cfg(&mut cpu, cbo_clean(5), cfg_rv64i_only());
+    assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+#[test]
+fn test_cbo_flush_rejected_without_zicbom() {
+    let mut cpu = RiscvCpu::new();
+    let exit =
+        run_rv_with_cfg(&mut cpu, cbo_flush(5), cfg_rv64i_only());
+    assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+#[test]
+fn test_cbo_inval_rejected_without_zicbom() {
+    let mut cpu = RiscvCpu::new();
+    let exit =
+        run_rv_with_cfg(&mut cpu, cbo_inval(5), cfg_rv64i_only());
+    assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+#[test]
+fn test_cbo_zero_rejected_without_zicboz() {
+    let mut cpu = RiscvCpu::new();
+    let exit =
+        run_rv_with_cfg(&mut cpu, cbo_zero(5), cfg_rv64i_only());
+    assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+#[test]
+fn test_cbo_clean_no_gpr_change() {
+    let mut cpu = RiscvCpu::new();
+    for i in 1..32 {
+        cpu.gpr[i] = (i as u64) * 0x111;
+    }
+    let cfg = RiscvCfg {
+        ext_zicbom: true,
+        ..cfg_rv64i_only()
+    };
+    run_rv_with_cfg(&mut cpu, cbo_clean(10), cfg);
+    for i in 1..32 {
+        assert_eq!(
+            cpu.gpr[i],
+            (i as u64) * 0x111,
+            "gpr[{i}] modified by cbo.clean"
+        );
+    }
+}
+
+#[test]
+fn test_cbo_zero_no_gpr_change() {
+    let mut cpu = RiscvCpu::new();
+    for i in 1..32 {
+        cpu.gpr[i] = (i as u64) * 0x222;
+    }
+    let cfg = RiscvCfg {
+        ext_zicboz: true,
+        ..cfg_rv64i_only()
+    };
+    run_rv_with_cfg(&mut cpu, cbo_zero(10), cfg);
+    for i in 1..32 {
+        assert_eq!(
+            cpu.gpr[i],
+            (i as u64) * 0x222,
+            "gpr[{i}] modified by cbo.zero"
+        );
+    }
+}
