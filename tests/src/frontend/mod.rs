@@ -3,7 +3,9 @@
 //! the resulting CPU state.
 
 mod difftest;
+mod riscv_zba;
 mod riscv_zbb;
+mod riscv_zbc;
 
 use machina_accel::code_buffer::CodeBuffer;
 use machina_accel::ir::tb::{

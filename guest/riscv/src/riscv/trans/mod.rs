@@ -20,6 +20,7 @@ mod gen_rvi;
 mod gen_rvm;
 mod gen_zba;
 mod gen_zbb;
+mod gen_zbc;
 mod helpers;
 
 use super::ext::MisaExt;
@@ -878,6 +879,37 @@ impl Decode<Context> for RiscvDisasContext {
     fn trans_orc_b(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
         require_cfg!(self, ext_zbb);
         self.gen_orc_b(ir, a)
+    }
+
+    // ============================================================
+    // Zbc — Carry-less Multiplication
+    // ============================================================
+
+    fn trans_clmul(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zbc);
+        self.gen_clmul_op(ir, a, helpers::helper_clmul)
+    }
+
+    fn trans_clmulh(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zbc);
+        self.gen_clmul_op(ir, a, helpers::helper_clmulh)
+    }
+
+    fn trans_clmulr(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zbc);
+        self.gen_clmul_op(ir, a, helpers::helper_clmulr)
     }
 
     // ============================================================
