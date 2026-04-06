@@ -18,6 +18,10 @@ mod gen_priv;
 mod gen_rva;
 mod gen_rvi;
 mod gen_rvm;
+mod gen_zba;
+mod gen_zbb;
+mod gen_zbc;
+mod gen_zbs;
 mod helpers;
 
 use super::ext::MisaExt;
@@ -713,6 +717,271 @@ impl Decode<Context> for RiscvDisasContext {
     fn trans_amomaxu_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
         self.gen_amo_minmax(ir, a, Cond::Gtu, MemOp::uq())
+    }
+
+    // ============================================================
+    // Zba — Address Computation
+    // ============================================================
+
+    fn trans_sh1add(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zba);
+        self.gen_sh1add(ir, a)
+    }
+
+    fn trans_sh2add(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zba);
+        self.gen_sh2add(ir, a)
+    }
+
+    fn trans_sh3add(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zba);
+        self.gen_sh3add(ir, a)
+    }
+
+    fn trans_sh1add_uw(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zba);
+        self.gen_sh1add_uw(ir, a)
+    }
+
+    fn trans_sh2add_uw(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zba);
+        self.gen_sh2add_uw(ir, a)
+    }
+
+    fn trans_sh3add_uw(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zba);
+        self.gen_sh3add_uw(ir, a)
+    }
+
+    fn trans_add_uw(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zba);
+        self.gen_add_uw(ir, a)
+    }
+
+    fn trans_slli_uw(&mut self, ir: &mut Context, a: &ArgsShift) -> bool {
+        require_cfg!(self, ext_zba);
+        self.gen_slli_uw(ir, a)
+    }
+
+    // ============================================================
+    // Zbb — Basic Bit Manipulation
+    // ============================================================
+
+    // -- Logical with NOT ------------------------------------
+
+    fn trans_andn(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_andn(ir, a)
+    }
+
+    fn trans_orn(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_orn(ir, a)
+    }
+
+    fn trans_xnor(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_xnor(ir, a)
+    }
+
+    // -- Min / Max -------------------------------------------
+
+    fn trans_max(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_max(ir, a)
+    }
+
+    fn trans_maxu(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_maxu(ir, a)
+    }
+
+    fn trans_min(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_min(ir, a)
+    }
+
+    fn trans_minu(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_minu(ir, a)
+    }
+
+    // -- Rotate ----------------------------------------------
+
+    fn trans_rol(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_rol(ir, a)
+    }
+
+    fn trans_ror(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_ror(ir, a)
+    }
+
+    fn trans_rolw(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_rolw(ir, a)
+    }
+
+    fn trans_rorw(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_rorw(ir, a)
+    }
+
+    fn trans_rori(&mut self, ir: &mut Context, a: &ArgsShift) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_rori(ir, a)
+    }
+
+    fn trans_roriw(&mut self, ir: &mut Context, a: &ArgsShift) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_roriw(ir, a)
+    }
+
+    // -- Count / sign-extend ---------------------------------
+
+    fn trans_clz(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_clz(ir, a)
+    }
+
+    fn trans_ctz(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_ctz(ir, a)
+    }
+
+    fn trans_cpop(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_cpop(ir, a)
+    }
+
+    fn trans_clzw(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_clzw(ir, a)
+    }
+
+    fn trans_ctzw(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_ctzw(ir, a)
+    }
+
+    fn trans_cpopw(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_cpopw(ir, a)
+    }
+
+    fn trans_sext_b(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_sext_b(ir, a)
+    }
+
+    fn trans_sext_h(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_sext_h(ir, a)
+    }
+
+    fn trans_zext_h(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_zext_h(ir, a)
+    }
+
+    // -- Byte-reverse / OR-combine ---------------------------
+
+    fn trans_rev8(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_rev8(ir, a)
+    }
+
+    fn trans_orc_b(&mut self, ir: &mut Context, a: &ArgsR2) -> bool {
+        require_cfg!(self, ext_zbb);
+        self.gen_orc_b(ir, a)
+    }
+
+    // ============================================================
+    // Zbc — Carry-less Multiplication
+    // ============================================================
+
+    fn trans_clmul(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbc);
+        self.gen_clmul_op(ir, a, helpers::helper_clmul)
+    }
+
+    fn trans_clmulh(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbc);
+        self.gen_clmul_op(ir, a, helpers::helper_clmulh)
+    }
+
+    fn trans_clmulr(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbc);
+        self.gen_clmul_op(ir, a, helpers::helper_clmulr)
+    }
+
+    // ============================================================
+    // Zbs — Single-Bit Operations
+    // ============================================================
+
+    fn trans_bclr(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbs);
+        self.gen_bclr(ir, a)
+    }
+
+    fn trans_bclri(&mut self, ir: &mut Context, a: &ArgsShift) -> bool {
+        require_cfg!(self, ext_zbs);
+        self.gen_bclri(ir, a)
+    }
+
+    fn trans_bext(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbs);
+        self.gen_bext(ir, a)
+    }
+
+    fn trans_bexti(&mut self, ir: &mut Context, a: &ArgsShift) -> bool {
+        require_cfg!(self, ext_zbs);
+        self.gen_bexti(ir, a)
+    }
+
+    fn trans_binv(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbs);
+        self.gen_binv(ir, a)
+    }
+
+    fn trans_binvi(&mut self, ir: &mut Context, a: &ArgsShift) -> bool {
+        require_cfg!(self, ext_zbs);
+        self.gen_binvi(ir, a)
+    }
+
+    fn trans_bset(&mut self, ir: &mut Context, a: &ArgsR) -> bool {
+        require_cfg!(self, ext_zbs);
+        self.gen_bset(ir, a)
+    }
+
+    fn trans_bseti(&mut self, ir: &mut Context, a: &ArgsShift) -> bool {
+        require_cfg!(self, ext_zbs);
+        self.gen_bseti(ir, a)
+    }
+
+    // ============================================================
+    // Zicbom / Zicboz — Cache Block Operations (NOP)
+    // ============================================================
+
+    fn trans_cbo_inval(&mut self, _ir: &mut Context, _a: &ArgsEmpty) -> bool {
+        require_cfg!(self, ext_zicbom);
+        true // NOP — no cache simulation
+    }
+
+    fn trans_cbo_clean(&mut self, _ir: &mut Context, _a: &ArgsEmpty) -> bool {
+        require_cfg!(self, ext_zicbom);
+        true // NOP — no cache simulation
+    }
+
+    fn trans_cbo_flush(&mut self, _ir: &mut Context, _a: &ArgsEmpty) -> bool {
+        require_cfg!(self, ext_zicbom);
+        true // NOP — no cache simulation
+    }
+
+    fn trans_cbo_zero(&mut self, _ir: &mut Context, _a: &ArgsEmpty) -> bool {
+        require_cfg!(self, ext_zicboz);
+        true // NOP — no cache simulation
     }
 
     // ============================================================

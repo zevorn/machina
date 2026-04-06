@@ -9,9 +9,13 @@ mod core_address;
 #[cfg(test)]
 mod decode;
 #[cfg(test)]
+mod disas_bitmanip;
+#[cfg(test)]
 mod exec;
 #[cfg(test)]
 mod frontend;
+#[cfg(test)]
+mod gdbstub;
 #[cfg(test)]
 mod hw_aclint;
 #[cfg(test)]

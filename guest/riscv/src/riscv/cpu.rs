@@ -1,7 +1,7 @@
 //! RISC-V CPU state.
 
 use std::mem::offset_of;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32};
 
 use super::csr::{CsrFile, PrivLevel};
 
@@ -81,8 +81,12 @@ pub struct RiscvCpu {
     /// dispatch from JIT helpers. Cast from *const
     /// AddressSpace. Zero means not initialized.
     pub as_ptr: u64,
+    /// Start of the RAM window (board-specific, e.g.
+    /// 0x8000_0000 for RISC-V virt). Set by the system
+    /// layer at CPU creation; JIT helpers use this to
+    /// decide RAM vs MMIO.
+    pub ram_base: u64,
     /// End of the RAM window (ram_base + ram_size).
-    /// JIT helpers use this to decide RAM vs MMIO.
     pub ram_end: u64,
     /// Pointer to TbStore's code-page bitmap (AtomicU8
     /// array). Store helpers check this to detect writes
@@ -113,6 +117,13 @@ pub struct RiscvCpu {
     /// to abort TB execution (e.g. illegal CSR access).
     /// Zero means longjmp is not available.
     pub jmp_env: u64,
+
+    /// Exit flag for breaking goto_tb chains. When
+    /// negative, JIT-generated goto_tb skips the direct
+    /// jump and falls through to exit_tb, returning
+    /// control to the exec loop. Timer interrupts set
+    /// this to -1; the exec loop resets it to 0.
+    pub neg_align: AtomicI32,
 
     /// Physical pages written since last fence.i. Used
     /// for page-granularity TB invalidation.
@@ -165,6 +176,9 @@ pub const UTVAL_OFFSET: i64 = UCAUSE_OFFSET + 8; // 608
 /// Byte offset of `uip`.
 pub const UIP_OFFSET: i64 = UTVAL_OFFSET + 8; // 616
 
+/// Byte offset of `neg_align` (exit flag for goto_tb).
+pub const NEG_ALIGN_OFFSET: i64 = offset_of!(RiscvCpu, neg_align) as i64;
+
 /// Byte offset of `csr.mstatus`.
 pub const MSTATUS_OFFSET: i64 =
     (offset_of!(RiscvCpu, csr) + offset_of!(CsrFile, mstatus)) as i64;
@@ -202,6 +216,7 @@ impl RiscvCpu {
             mem_fault_cause: 0,
             mem_fault_tval: 0,
             as_ptr: 0,
+            ram_base: 0,
             ram_end: 0,
             code_pages_ptr: 0,
             code_pages_len: 0,
@@ -209,6 +224,7 @@ impl RiscvCpu {
             last_phys_pc: 0,
             fault_pc: 0,
             jmp_env: 0,
+            neg_align: AtomicI32::new(0),
             dirty_pages: Vec::new(),
         }
     }

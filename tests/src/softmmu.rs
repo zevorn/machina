@@ -709,8 +709,12 @@ fn test_fence_i_invalidates_dirty_page_tbs() {
     let store = TbStore::new();
     let idx = unsafe { store.alloc(0x8000_1000, 0, 0).unwrap() };
     unsafe {
-        store.get_mut(idx).phys_pc = 0x8000_1000;
+        let tb = store.get_mut(idx);
+        tb.phys_pc = 0x8000_1000;
+        tb.gen
+            .store(store.global_gen(), std::sync::atomic::Ordering::Release);
     }
+    store.mark_code_page(0x8000_1000 >> 12, idx);
     store.insert(idx);
 
     assert!(!store.get(idx).invalid.load(Ordering::Acquire));

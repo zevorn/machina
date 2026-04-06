@@ -5,6 +5,7 @@ use std::io;
 use std::path::Path;
 
 use crate::queue::{Desc, VirtQueue, VRING_DESC_F_WRITE};
+use crate::VirtioDevice;
 
 const SECTOR_SIZE: u64 = 512;
 
@@ -70,78 +71,6 @@ impl VirtioBlk {
     /// Device capacity in 512-byte sectors.
     pub fn capacity(&self) -> u64 {
         self.capacity
-    }
-
-    /// Device feature bits.
-    pub fn features(&self) -> u64 {
-        VIRTIO_F_VERSION_1
-    }
-
-    /// Read config space at `offset` with given `size`.
-    pub fn config_read(&self, offset: u64, size: u32) -> u64 {
-        match offset {
-            // capacity (u64 at offset 0)
-            0..=7 => {
-                let bytes = self.capacity.to_le_bytes();
-                read_sub(&bytes, offset as usize, size)
-            }
-            // blk_size (u32 at offset 20)
-            20..=23 => {
-                let bytes = 512u32.to_le_bytes();
-                read_sub(&bytes, (offset - 20) as usize, size)
-            }
-            _ => 0,
-        }
-    }
-
-    /// Process all pending requests in the queue.
-    ///
-    /// # Safety
-    /// Caller must ensure `ram` is valid for the range
-    /// [`ram_base`, `ram_base + ram_size`).
-    pub unsafe fn handle_queue(
-        &self,
-        queue: &mut VirtQueue,
-        ram: *mut u8,
-        ram_base: u64,
-        ram_size: u64,
-    ) -> u32 {
-        let avail_idx = queue.read_avail_idx(ram, ram_base, ram_size);
-        let mut processed = 0u32;
-        let mut used_idx = {
-            // Read current used.idx.
-            let off = queue.used_addr + 2 - ram_base;
-            if off + 2 > ram_size {
-                return 0;
-            }
-            unsafe { (ram.add(off as usize) as *const u16).read_unaligned() }
-        };
-
-        while queue.last_avail_idx != avail_idx {
-            let desc_head = queue.read_avail_ring(
-                queue.last_avail_idx,
-                ram,
-                ram_base,
-                ram_size,
-            );
-            let chain = queue.walk_chain(desc_head, ram, ram_base, ram_size);
-            let written = self.process_request(&chain, ram, ram_base, ram_size);
-            queue.write_used(
-                used_idx,
-                desc_head as u32,
-                written,
-                ram,
-                ram_base,
-                ram_size,
-            );
-            used_idx = used_idx.wrapping_add(1);
-            queue.last_avail_idx = queue.last_avail_idx.wrapping_add(1);
-            processed += 1;
-        }
-
-        // Update used.idx.
-        queue.write_used_idx(used_idx, ram, ram_base, ram_size);
-        processed
     }
 
     /// Process a single block request from a descriptor
@@ -291,6 +220,84 @@ impl VirtioBlk {
             disk_off += len;
         }
         VIRTIO_BLK_S_OK
+    }
+}
+
+const VIRTIO_DEVICE_BLK: u32 = 2;
+
+impl VirtioDevice for VirtioBlk {
+    fn device_id(&self) -> u32 {
+        VIRTIO_DEVICE_BLK
+    }
+
+    fn features(&self) -> u64 {
+        VIRTIO_F_VERSION_1
+    }
+
+    fn ack_features(&mut self, _features: u64) {}
+
+    fn num_queues(&self) -> usize {
+        1
+    }
+
+    fn config_read(&self, offset: u64, size: u32) -> u64 {
+        match offset {
+            // capacity (u64 at offset 0)
+            0..=7 => {
+                let bytes = self.capacity.to_le_bytes();
+                read_sub(&bytes, offset as usize, size)
+            }
+            // blk_size (u32 at offset 20)
+            20..=23 => {
+                let bytes = 512u32.to_le_bytes();
+                read_sub(&bytes, (offset - 20) as usize, size)
+            }
+            _ => 0,
+        }
+    }
+
+    unsafe fn handle_queue(
+        &mut self,
+        _idx: u32,
+        queue: &mut VirtQueue,
+        ram: *mut u8,
+        ram_base: u64,
+        ram_size: u64,
+    ) -> u32 {
+        let avail_idx = queue.read_avail_idx(ram, ram_base, ram_size);
+        let mut processed = 0u32;
+        let mut used_idx = {
+            let off = queue.used_addr + 2 - ram_base;
+            if off + 2 > ram_size {
+                return 0;
+            }
+            unsafe { (ram.add(off as usize) as *const u16).read_unaligned() }
+        };
+
+        while queue.last_avail_idx != avail_idx {
+            let desc_head = queue.read_avail_ring(
+                queue.last_avail_idx,
+                ram,
+                ram_base,
+                ram_size,
+            );
+            let chain = queue.walk_chain(desc_head, ram, ram_base, ram_size);
+            let written = self.process_request(&chain, ram, ram_base, ram_size);
+            queue.write_used(
+                used_idx,
+                desc_head as u32,
+                written,
+                ram,
+                ram_base,
+                ram_size,
+            );
+            used_idx = used_idx.wrapping_add(1);
+            queue.last_avail_idx = queue.last_avail_idx.wrapping_add(1);
+            processed += 1;
+        }
+
+        queue.write_used_idx(used_idx, ram, ram_base, ram_size);
+        processed
     }
 }
 

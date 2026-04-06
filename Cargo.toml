@@ -18,6 +18,7 @@ members = [
     "util",
     "memory",
     "monitor",
+    "gdbstub",
     "system",
     "hw/core",
     "hw/intc",
@@ -47,6 +48,7 @@ machina-hw-char     = { version = "0.1.2", path = "hw/char" }
 machina-hw-intc     = { version = "0.1.2", path = "hw/intc" }
 machina-hw-virtio   = { version = "0.1.2", path = "hw/virtio" }
 machina-system      = { version = "0.1.2", path = "system" }
+machina-gdbstub     = { version = "0.1.2", path = "gdbstub" }
 machina-hw-riscv    = { version = "0.1.2", path = "hw/riscv" }
 machina-tests       = { version = "0.1.2", path = "tests" }
 machina-mtest       = { version = "0.1.2", path = "tests/mtest" }
@@ -57,6 +59,7 @@ machina-irbackend   = { version = "0.1.2", path = "tools/irbackend" }
 libc        = "0.2"
 serde_json  = "1"
 tempfile    = "3"
+parking_lot = "0.12"
 
 [package]
 name = "machina-emu"
@@ -84,4 +87,5 @@ machina-system   = { workspace = true }
 machina-difftest = { workspace = true }
 machina-monitor  = { workspace = true }
 machina-hw-core  = { workspace = true }
+machina-gdbstub  = { workspace = true }
 libc             = { workspace = true }

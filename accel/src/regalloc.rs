@@ -242,6 +242,56 @@ fn clobber_caller_saved(
     }
 }
 
+/// Flush all non-fixed register mappings at basic block
+/// boundaries. At label positions any register-cached
+/// value may be stale because the label can be reached
+/// from multiple predecessors. Fixed temps (env pointer)
+/// are kept; everything else is evicted.
+fn bb_boundary(ctx: &mut Context, state: &mut RegAllocState) {
+    let nb_temps = ctx.nb_temps() as usize;
+    for i in 0..nb_temps {
+        let tidx = TempIdx(i as u32);
+        let temp = ctx.temp(tidx);
+        match temp.kind {
+            TempKind::Fixed => {}
+            TempKind::Global => {
+                if let Some(reg) = temp.reg {
+                    state.free_reg(reg);
+                }
+                let t = ctx.temp_mut(tidx);
+                t.val_type = TempVal::Mem;
+                t.reg = None;
+                t.mem_coherent = true;
+            }
+            TempKind::Const => {
+                if let Some(reg) = temp.reg {
+                    state.free_reg(reg);
+                }
+                let t = ctx.temp_mut(tidx);
+                t.val_type = TempVal::Const;
+                t.reg = None;
+            }
+            TempKind::Ebb => {
+                if let Some(reg) = temp.reg {
+                    state.free_reg(reg);
+                }
+                let t = ctx.temp_mut(tidx);
+                t.val_type = TempVal::Dead;
+                t.reg = None;
+            }
+            TempKind::Tb => {
+                if let Some(reg) = temp.reg {
+                    state.free_reg(reg);
+                }
+                let t = ctx.temp_mut(tidx);
+                let backed = t.mem_allocated && t.mem_coherent;
+                t.val_type = if backed { TempVal::Mem } else { TempVal::Dead };
+                t.reg = None;
+            }
+        }
+    }
+}
+
 /// Sync all live globals back to memory.
 fn sync_globals(
     ctx: &mut Context,
@@ -798,11 +848,8 @@ pub fn regalloc_and_codegen(
             Opcode::Nop => continue,
             Opcode::InsnStart => {
                 // Pass through to backend for fault_pc.
-                let ca: Vec<u32> =
-                    op.cargs().iter().map(|t| t.0).collect();
-                backend.tcg_out_op(
-                    buf, ctx, &op, &[], &[], &ca,
-                );
+                let ca: Vec<u32> = op.cargs().iter().map(|t| t.0).collect();
+                backend.tcg_out_op(buf, ctx, &op, &[], &[], &ca);
                 // Highwater check: if code buffer is
                 // nearly full, longjmp back to tb_gen_code
                 // which retries with fewer instructions
@@ -853,6 +900,7 @@ pub fn regalloc_and_codegen(
             Opcode::SetLabel => {
                 let label_id = op.args[0].0;
                 sync_globals(ctx, backend, buf);
+                bb_boundary(ctx, &mut state);
                 let offset = buf.offset();
                 let label = ctx.label_mut(label_id);
                 label.set_value(offset);

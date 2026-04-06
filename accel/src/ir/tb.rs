@@ -45,6 +45,11 @@ pub struct TranslationBlock {
     pub phys_pc: u64,
     /// Protected by TbStore hash lock.
     pub hash_next: Option<usize>,
+    /// Next TB on the same physical code page.
+    /// Singly-linked list per page for O(k) invalidation.
+    /// Protected by translate_lock (prepend) and
+    /// page_heads lock (unlink during invalidation).
+    pub page_next: Option<usize>,
 
     // -- Per-TB lock for chaining state --
     pub jmp: Mutex<TbJmpState>,
@@ -52,6 +57,9 @@ pub struct TranslationBlock {
 
     // -- Atomic --
     pub invalid: AtomicBool,
+    /// Generation at which this TB was created. Compared
+    /// against TbStore::global_gen for O(1) bulk invalidation.
+    pub gen: AtomicUsize,
     /// Single-entry target cache for indirect exits (atomic,
     /// lock-free). EXIT_TARGET_NONE means no cached target.
     pub exit_target: AtomicUsize,
@@ -97,9 +105,11 @@ impl TranslationBlock {
             jmp_reset_offset: [None; 2],
             phys_pc: 0,
             hash_next: None,
+            page_next: None,
             jmp: Mutex::new(TbJmpState::new()),
             contains_atomic: false,
             invalid: AtomicBool::new(false),
+            gen: AtomicUsize::new(0),
             exit_target: AtomicUsize::new(EXIT_TARGET_NONE),
         }
     }
@@ -198,18 +208,40 @@ pub fn decode_tb_exit(raw: usize) -> (Option<usize>, usize) {
     }
 }
 
-/// Per-CPU direct-mapped TB jump cache.
+/// Per-CPU direct-mapped TB jump cache with O(1) invalidation.
 ///
 /// Indexed by `(pc >> 2) & (TB_JMP_CACHE_SIZE - 1)`.
-/// Provides O(1) lookup for the common case of re-executing the same PC.
+/// Each entry carries the `generation` at which it was inserted.
+/// `invalidate()` bumps the generation counter in O(1); stale
+/// entries are detected lazily on lookup and automatically
+/// overwritten on insert.
 pub struct JumpCache {
-    entries: Box<[Option<usize>; TB_JMP_CACHE_SIZE]>,
+    entries: Box<[JumpCacheEntry; TB_JMP_CACHE_SIZE]>,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct JumpCacheEntry {
+    tb_idx: Option<usize>,
+    gen: u64,
+}
+
+impl Clone for JumpCache {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            generation: self.generation,
+        }
+    }
 }
 
 impl JumpCache {
     pub fn new() -> Self {
+        let mut v = Vec::with_capacity(TB_JMP_CACHE_SIZE);
+        v.resize_with(TB_JMP_CACHE_SIZE, JumpCacheEntry::default);
         Self {
-            entries: Box::new([None; TB_JMP_CACHE_SIZE]),
+            entries: v.into_boxed_slice().try_into().ok().unwrap(),
+            generation: 1,
         }
     }
 
@@ -218,19 +250,36 @@ impl JumpCache {
     }
 
     pub fn lookup(&self, pc: u64) -> Option<usize> {
-        self.entries[Self::index(pc)]
+        let e = &self.entries[Self::index(pc)];
+        if e.gen == self.generation {
+            e.tb_idx
+        } else {
+            None
+        }
     }
 
     pub fn insert(&mut self, pc: u64, tb_idx: usize) {
-        self.entries[Self::index(pc)] = Some(tb_idx);
+        self.entries[Self::index(pc)] = JumpCacheEntry {
+            tb_idx: Some(tb_idx),
+            gen: self.generation,
+        };
     }
 
     pub fn remove(&mut self, pc: u64) {
-        self.entries[Self::index(pc)] = None;
+        let e = &mut self.entries[Self::index(pc)];
+        if e.gen == self.generation {
+            e.tb_idx = None;
+        }
     }
 
+    /// Invalidate all entries in O(1) by bumping the
+    /// generation counter. Stale entries are ignored on
+    /// lookup and overwritten on insert.
     pub fn invalidate(&mut self) {
-        self.entries.fill(None);
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.generation = 1;
+        }
     }
 }
 

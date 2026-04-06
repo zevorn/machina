@@ -16,7 +16,9 @@ machina-hw-intc = { workspace = true }
 machina-hw-char = { workspace = true }
 machina-hw-riscv = { workspace = true }
 machina-hw-virtio = { workspace = true }
+machina-disas = { workspace = true }
 machina-monitor = { workspace = true }
+machina-gdbstub = { workspace = true }
 machina-softfloat = { workspace = true }
 libc = { workspace = true }
 serde_json = { workspace = true }

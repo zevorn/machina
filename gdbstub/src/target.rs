@@ -1,0 +1,168 @@
+// RISC-V 64-bit GDB target description XML.
+//
+// Follows QEMU's gdb-xml/riscv-64bit-cpu.xml and
+// riscv-64bit-fpu.xml for register name and layout.
+
+/// RISC-V 64-bit CPU feature: x0-x31 + pc.
+pub const RISCV64_CPU_XML: &str = r#"<?xml version="1.0"?>
+<!DOCTYPE feature SYSTEM "gdb-target.dtd">
+<feature name="org.gnu.gdb.riscv.cpu">
+  <reg name="zero" bitsize="64" type="uint64"/>
+  <reg name="ra" bitsize="64" type="code_ptr"/>
+  <reg name="sp" bitsize="64" type="data_ptr"/>
+  <reg name="gp" bitsize="64" type="data_ptr"/>
+  <reg name="tp" bitsize="64" type="data_ptr"/>
+  <reg name="t0" bitsize="64" type="int"/>
+  <reg name="t1" bitsize="64" type="int"/>
+  <reg name="t2" bitsize="64" type="int"/>
+  <reg name="fp" bitsize="64" type="data_ptr"/>
+  <reg name="s1" bitsize="64" type="int"/>
+  <reg name="a0" bitsize="64" type="int"/>
+  <reg name="a1" bitsize="64" type="int"/>
+  <reg name="a2" bitsize="64" type="int"/>
+  <reg name="a3" bitsize="64" type="int"/>
+  <reg name="a4" bitsize="64" type="int"/>
+  <reg name="a5" bitsize="64" type="int"/>
+  <reg name="a6" bitsize="64" type="int"/>
+  <reg name="a7" bitsize="64" type="int"/>
+  <reg name="s2" bitsize="64" type="int"/>
+  <reg name="s3" bitsize="64" type="int"/>
+  <reg name="s4" bitsize="64" type="int"/>
+  <reg name="s5" bitsize="64" type="int"/>
+  <reg name="s6" bitsize="64" type="int"/>
+  <reg name="s7" bitsize="64" type="int"/>
+  <reg name="s8" bitsize="64" type="int"/>
+  <reg name="s9" bitsize="64" type="int"/>
+  <reg name="s10" bitsize="64" type="int"/>
+  <reg name="s11" bitsize="64" type="int"/>
+  <reg name="t3" bitsize="64" type="int"/>
+  <reg name="t4" bitsize="64" type="int"/>
+  <reg name="t5" bitsize="64" type="int"/>
+  <reg name="t6" bitsize="64" type="int"/>
+  <reg name="pc" bitsize="64" type="code_ptr"/>
+</feature>
+"#;
+
+/// RISC-V 64-bit FPU feature: f0-f31 (fp + fd pairs).
+pub const RISCV64_FPU_XML: &str = r#"<?xml version="1.0"?>
+<!DOCTYPE feature SYSTEM "gdb-target.dtd">
+<feature name="org.gnu.gdb.riscv.fpu">
+  <union id="riscv_double">
+    <field name="float" type="ieee_single"/>
+    <field name="double" type="ieee_double"/>
+  </union>
+  <reg name="ft0" bitsize="64" type="riscv_double"/>
+  <reg name="ft1" bitsize="64" type="riscv_double"/>
+  <reg name="ft2" bitsize="64" type="riscv_double"/>
+  <reg name="ft3" bitsize="64" type="riscv_double"/>
+  <reg name="ft4" bitsize="64" type="riscv_double"/>
+  <reg name="ft5" bitsize="64" type="riscv_double"/>
+  <reg name="ft6" bitsize="64" type="riscv_double"/>
+  <reg name="ft7" bitsize="64" type="riscv_double"/>
+  <reg name="fs0" bitsize="64" type="riscv_double"/>
+  <reg name="fs1" bitsize="64" type="riscv_double"/>
+  <reg name="fa0" bitsize="64" type="riscv_double"/>
+  <reg name="fa1" bitsize="64" type="riscv_double"/>
+  <reg name="fa2" bitsize="64" type="riscv_double"/>
+  <reg name="fa3" bitsize="64" type="riscv_double"/>
+  <reg name="fa4" bitsize="64" type="riscv_double"/>
+  <reg name="fa5" bitsize="64" type="riscv_double"/>
+  <reg name="fa6" bitsize="64" type="riscv_double"/>
+  <reg name="fa7" bitsize="64" type="riscv_double"/>
+  <reg name="fs2" bitsize="64" type="riscv_double"/>
+  <reg name="fs3" bitsize="64" type="riscv_double"/>
+  <reg name="fs4" bitsize="64" type="riscv_double"/>
+  <reg name="fs5" bitsize="64" type="riscv_double"/>
+  <reg name="fs6" bitsize="64" type="riscv_double"/>
+  <reg name="fs7" bitsize="64" type="riscv_double"/>
+  <reg name="fs8" bitsize="64" type="riscv_double"/>
+  <reg name="fs9" bitsize="64" type="riscv_double"/>
+  <reg name="fs10" bitsize="64" type="riscv_double"/>
+  <reg name="fs11" bitsize="64" type="riscv_double"/>
+  <reg name="ft8" bitsize="64" type="riscv_double"/>
+  <reg name="ft9" bitsize="64" type="riscv_double"/>
+  <reg name="ft10" bitsize="64" type="riscv_double"/>
+  <reg name="ft11" bitsize="64" type="riscv_double"/>
+</feature>
+"#;
+
+/// Combined target.xml: CPU + FPU features.
+pub const RISCV64_TARGET_XML: &str = r#"<?xml version="1.0"?>
+<!DOCTYPE target SYSTEM "gdb-target.dtd">
+<target version="1.0">
+  <architecture>riscv:rv64</architecture>
+  <feature name="org.gnu.gdb.riscv.cpu">
+  <reg name="zero" bitsize="64" type="uint64"/>
+  <reg name="ra" bitsize="64" type="code_ptr"/>
+  <reg name="sp" bitsize="64" type="data_ptr"/>
+  <reg name="gp" bitsize="64" type="data_ptr"/>
+  <reg name="tp" bitsize="64" type="data_ptr"/>
+  <reg name="t0" bitsize="64" type="int"/>
+  <reg name="t1" bitsize="64" type="int"/>
+  <reg name="t2" bitsize="64" type="int"/>
+  <reg name="fp" bitsize="64" type="data_ptr"/>
+  <reg name="s1" bitsize="64" type="int"/>
+  <reg name="a0" bitsize="64" type="int"/>
+  <reg name="a1" bitsize="64" type="int"/>
+  <reg name="a2" bitsize="64" type="int"/>
+  <reg name="a3" bitsize="64" type="int"/>
+  <reg name="a4" bitsize="64" type="int"/>
+  <reg name="a5" bitsize="64" type="int"/>
+  <reg name="a6" bitsize="64" type="int"/>
+  <reg name="a7" bitsize="64" type="int"/>
+  <reg name="s2" bitsize="64" type="int"/>
+  <reg name="s3" bitsize="64" type="int"/>
+  <reg name="s4" bitsize="64" type="int"/>
+  <reg name="s5" bitsize="64" type="int"/>
+  <reg name="s6" bitsize="64" type="int"/>
+  <reg name="s7" bitsize="64" type="int"/>
+  <reg name="s8" bitsize="64" type="int"/>
+  <reg name="s9" bitsize="64" type="int"/>
+  <reg name="s10" bitsize="64" type="int"/>
+  <reg name="s11" bitsize="64" type="int"/>
+  <reg name="t3" bitsize="64" type="int"/>
+  <reg name="t4" bitsize="64" type="int"/>
+  <reg name="t5" bitsize="64" type="int"/>
+  <reg name="t6" bitsize="64" type="int"/>
+  <reg name="pc" bitsize="64" type="code_ptr"/>
+  </feature>
+  <feature name="org.gnu.gdb.riscv.fpu">
+  <union id="riscv_double">
+    <field name="float" type="ieee_single"/>
+    <field name="double" type="ieee_double"/>
+  </union>
+  <reg name="ft0" bitsize="64" type="riscv_double"/>
+  <reg name="ft1" bitsize="64" type="riscv_double"/>
+  <reg name="ft2" bitsize="64" type="riscv_double"/>
+  <reg name="ft3" bitsize="64" type="riscv_double"/>
+  <reg name="ft4" bitsize="64" type="riscv_double"/>
+  <reg name="ft5" bitsize="64" type="riscv_double"/>
+  <reg name="ft6" bitsize="64" type="riscv_double"/>
+  <reg name="ft7" bitsize="64" type="riscv_double"/>
+  <reg name="fs0" bitsize="64" type="riscv_double"/>
+  <reg name="fs1" bitsize="64" type="riscv_double"/>
+  <reg name="fa0" bitsize="64" type="riscv_double"/>
+  <reg name="fa1" bitsize="64" type="riscv_double"/>
+  <reg name="fa2" bitsize="64" type="riscv_double"/>
+  <reg name="fa3" bitsize="64" type="riscv_double"/>
+  <reg name="fa4" bitsize="64" type="riscv_double"/>
+  <reg name="fa5" bitsize="64" type="riscv_double"/>
+  <reg name="fa6" bitsize="64" type="riscv_double"/>
+  <reg name="fa7" bitsize="64" type="riscv_double"/>
+  <reg name="fs2" bitsize="64" type="riscv_double"/>
+  <reg name="fs3" bitsize="64" type="riscv_double"/>
+  <reg name="fs4" bitsize="64" type="riscv_double"/>
+  <reg name="fs5" bitsize="64" type="riscv_double"/>
+  <reg name="fs6" bitsize="64" type="riscv_double"/>
+  <reg name="fs7" bitsize="64" type="riscv_double"/>
+  <reg name="fs8" bitsize="64" type="riscv_double"/>
+  <reg name="fs9" bitsize="64" type="riscv_double"/>
+  <reg name="fs10" bitsize="64" type="riscv_double"/>
+  <reg name="fs11" bitsize="64" type="riscv_double"/>
+  <reg name="ft8" bitsize="64" type="riscv_double"/>
+  <reg name="ft9" bitsize="64" type="riscv_double"/>
+  <reg name="ft10" bitsize="64" type="riscv_double"/>
+  <reg name="ft11" bitsize="64" type="riscv_double"/>
+  </feature>
+</target>
+"#;

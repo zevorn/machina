@@ -9,16 +9,25 @@
 //   5: LSR  (bit0=DR, bit5=THRE, bit6=TEMT)
 //   6: MSR
 //   7: SCR
+//
+// Interior mutability: register state is in
+// DeviceRefCell<Uart16550Regs>, setup state in
+// parking_lot::Mutex<SysBusDeviceState>.  All public
+// methods take &self so the device can be shared via
+// Arc<Uart16550> without an outer Mutex.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use machina_core::address::GPA;
+use machina_core::device_cell::DeviceRefCell;
+use machina_core::mobject::{MObject, MObjectInfo};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::chardev::ByteCb;
-use machina_hw_core::chardev::CharFrontend;
+use machina_hw_core::chardev::{
+    ByteCb, CharFrontend, ChardevResolveError, ChardevResolver,
+};
 use machina_hw_core::irq::IrqLine;
-use machina_hw_core::mdev::MDeviceError;
+use machina_hw_core::mdev::{MDevice, MDeviceError};
 use machina_hw_core::property::{MPropertySpec, MPropertyType, MPropertyValue};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
@@ -39,12 +48,26 @@ const LSR_TEMT: u8 = 1 << 6; // transmitter empty
 // LCR bits
 const LCR_DLAB: u8 = 1 << 7;
 
+// MCR bits
+const MCR_DTR: u8 = 1 << 0;
+const MCR_RTS: u8 = 1 << 1;
+const MCR_OUT1: u8 = 1 << 2;
+const MCR_OUT2: u8 = 1 << 3;
+const MCR_LOOPBACK: u8 = 1 << 4;
+
+// MSR bits
+const MSR_CTS: u8 = 1 << 4;
+const MSR_DSR: u8 = 1 << 5;
+const MSR_RI: u8 = 1 << 6;
+const MSR_DCD: u8 = 1 << 7;
+
 const FIFO_SIZE: usize = 16;
 
 #[derive(Debug)]
 pub enum UartError {
     Device(MDeviceError),
     SysBus(SysBusError),
+    Resolve(ChardevResolveError),
 }
 
 impl std::fmt::Display for UartError {
@@ -52,6 +75,7 @@ impl std::fmt::Display for UartError {
         match self {
             Self::Device(err) => write!(f, "{err}"),
             Self::SysBus(err) => write!(f, "{err}"),
+            Self::Resolve(err) => write!(f, "{err}"),
         }
     }
 }
@@ -70,8 +94,14 @@ impl From<SysBusError> for UartError {
     }
 }
 
-pub struct Uart16550 {
-    state: SysBusDeviceState,
+impl From<ChardevResolveError> for UartError {
+    fn from(value: ChardevResolveError) -> Self {
+        Self::Resolve(value)
+    }
+}
+
+/// Mutable register state protected by DeviceRefCell.
+pub struct Uart16550Regs {
     rbr: u8,
     thr: u8,
     ier: u8,
@@ -86,25 +116,11 @@ pub struct Uart16550 {
     dlm: u8,
     rx_fifo: VecDeque<u8>,
     irq_pending: bool,
-    irq_line: Option<IrqLine>,
-    chardev: Option<CharFrontend>,
-    configured_chardev: Option<CharFrontend>,
 }
 
-impl Uart16550 {
-    pub fn new() -> Self {
-        Self::new_named("uart")
-    }
-
-    pub fn new_named(local_id: &str) -> Self {
-        let mut state = SysBusDeviceState::new(local_id);
-        state
-            .device_mut()
-            .define_property(MPropertySpec::new("chardev", MPropertyType::Link))
-            .expect("UART chardev property schema must be valid");
-
+impl Uart16550Regs {
+    fn new() -> Self {
         Self {
-            state,
             rbr: 0,
             thr: 0,
             ier: 0,
@@ -119,88 +135,10 @@ impl Uart16550 {
             dlm: 0,
             rx_fifo: VecDeque::with_capacity(FIFO_SIZE),
             irq_pending: false,
-            irq_line: None,
-            chardev: None,
-            configured_chardev: None,
         }
     }
 
-    pub fn set_chardev_property(
-        &mut self,
-        path: &str,
-    ) -> Result<(), MDeviceError> {
-        self.state
-            .device_mut()
-            .set_property("chardev", MPropertyValue::Link(path.to_string()))
-    }
-
-    pub fn chardev_property(&self) -> Option<&str> {
-        match self.state.device().property("chardev") {
-            Some(MPropertyValue::Link(path)) => Some(path.as_str()),
-            _ => None,
-        }
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.device().is_realized()
-    }
-
-    pub fn attach_to_bus(&mut self, bus: &SysBus) -> Result<(), SysBusError> {
-        self.state.attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &mut self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.register_mmio(region, base)
-    }
-
-    pub fn attach_irq(&mut self, irq: IrqLine) -> Result<(), SysBusError> {
-        self.state.register_irq(irq)
-    }
-
-    pub fn attach_chardev(
-        &mut self,
-        fe: CharFrontend,
-    ) -> Result<(), MDeviceError> {
-        if self.state.device().is_realized() {
-            return Err(MDeviceError::LateMutation("chardev_frontend"));
-        }
-        self.configured_chardev = Some(fe);
-        Ok(())
-    }
-
-    pub fn realize_onto(
-        &mut self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-        rx_cb: ByteCb,
-    ) -> Result<(), UartError> {
-        self.state.realize_onto(bus, address_space)?;
-        self.irq_line = self.state.irq_outputs().first().cloned();
-
-        if let Some(mut fe) = self.configured_chardev.take() {
-            fe.start_input(rx_cb);
-            self.chardev = Some(fe);
-        }
-
-        Ok(())
-    }
-
-    pub fn unrealize_from(
-        &mut self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), UartError> {
-        self.chardev = None;
-        self.irq_line = None;
-        self.state.unrealize_from(bus, address_space)?;
-        Ok(())
-    }
-
-    pub fn reset_runtime(&mut self) {
+    fn reset(&mut self, has_chardev: bool) {
         self.rbr = 0;
         self.thr = 0;
         self.ier = 0;
@@ -209,131 +147,378 @@ impl Uart16550 {
         self.lcr = 0;
         self.mcr = 0;
         self.lsr = LSR_THRE | LSR_TEMT;
-        self.msr = 0;
         self.scr = 0;
         self.dll = 0;
         self.dlm = 0;
         self.rx_fifo.clear();
         self.irq_pending = false;
-        if let Some(ref line) = self.irq_line {
-            line.lower();
+        self.update_msr(has_chardev);
+    }
+
+    /// Recompute MSR based on MCR loopback state and
+    /// chardev presence.
+    fn update_msr(&mut self, has_chardev: bool) {
+        if self.mcr & MCR_LOOPBACK != 0 {
+            // 16550 loopback: MCR outputs routed to MSR.
+            let mut msr = 0u8;
+            if self.mcr & MCR_DTR != 0 {
+                msr |= MSR_DSR;
+            }
+            if self.mcr & MCR_RTS != 0 {
+                msr |= MSR_CTS;
+            }
+            if self.mcr & MCR_OUT1 != 0 {
+                msr |= MSR_RI;
+            }
+            if self.mcr & MCR_OUT2 != 0 {
+                msr |= MSR_DCD;
+            }
+            self.msr = msr;
+        } else if has_chardev {
+            self.msr = MSR_CTS | MSR_DSR | MSR_DCD;
+        } else {
+            self.msr = 0;
+        }
+    }
+}
+
+pub struct Uart16550 {
+    // Setup-only state behind parking_lot::Mutex so that
+    // attach_to_bus / register_mmio / realize_onto can be
+    // called through &self (Arc<Uart16550>).
+    state: parking_lot::Mutex<SysBusDeviceState>,
+    // Runtime register state.
+    regs: DeviceRefCell<Uart16550Regs>,
+    // IRQ line. Written during realize, read at runtime.
+    irq_line: parking_lot::Mutex<Option<IrqLine>>,
+    // Chardev frontend for TX output.
+    chardev: DeviceRefCell<Option<CharFrontend>>,
+    // Pre-realize chardev config.
+    configured_chardev: parking_lot::Mutex<Option<CharFrontend>>,
+    // Resolved chardev path for unrealize.
+    resolved_chardev_path: parking_lot::Mutex<Option<String>>,
+}
+
+// SAFETY: All mutable state is behind DeviceRefCell or
+// parking_lot::Mutex.
+unsafe impl Sync for Uart16550 {}
+
+impl Uart16550 {
+    pub fn new() -> Self {
+        Self::new_named("uart")
+    }
+
+    pub fn new_named(local_id: &str) -> Self {
+        let mut state = SysBusDeviceState::new(local_id);
+        state
+            .device_mut()
+            .define_property(MPropertySpec::new("chardev", MPropertyType::Link))
+            .expect("UART chardev property schema must be valid");
+
+        Self {
+            state: parking_lot::Mutex::new(state),
+            regs: DeviceRefCell::new(Uart16550Regs::new()),
+            irq_line: parking_lot::Mutex::new(None),
+            chardev: DeviceRefCell::new(None),
+            configured_chardev: parking_lot::Mutex::new(None),
+            resolved_chardev_path: parking_lot::Mutex::new(None),
+        }
+    }
+
+    pub fn set_chardev_property(&self, path: &str) -> Result<(), MDeviceError> {
+        self.state
+            .lock()
+            .device_mut()
+            .set_property("chardev", MPropertyValue::Link(path.to_string()))
+    }
+
+    pub fn chardev_property(&self) -> Option<String> {
+        match self.state.lock().device().property("chardev") {
+            Some(MPropertyValue::Link(path)) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn realized(&self) -> bool {
+        self.state.lock().device().is_realized()
+    }
+
+    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
+        self.state.lock().attach_to_bus(bus)
+    }
+
+    pub fn register_mmio(
+        &self,
+        region: MemoryRegion,
+        base: GPA,
+    ) -> Result<(), SysBusError> {
+        self.state.lock().register_mmio(region, base)
+    }
+
+    pub fn attach_irq(&self, irq: IrqLine) -> Result<(), SysBusError> {
+        self.state.lock().register_irq(irq)
+    }
+
+    pub fn attach_chardev(&self, fe: CharFrontend) -> Result<(), MDeviceError> {
+        if self.state.lock().device().is_realized() {
+            return Err(MDeviceError::LateMutation("chardev_frontend"));
+        }
+        *self.configured_chardev.lock() = Some(fe);
+        Ok(())
+    }
+
+    pub fn realize_onto(
+        &self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+        rx_cb: ByteCb,
+    ) -> Result<(), UartError> {
+        self.realize_onto_with_resolver(bus, address_space, rx_cb, None)
+    }
+
+    pub fn realize_onto_with_resolver(
+        &self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+        rx_cb: ByteCb,
+        resolver: Option<&dyn ChardevResolver>,
+    ) -> Result<(), UartError> {
+        {
+            let mut st = self.state.lock();
+            st.realize_onto(bus, address_space)?;
+            let line = st.irq_outputs().first().cloned();
+            *self.irq_line.lock() = line;
+        }
+
+        if let Some((path, mut fe)) = self.resolve_chardev(resolver)? {
+            fe.start_input(rx_cb);
+            *self.chardev.borrow() = Some(fe);
+            *self.resolved_chardev_path.lock() = path;
+            // Set modem status lines when chardev present.
+            self.regs.borrow().msr =
+                MSR_CTS | MSR_DSR | MSR_DCD;
+        }
+
+        Ok(())
+    }
+
+    pub fn unrealize_from(
+        &self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+    ) -> Result<(), UartError> {
+        self.unrealize_from_with_resolver(bus, address_space, None)
+    }
+
+    pub fn unrealize_from_with_resolver(
+        &self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+        resolver: Option<&dyn ChardevResolver>,
+    ) -> Result<(), UartError> {
+        if let Some(frontend) = self.chardev.borrow().take() {
+            let path = self.resolved_chardev_path.lock().take();
+            if let (Some(path), Some(resolver)) = (path, resolver) {
+                resolver.put_frontend(&path, frontend)?;
+            }
+        }
+        *self.irq_line.lock() = None;
+        self.state.lock().unrealize_from(bus, address_space)?;
+        Ok(())
+    }
+
+    fn resolve_chardev(
+        &self,
+        resolver: Option<&dyn ChardevResolver>,
+    ) -> Result<Option<(Option<String>, CharFrontend)>, UartError> {
+        if let Some(frontend) = self.configured_chardev.lock().take() {
+            return Ok(Some((None, frontend)));
+        }
+
+        let path = {
+            let st = self.state.lock();
+            match st.device().property("chardev") {
+                Some(MPropertyValue::Link(p)) => Some(p.clone()),
+                _ => None,
+            }
+        };
+
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let Some(resolver) = resolver else {
+            return Ok(None);
+        };
+        let frontend = resolver.take_frontend(&path)?;
+        Ok(Some((Some(path), frontend)))
+    }
+
+    pub fn object_info(&self) -> MObjectInfo {
+        self.state.lock().object_info()
+    }
+
+    /// Access the inner SysBusDeviceState as `&dyn MDevice`
+    /// through a closure (for MOM introspection).
+    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
+        let guard = self.state.lock();
+        f(&*guard)
+    }
+
+    pub fn reset_runtime(&self) {
+        let has_cd = self.chardev.borrow().is_some();
+        self.regs.borrow().reset(has_cd);
+        let line = self.irq_line.lock();
+        if let Some(ref l) = *line {
+            l.lower();
         }
     }
 
     /// Push a byte into the receive FIFO.
-    pub fn receive(&mut self, ch: u8) {
-        if self.rx_fifo.len() < FIFO_SIZE {
-            self.rx_fifo.push_back(ch);
+    pub fn receive(&self, ch: u8) {
+        {
+            let mut regs = self.regs.borrow();
+            if regs.rx_fifo.len() < FIFO_SIZE {
+                regs.rx_fifo.push_back(ch);
+            }
+            regs.lsr |= LSR_DR;
         }
-        self.lsr |= LSR_DR;
         self.update_irq();
     }
 
     pub fn irq_pending(&self) -> bool {
-        self.irq_pending
+        self.regs.borrow().irq_pending
     }
 
-    pub fn update_irq(&mut self) {
-        let mut iir = IIR_NONE;
+    pub fn update_irq(&self) {
+        let pending;
+        {
+            let mut regs = self.regs.borrow();
+            let mut iir = IIR_NONE;
 
-        // RX data available has higher priority.
-        if (self.ier & IER_RX_AVAIL) != 0 && (self.lsr & LSR_DR) != 0 {
-            iir = IIR_RX_AVAIL;
-        } else if (self.ier & 0x02) != 0 && (self.lsr & LSR_THRE) != 0 {
-            iir = IIR_THR_EMPTY;
+            // RX data available has higher priority.
+            if (regs.ier & IER_RX_AVAIL) != 0 && (regs.lsr & LSR_DR) != 0 {
+                iir = IIR_RX_AVAIL;
+            } else if (regs.ier & 0x02) != 0 && (regs.lsr & LSR_THRE) != 0 {
+                iir = IIR_THR_EMPTY;
+            }
+
+            regs.iir = iir;
+            regs.irq_pending = iir != IIR_NONE;
+            pending = regs.irq_pending;
         }
 
-        self.iir = iir;
-        self.irq_pending = iir != IIR_NONE;
-
-        if let Some(ref line) = self.irq_line {
-            line.set(self.irq_pending);
+        let line = self.irq_line.lock();
+        if let Some(ref l) = *line {
+            l.set(pending);
         }
     }
 
-    pub fn read(&mut self, offset: u64) -> u8 {
+    pub fn read(&self, offset: u64) -> u8 {
+        let mut regs = self.regs.borrow();
         match offset & 0x7 {
             0 => {
-                if self.lcr & LCR_DLAB != 0 {
-                    self.dll
+                if regs.lcr & LCR_DLAB != 0 {
+                    regs.dll
                 } else {
-                    self.read_rbr()
+                    let ch = Self::read_rbr(&mut regs);
+                    drop(regs);
+                    self.update_irq();
+                    ch
                 }
             }
             1 => {
-                if self.lcr & LCR_DLAB != 0 {
-                    self.dlm
+                if regs.lcr & LCR_DLAB != 0 {
+                    regs.dlm
                 } else {
-                    self.ier
+                    regs.ier
                 }
             }
-            2 => self.iir,
-            3 => self.lcr,
-            4 => self.mcr,
-            5 => self.lsr,
-            6 => self.msr,
-            7 => self.scr,
+            2 => regs.iir,
+            3 => regs.lcr,
+            4 => regs.mcr,
+            5 => regs.lsr,
+            6 => regs.msr,
+            7 => regs.scr,
             _ => 0,
         }
     }
 
-    pub fn write(&mut self, offset: u64, val: u8) {
+    pub fn write(&self, offset: u64, val: u8) {
         match offset & 0x7 {
             0 => {
-                if self.lcr & LCR_DLAB != 0 {
-                    self.dll = val;
+                let dlab = self.regs.borrow().lcr & LCR_DLAB != 0;
+                if dlab {
+                    self.regs.borrow().dll = val;
                 } else {
                     self.write_thr(val);
                 }
             }
             1 => {
-                if self.lcr & LCR_DLAB != 0 {
-                    self.dlm = val;
+                let dlab = self.regs.borrow().lcr & LCR_DLAB != 0;
+                if dlab {
+                    self.regs.borrow().dlm = val;
                 } else {
-                    self.ier = val & 0x0F;
+                    self.regs.borrow().ier = val & 0x0F;
                     self.update_irq();
                 }
             }
             2 => {
-                self.fcr = val;
+                let mut regs = self.regs.borrow();
+                regs.fcr = val;
                 if val & 0x02 != 0 {
                     // Clear RX FIFO.
-                    self.rx_fifo.clear();
-                    self.lsr &= !LSR_DR;
+                    regs.rx_fifo.clear();
+                    regs.lsr &= !LSR_DR;
+                    drop(regs);
                     self.update_irq();
                 }
             }
-            3 => self.lcr = val,
-            4 => self.mcr = val,
+            3 => self.regs.borrow().lcr = val,
+            4 => {
+                let has_cd = self.chardev.borrow().is_some();
+                let mut regs = self.regs.borrow();
+                regs.mcr = val;
+                regs.update_msr(has_cd);
+            }
             5 => {} // LSR is read-only
             6 => {} // MSR is read-only
-            7 => self.scr = val,
+            7 => self.regs.borrow().scr = val,
             _ => {}
         }
     }
 
-    fn read_rbr(&mut self) -> u8 {
-        if let Some(ch) = self.rx_fifo.pop_front() {
-            self.rbr = ch;
-            if self.rx_fifo.is_empty() {
-                self.lsr &= !LSR_DR;
+    fn read_rbr(regs: &mut parking_lot::MutexGuard<'_, Uart16550Regs>) -> u8 {
+        if let Some(ch) = regs.rx_fifo.pop_front() {
+            regs.rbr = ch;
+            if regs.rx_fifo.is_empty() {
+                regs.lsr &= !LSR_DR;
             }
-            self.update_irq();
             ch
         } else {
-            self.rbr
+            regs.rbr
         }
     }
 
-    fn write_thr(&mut self, val: u8) {
-        self.thr = val;
-        // Forward to chardev frontend if attached.
-        if let Some(ref mut fe) = self.chardev {
+    fn write_thr(&self, val: u8) {
+        let loopback = {
+            let mut regs = self.regs.borrow();
+            regs.thr = val;
+            // In emulation the byte is "transmitted"
+            // instantly, so THRE stays set.
+            regs.lsr |= LSR_THRE | LSR_TEMT;
+            regs.mcr & MCR_LOOPBACK != 0
+        };
+        if loopback {
+            // Loopback: route THR → RX FIFO.
+            let mut regs = self.regs.borrow();
+            if regs.rx_fifo.len() < FIFO_SIZE {
+                regs.rx_fifo.push_back(val);
+            }
+            regs.lsr |= LSR_DR;
+        } else if let Some(ref mut fe) = *self.chardev.borrow()
+        {
             fe.write(&[val]);
         }
-        // In emulation the byte is "transmitted"
-        // instantly, so THRE stays set.
-        self.lsr |= LSR_THRE | LSR_TEMT;
         self.update_irq();
     }
 }
@@ -344,14 +529,14 @@ impl Default for Uart16550 {
     }
 }
 
-pub struct Uart16550Mmio(pub Arc<Mutex<Uart16550>>);
+pub struct Uart16550Mmio(pub Arc<Uart16550>);
 
 impl MmioOps for Uart16550Mmio {
     fn read(&self, offset: u64, _size: u32) -> u64 {
-        self.0.lock().unwrap().read(offset) as u64
+        self.0.read(offset) as u64
     }
 
     fn write(&self, offset: u64, _size: u32, val: u64) {
-        self.0.lock().unwrap().write(offset, val as u8);
+        self.0.write(offset, val as u8);
     }
 }

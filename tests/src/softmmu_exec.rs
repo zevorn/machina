@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use machina_accel::exec::exec_loop::{cpu_exec_loop_env, ExitReason};
-use machina_accel::exec::ExecEnv;
+use machina_accel::exec::{ExecEnv, PerCpuState};
 use machina_accel::x86_64::emitter::SoftMmuConfig;
 use machina_accel::X86_64CodeGen;
 use machina_core::address::GPA;
@@ -19,8 +19,11 @@ use machina_memory::address_space::AddressSpace;
 use machina_memory::region::MemoryRegion;
 use machina_system::cpus::{
     fault_cause_offset, fault_pc_offset, machina_mem_read, machina_mem_write,
-    tlb_offsets, tlb_ptr_offset, FullSystemCpu, SharedMip, RAM_BASE, TLB_SIZE,
+    tlb_offsets, tlb_ptr_offset, FullSystemCpu, SharedMip, TLB_SIZE,
 };
+
+/// Test RAM base address (matches RISC-V virt standard).
+const RAM_BASE: u64 = 0x8000_0000;
 
 /// Build a SoftMmuConfig for test ExecEnv.
 fn test_mmu_config() -> SoftMmuConfig {
@@ -85,6 +88,7 @@ fn setup_fullsys(
         FullSystemCpu::new(
             cpu,
             ram_ptr,
+            RAM_BASE,
             ram_size,
             shared_mip,
             wfi_waker,
@@ -97,6 +101,50 @@ fn setup_fullsys(
     // (FullSystemCpu::new sets guest_base, as_ptr, ram_end)
 
     (env, fscpu, addr_space, ram_ptr)
+}
+
+/// Run the exec loop with automatic BufferFull retry
+/// (flush TBs and code buffer, then re-enter).
+unsafe fn run_with_retry(
+    env: &mut ExecEnv<X86_64CodeGen>,
+    cpu: &mut FullSystemCpu,
+) -> ExitReason {
+    let mut per_cpu = PerCpuState::new();
+    let mut retries = 0u32;
+    loop {
+        let r = machina_accel::exec::exec_loop::cpu_exec_loop(
+            &env.shared,
+            &mut per_cpu,
+            cpu,
+        );
+        match r {
+            ExitReason::BufferFull => {
+                retries += 1;
+                assert!(
+                    retries < 100,
+                    "BufferFull loop: retried {} times, \
+                     pc={:#x} iters={}",
+                    retries,
+                    cpu.cpu.pc,
+                    per_cpu.stats.loop_iters,
+                );
+                let _g =
+                    env.shared.translate_lock.lock().unwrap();
+                env.shared.tb_store.invalidate_all(
+                    env.shared.code_buf(),
+                    &env.shared.backend,
+                );
+                env.shared.tb_store.flush();
+                unsafe {
+                    env.shared
+                        .code_buf_mut()
+                        .set_offset(env.shared.code_gen_start);
+                }
+                per_cpu.jump_cache.invalidate();
+            }
+            other => return other,
+        }
+    }
 }
 
 // RISC-V instruction encoders for test code.
@@ -204,7 +252,7 @@ fn test_fullsys_ram_load_store() {
 /// minimal test harness; covered by end-to-end ch2
 /// store_fault test.
 #[test]
-#[ignore]
+#[ignore = "exec loop hangs after fault delivery (BufferFull storm)"]
 fn test_fullsys_mmio_write_no_crash() {
     // Trap handler at offset 0x800: ecall.
     // Main code: set mtvec, write to unmapped MMIO.
@@ -237,10 +285,15 @@ fn test_fullsys_mmio_write_no_crash() {
     }
     cpu.cpu.pc = RAM_BASE;
 
-    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
 
     // Handler runs ecall → Ecall exit.
     assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    // mepc points to the faulting store instruction.
+    assert!(
+        cpu.cpu.csr.mepc >= RAM_BASE,
+        "mepc should point to faulting SD"
+    );
     // mepc points to the faulting store instruction.
     assert!(
         cpu.cpu.csr.mepc >= RAM_BASE,
@@ -611,7 +664,7 @@ fn test_fullsys_mmio_observable_dispatch() {
     let io_region = MemoryRegion::io(
         "test-mmio",
         0x1000,
-        Box::new(TestMmioDeviceWrapper {
+        Arc::new(TestMmioDeviceWrapper {
             inner: Arc::clone(&device),
         }),
     );
@@ -643,6 +696,7 @@ fn test_fullsys_mmio_observable_dispatch() {
         FullSystemCpu::new(
             cpu,
             ram_ptr,
+            RAM_BASE,
             ram_size,
             shared_mip,
             wfi_waker,
@@ -721,9 +775,9 @@ fn auipc(rd: u32, imm20: u32) -> u32 {
 /// (code and store on same page → TB invalidation storm)
 /// with the is_phys_backed check active. The underlying
 /// register preservation is verified by the ch2 end-to-end
-/// test. Ignored until the TB invalidation loop is fixed.
+/// test.
 #[test]
-#[ignore]
+#[ignore = "exec loop hangs: self-modifying code + BufferFull storm"]
 fn test_slowpath_preserves_non_output_regs() {
     let code = encode(&[
         // x3 = RAM_BASE (0x80000000)
@@ -755,7 +809,7 @@ fn test_slowpath_preserves_non_output_regs() {
     let (mut env, mut cpu, _as, _ram) = setup_fullsys(ram_sz, &code);
     cpu.cpu.pc = RAM_BASE;
 
-    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
 
     assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
     assert_eq!(

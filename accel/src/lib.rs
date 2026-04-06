@@ -104,6 +104,10 @@ pub trait HostCodeGen {
         cargs: &[u32],
     );
 
+    /// Byte offset of the exit-request flag (neg_align)
+    /// within the CPU struct, or 0 if not configured.
+    fn neg_align_offset(&self) -> i32;
+
     /// Return goto_tb (jmp_offset, reset_offset) pairs
     /// recorded during the last codegen pass.
     fn goto_tb_offsets(&self) -> Vec<(usize, usize)>;

@@ -1,7 +1,9 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use machina_hw_core::irq::{IrqLine, IrqSink, OrIrq, SplitIrq};
+use machina_hw_core::irq::{
+    InterruptSource, IrqLine, IrqSink, OrIrq, SplitIrq,
+};
 
 /// Simple test sink that records the last level and
 /// the number of set_irq calls.
@@ -130,4 +132,41 @@ fn test_irq_no_spurious() {
     // The sink was called, but level stays false.
     assert_eq!(sink.calls(), before + 1);
     assert!(!sink.level());
+}
+
+// -- InterruptSource tests --
+
+/// Bitfield sink for InterruptSource tests.
+struct BitSink(AtomicU64);
+
+impl IrqSink for BitSink {
+    fn set_irq(&self, irq: u32, level: bool) {
+        let bit = 1u64 << irq;
+        if level {
+            self.0.fetch_or(bit, Ordering::SeqCst);
+        } else {
+            self.0.fetch_and(!bit, Ordering::SeqCst);
+        }
+    }
+}
+
+#[test]
+fn test_interrupt_source_raise_lower() {
+    let sink = Arc::new(BitSink(AtomicU64::new(0)));
+    let src = InterruptSource::new(sink.clone() as Arc<dyn IrqSink>, 5);
+    assert_eq!(sink.0.load(Ordering::SeqCst), 0);
+    src.raise();
+    assert_eq!(sink.0.load(Ordering::SeqCst), 1 << 5);
+    src.lower();
+    assert_eq!(sink.0.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_interrupt_source_set() {
+    let sink = Arc::new(BitSink(AtomicU64::new(0)));
+    let src = InterruptSource::new(sink.clone() as Arc<dyn IrqSink>, 3);
+    src.set(true);
+    assert_eq!(sink.0.load(Ordering::SeqCst), 1 << 3);
+    src.set(false);
+    assert_eq!(sink.0.load(Ordering::SeqCst), 0);
 }

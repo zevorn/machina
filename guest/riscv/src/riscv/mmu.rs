@@ -150,6 +150,9 @@ pub struct Mmu {
     satp: u64,
     pub tlb: Box<[TlbEntry; TLB_SIZE]>,
     stats: MmuStats,
+    /// Reusable buffer for dirty page collection.
+    /// Avoids per-call Vec allocation.
+    dirty_pages_buf: Vec<u64>,
 }
 
 // ── Helpers ───────────────────────────────────────────
@@ -199,6 +202,7 @@ impl Mmu {
             satp: 0,
             tlb: Box::new([TlbEntry::default(); TLB_SIZE]),
             stats: MmuStats::default(),
+            dirty_pages_buf: Vec::with_capacity(16),
         }
     }
 
@@ -598,6 +602,7 @@ impl Mmu {
             e.addr_write = TLB_INVALID_TAG;
             e.addr_code = TLB_INVALID_TAG;
         }
+        self.dirty_pages_buf.clear();
     }
 
     /// Invalidate any TLB entry matching the given VPN
@@ -619,22 +624,24 @@ impl Mmu {
     }
 
     /// Collect physical pages marked dirty by JIT
-    /// fast-path stores (TLB dirty flag). Returns the
-    /// set of dirty page numbers and clears all dirty
-    /// flags.
+    /// fast-path stores since the last call. Returns the
+    /// deduplicated set of dirty page numbers and clears
+    /// all dirty flags. Reuses internal buffer to avoid
+    /// per-call allocation.
     pub fn take_dirty_tlb_pages(&mut self) -> Vec<u64> {
-        let mut pages = Vec::new();
+        self.dirty_pages_buf.clear();
         for entry in self.tlb.iter_mut() {
             if entry.dirty != 0 {
                 entry.dirty = 0;
-                // Compute phys page from the entry's
-                // write tag + addend.
-                if entry.phys_page != 0 && entry.addend != TLB_MMIO_ADDEND {
-                    pages.push(entry.phys_page);
+                if entry.phys_page != 0
+                    && entry.addend != TLB_MMIO_ADDEND
+                    && !self.dirty_pages_buf.contains(&entry.phys_page)
+                {
+                    self.dirty_pages_buf.push(entry.phys_page);
                 }
             }
         }
-        pages
+        self.dirty_pages_buf.clone()
     }
 
     pub fn stats(&self) -> &MmuStats {

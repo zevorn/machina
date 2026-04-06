@@ -1,6 +1,8 @@
 // machina-system: CPU management and GuestCpu bridge.
 
 pub mod cpus;
+pub mod gdb;
+pub mod gdb_csr;
 
 pub use cpus::FullSystemCpu;
 
@@ -42,6 +44,11 @@ impl CpuManager {
         self.cpus.push(cpu);
     }
 
+    /// Access a managed CPU by index.
+    pub fn cpu(&self, idx: usize) -> &FullSystemCpu {
+        &self.cpus[idx]
+    }
+
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(ref wk) = self.wfi_waker {
@@ -55,6 +62,10 @@ impl CpuManager {
 
     /// Run all owned CPUs. For single-CPU, runs on the
     /// current thread. Blocks until execution exits.
+    ///
+    /// When GDB is active, after the exec loop pauses,
+    /// this method hands control to the GDB server to
+    /// process commands synchronously on this thread.
     ///
     /// # Safety
     /// Each CPU's `env_ptr()` must return a valid pointer

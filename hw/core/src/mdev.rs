@@ -128,6 +128,10 @@ impl MDeviceState {
         self.properties.get(name)
     }
 
+    pub fn property_spec(&self, name: &str) -> Option<&MPropertySpec> {
+        self.properties.spec(name)
+    }
+
     pub fn property_names(&self) -> Vec<&str> {
         self.properties.names()
     }
@@ -168,6 +172,18 @@ pub trait MDevice: MObject {
 
     fn parent_bus(&self) -> Option<&str> {
         self.mdevice_state().parent_bus()
+    }
+
+    fn property_names(&self) -> Vec<&str> {
+        self.mdevice_state().property_names()
+    }
+
+    fn property_spec(&self, name: &str) -> Option<&MPropertySpec> {
+        self.mdevice_state().property_spec(name)
+    }
+
+    fn property(&self, name: &str) -> Option<&MPropertyValue> {
+        self.mdevice_state().property(name)
     }
 }
 

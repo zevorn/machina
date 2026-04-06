@@ -1,7 +1,8 @@
-//! RISC-V disassembler — RV64IMAC.
+//! RISC-V disassembler — RV64IMAC + Zba/Zbb/Zbs/Zbc.
 //!
 //! Mirrors QEMU's `disas/riscv.c`. Covers RV64I base integer,
-//! M (multiply/divide), A (atomics), and C (compressed) extensions.
+//! M (multiply/divide), A (atomics), C (compressed), and
+//! Bitmanip (Zba/Zbb/Zbs/Zbc) extensions.
 
 // -- Register ABI names --
 
@@ -197,6 +198,9 @@ fn disasm_store(insn: u32, f3: u32, rs1: u32, rs2: u32) -> String {
 fn disasm_op_imm(insn: u32, f3: u32, rd: u32, rs1: u32) -> String {
     let imm = itype_imm(insn);
     let shamt = (insn >> 20) & 0x3f;
+    let funct6 = insn >> 26;
+    let funct7 = insn >> 25;
+    let rs2 = (insn >> 20) & 0x1f;
     match f3 {
         0 if rs1 == 0 => format!("li {}, {imm}", reg(rd)),
         0 if imm == 0 => {
@@ -204,7 +208,27 @@ fn disasm_op_imm(insn: u32, f3: u32, rd: u32, rs1: u32) -> String {
         }
         0 => format!("addi {}, {}, {imm}", reg(rd), reg(rs1)),
         1 => {
-            format!("slli {}, {}, {shamt}", reg(rd), reg(rs1))
+            // Zbb unary ops (funct7=0x30)
+            if funct7 == 0x30 {
+                let op = match rs2 {
+                    0 => "clz",
+                    1 => "ctz",
+                    2 => "cpop",
+                    4 => "sext.b",
+                    5 => "sext.h",
+                    _ => {
+                        return format!(".word {insn:#010x}");
+                    }
+                };
+                return format!("{op} {}, {}", reg(rd), reg(rs1));
+            }
+            // Zbs immediate shifts (funct6)
+            match funct6 {
+                0x12 => format!("bclri {}, {}, {shamt}", reg(rd), reg(rs1)),
+                0x1a => format!("binvi {}, {}, {shamt}", reg(rd), reg(rs1)),
+                0x0a => format!("bseti {}, {}, {shamt}", reg(rd), reg(rs1)),
+                _ => format!("slli {}, {}, {shamt}", reg(rd), reg(rs1)),
+            }
         }
         2 => {
             format!("slti {}, {}, {imm}", reg(rd), reg(rs1))
@@ -222,10 +246,22 @@ fn disasm_op_imm(insn: u32, f3: u32, rd: u32, rs1: u32) -> String {
             format!("xori {}, {}, {imm}", reg(rd), reg(rs1))
         }
         5 => {
-            if insn >> 26 == 0 {
-                format!("srli {}, {}, {shamt}", reg(rd), reg(rs1))
-            } else {
-                format!("srai {}, {}, {shamt}", reg(rd), reg(rs1))
+            // Zbb: rev8 (funct6=0x1a, shamt=0x38)
+            if funct6 == 0x1a && shamt == 0x38 {
+                return format!("rev8 {}, {}", reg(rd), reg(rs1));
+            }
+            // Zbb: orc.b (funct6=0x0a, shamt=0x07)
+            if funct6 == 0x0a && shamt == 0x07 {
+                return format!("orc.b {}, {}", reg(rd), reg(rs1));
+            }
+            match funct6 {
+                // Zbb: rori
+                0x18 => format!("rori {}, {}, {shamt}", reg(rd), reg(rs1)),
+                // Zbs: bexti
+                0x12 => format!("bexti {}, {}, {shamt}", reg(rd), reg(rs1)),
+                0x00 => format!("srli {}, {}, {shamt}", reg(rd), reg(rs1)),
+                0x10 => format!("srai {}, {}, {shamt}", reg(rd), reg(rs1)),
+                _ => format!(".word {insn:#010x}"),
             }
         }
         6 => {
@@ -265,6 +301,29 @@ fn disasm_op(f3: u32, f7: u32, rd: u32, rs1: u32, rs2: u32) -> String {
         (5, 0x20) => "sra",
         (6, 0) => "or",
         (7, 0) => "and",
+        // Zba
+        (2, 0x10) => "sh1add",
+        (4, 0x10) => "sh2add",
+        (6, 0x10) => "sh3add",
+        // Zbb
+        (7, 0x20) => "andn",
+        (6, 0x20) => "orn",
+        (4, 0x20) => "xnor",
+        (6, 0x05) => "max",
+        (7, 0x05) => "maxu",
+        (4, 0x05) => "min",
+        (5, 0x05) => "minu",
+        (1, 0x30) => "rol",
+        (5, 0x30) => "ror",
+        // Zbs
+        (1, 0x24) => "bclr",
+        (5, 0x24) => "bext",
+        (1, 0x34) => "binv",
+        (1, 0x14) => "bset",
+        // Zbc
+        (1, 0x05) => "clmul",
+        (3, 0x05) => "clmulh",
+        (2, 0x05) => "clmulr",
         _ => {
             return format!("op f3={f3} f7={f7:#x}");
         }
@@ -280,6 +339,10 @@ fn disasm_op(f3: u32, f7: u32, rd: u32, rs1: u32, rs2: u32) -> String {
 fn disasm_op_imm32(insn: u32, f3: u32, rd: u32, rs1: u32) -> String {
     let imm = itype_imm(insn);
     let shamt = (insn >> 20) & 0x1f;
+    let shamt6 = (insn >> 20) & 0x3f;
+    let funct7 = insn >> 25;
+    let funct6 = insn >> 26;
+    let rs2 = (insn >> 20) & 0x1f;
     match f3 {
         0 if imm == 0 => {
             format!("sext.w {}, {}", reg(rd), reg(rs1))
@@ -288,10 +351,30 @@ fn disasm_op_imm32(insn: u32, f3: u32, rd: u32, rs1: u32) -> String {
             format!("addiw {}, {}, {imm}", reg(rd), reg(rs1))
         }
         1 => {
+            // Zbb unary ops (funct7=0x30)
+            if funct7 == 0x30 {
+                let op = match rs2 {
+                    0 => "clzw",
+                    1 => "ctzw",
+                    2 => "cpopw",
+                    _ => {
+                        return format!(".word {insn:#010x}");
+                    }
+                };
+                return format!("{op} {}, {}", reg(rd), reg(rs1));
+            }
+            // Zba: slli.uw (funct6=0x02)
+            if funct6 == 0x02 {
+                return format!("slli.uw {}, {}, {shamt6}", reg(rd), reg(rs1));
+            }
             format!("slliw {}, {}, {shamt}", reg(rd), reg(rs1))
         }
         5 => {
-            if insn >> 25 == 0 {
+            // Zbb: roriw (funct7=0x30)
+            if funct7 == 0x30 {
+                return format!("roriw {}, {}, {shamt}", reg(rd), reg(rs1));
+            }
+            if funct7 == 0 {
                 format!("srliw {}, {}, {shamt}", reg(rd), reg(rs1))
             } else {
                 format!("sraiw {}, {}, {shamt}", reg(rd), reg(rs1))
@@ -315,12 +398,24 @@ fn disasm_op32(f3: u32, f7: u32, rd: u32, rs1: u32, rs2: u32) -> String {
         };
         return format!("{op} {}, {}, {}", reg(rd), reg(rs1), reg(rs2));
     }
+    // Zbb: zext.h (RV64) — unary pseudo
+    if f3 == 4 && f7 == 0x04 && rs2 == 0 {
+        return format!("zext.h {}, {}", reg(rd), reg(rs1));
+    }
     let op = match (f3, f7) {
         (0, 0) => "addw",
         (0, 0x20) => "subw",
         (1, 0) => "sllw",
         (5, 0) => "srlw",
         (5, 0x20) => "sraw",
+        // Zba
+        (0, 0x04) => "add.uw",
+        (2, 0x10) => "sh1add.uw",
+        (4, 0x10) => "sh2add.uw",
+        (6, 0x10) => "sh3add.uw",
+        // Zbb
+        (1, 0x30) => "rolw",
+        (5, 0x30) => "rorw",
         _ => {
             return format!("op32 f3={f3} f7={f7:#x}");
         }

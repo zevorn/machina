@@ -59,6 +59,24 @@ pub trait GuestCpu {
         false
     }
 
+    /// Check whether any interrupt is pending (regardless
+    /// of whether it can be delivered in the current
+    /// privilege/enable state). Used to keep goto_tb
+    /// chains broken while interrupts wait for delivery.
+    fn has_pending_irq(&self) -> bool {
+        self.pending_interrupt()
+    }
+
+    /// Set the exit-request flag (neg_align = -1) to
+    /// break goto_tb chains on the next iteration. Used
+    /// when interrupts are pending but not yet deliverable.
+    fn set_exit_request(&mut self) {}
+
+    /// Reset the exit-request flag (neg_align) so that
+    /// goto_tb chains are not immediately broken. Called
+    /// at the start of each exec loop iteration.
+    fn reset_exit_request(&mut self) {}
+
     /// Check whether the execution loop should exit.
     /// Called after each TB to allow external stop.
     fn should_exit(&self) -> bool {
@@ -113,16 +131,19 @@ pub trait GuestCpu {
 
     // -- GDB support (default no-op) --
 
-    fn gdb_read_registers(&self, _buf: &mut [u8]) -> usize {
-        0
+    /// Check if GDB single-step mode is active.
+    fn gdb_single_step(&self) -> bool {
+        false
     }
-    fn gdb_write_registers(&mut self, _buf: &[u8]) -> usize {
-        0
-    }
-    fn gdb_read_register(&self, _reg: usize, _buf: &mut [u8]) -> usize {
-        0
-    }
-    fn gdb_write_register(&mut self, _reg: usize, _buf: &[u8]) -> usize {
-        0
+
+    /// Complete a GDB single step (transition to paused).
+    fn gdb_complete_step(&self) {}
+
+    /// Check if a GDB breakpoint is set at `pc`.
+    /// Returns true if a breakpoint was hit, in which
+    /// case the exec loop should skip TB execution and
+    /// proceed to the pause/resume check.
+    fn gdb_check_breakpoint(&self, _pc: u64) -> bool {
+        false
     }
 }

@@ -161,7 +161,6 @@ const MEDELEG_MASK: u64 = (1 << 0)   // Insn addr misaligned
     | (1 << 6)   // Store addr misaligned
     | (1 << 7)   // Store access fault
     | (1 << 8)   // Ecall from U
-    | (1 << 9)   // Ecall from S
     | (1 << 12)  // Insn page fault
     | (1 << 13)  // Load page fault
     | (1 << 15); // Store page fault
@@ -244,8 +243,12 @@ pub struct CsrFile {
 
 impl CsrFile {
     pub fn new() -> Self {
+        // FS = Initial (01) so FP instructions are legal
+        // when F/D extensions are present (matches QEMU's
+        // reset behaviour).
+        let mstatus_init: u64 = 1 << 13;
         Self {
-            mstatus: 0,
+            mstatus: mstatus_init,
             misa: misa_rv64imafdcsu(),
             medeleg: 0,
             mideleg: 0,
@@ -502,7 +505,12 @@ impl CsrFile {
                 Ok(())
             }
             CSR_SATP => {
-                self.satp = val;
+                // Only accept valid SATP modes:
+                // 0 = Bare, 8 = Sv39.
+                let mode = (val >> 60) & 0xF;
+                if mode == 0 || mode == 8 {
+                    self.satp = val;
+                }
                 Ok(())
             }
 

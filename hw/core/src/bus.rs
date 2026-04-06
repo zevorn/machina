@@ -4,7 +4,7 @@ use std::any::Any;
 use std::fmt;
 
 use machina_core::address::GPA;
-use machina_core::mobject::{MObject, MObjectState};
+use machina_core::mobject::{MObject, MObjectError, MObjectState};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::MemoryRegion;
 
@@ -36,8 +36,10 @@ struct RegisteredSysBusMapping {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SysBusError {
     Device(MDeviceError),
+    Object(MObjectError),
     MissingParentBus,
     ParentBusMismatch { attached: String, expected: String },
+    DetachedObject(String),
     MissingMmio(String),
     MissingRealizedMapping(String),
     MmioOverlap { existing: String, requested: String },
@@ -47,6 +49,7 @@ impl fmt::Display for SysBusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Device(err) => write!(f, "{err}"),
+            Self::Object(err) => write!(f, "{err}"),
             Self::MissingParentBus => {
                 write!(f, "sysbus device must attach to a parent bus first")
             }
@@ -54,6 +57,12 @@ impl fmt::Display for SysBusError {
                 write!(
                     f,
                     "sysbus device is attached to '{attached}', expected '{expected}'"
+                )
+            }
+            Self::DetachedObject(device) => {
+                write!(
+                    f,
+                    "sysbus device '{device}' must be attached to the MOM tree before realize"
                 )
             }
             Self::MissingMmio(device) => {
@@ -83,6 +92,12 @@ impl From<MDeviceError> for SysBusError {
     }
 }
 
+impl From<MObjectError> for SysBusError {
+    fn from(value: MObjectError) -> Self {
+        Self::Object(value)
+    }
+}
+
 pub struct SysBusDeviceState {
     device: MDeviceState,
     mappings: Vec<RegisteredSysBusMapping>,
@@ -106,8 +121,12 @@ impl SysBusDeviceState {
         &mut self.device
     }
 
-    pub fn attach_to_bus(&mut self, bus: &SysBus) -> Result<(), SysBusError> {
+    pub fn attach_to_bus(
+        &mut self,
+        bus: &mut SysBus,
+    ) -> Result<(), SysBusError> {
         self.device.set_parent_bus(&bus.name)?;
+        bus.attach_child(self.device.object_mut())?;
         Ok(())
     }
 
@@ -264,6 +283,7 @@ impl MDevice for SysBusDeviceState {
 
 /// System bus — the default bus for platform devices.
 pub struct SysBus {
+    object: MObjectState,
     pub name: String,
     mappings: Vec<SysBusMapping>,
 }
@@ -271,9 +291,27 @@ pub struct SysBus {
 impl SysBus {
     pub fn new(name: &str) -> Self {
         Self {
+            object: MObjectState::new_root(name)
+                .expect("sysbus local_id must be valid"),
             name: name.to_string(),
             mappings: Vec::new(),
         }
+    }
+
+    pub fn attach_to_parent(
+        &mut self,
+        parent: &mut MObjectState,
+    ) -> Result<(), SysBusError> {
+        parent.attach_child(&mut self.object)?;
+        Ok(())
+    }
+
+    pub fn attach_child(
+        &mut self,
+        child: &mut MObjectState,
+    ) -> Result<(), SysBusError> {
+        self.object.attach_child(child)?;
+        Ok(())
     }
 
     fn validate_mapping(
@@ -306,6 +344,24 @@ impl SysBus {
 
     pub fn mappings(&self) -> &[SysBusMapping] {
         &self.mappings
+    }
+}
+
+impl MObject for SysBus {
+    fn mobject_state(&self) -> &MObjectState {
+        &self.object
+    }
+
+    fn mobject_state_mut(&mut self) -> &mut MObjectState {
+        &mut self.object
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 

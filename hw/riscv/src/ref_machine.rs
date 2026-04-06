@@ -6,15 +6,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts, MachineState};
+use machina_core::mobject::{MObject, MObjectInfo, MObjectNode};
 use machina_core::wfi::WfiWaker;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_hw_char::uart::{Uart16550, Uart16550Mmio};
 use machina_hw_core::bus::{SysBus, SysBusMapping};
 use machina_hw_core::chardev::{
-    CharFrontend, Chardev, NullChardev, StdioChardev,
+    CharFrontend, Chardev, ChardevObject, NullChardev, StdioChardev,
 };
 use machina_hw_core::fdt::FdtBuilder;
-use machina_hw_core::irq::{IrqLine, IrqSink};
+use machina_hw_core::irq::{InterruptSource, IrqLine, IrqSink};
+use machina_hw_core::mdev::MDevice;
+use machina_hw_core::property::{MPropertySpec, MPropertyValue};
 use machina_hw_intc::aclint::{Aclint, AclintMmio};
 use machina_hw_intc::plic::{Plic, PlicIrqSink, PlicMmio};
 use machina_hw_virtio::mmio::VirtioMmio;
@@ -26,26 +29,90 @@ use crate::sifive_test::SifiveTest;
 
 type MonitorCallback = Arc<Mutex<dyn FnMut(u8) + Send>>;
 
-// QEMU virt memory map base addresses.
-pub const MROM_BASE: u64 = 0x0000_1000;
-const SIFIVE_TEST_BASE: u64 = 0x0010_0000;
-const PLIC_BASE: u64 = 0x0C00_0000;
-const ACLINT_BASE: u64 = 0x0200_0000;
-const UART0_BASE: u64 = 0x1000_0000;
-const VIRTIO0_BASE: u64 = 0x1000_1000;
-pub const RAM_BASE: u64 = 0x8000_0000;
+// ---- Centralized memory map (QEMU virt style) ----
 
-// Region sizes.
-pub const MROM_SIZE: u64 = 0x0000_F000;
-const SIFIVE_TEST_SIZE: u64 = 0x1000;
-const PLIC_SIZE: u64 = 0x0400_0000;
-const ACLINT_SIZE: u64 = 0x0001_0000;
-const UART0_SIZE: u64 = 0x100;
-const VIRTIO0_SIZE: u64 = 0x1000;
+#[derive(Clone, Copy)]
+pub struct MemMapEntry {
+    pub base: u64,
+    pub size: u64,
+}
 
-const UART_IRQ: u32 = 10;
-const VIRTIO_IRQ: u32 = 1;
-const PLIC_NUM_SOURCES: u32 = 96;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum RefMemMap {
+    Mrom = 0,
+    SifiveTest,
+    Rtc,
+    Aclint,
+    Plic,
+    Uart0,
+    FwCfg,
+    Virtio,
+    Dram,
+    Count,
+}
+
+pub const REF_MEMMAP: [MemMapEntry; RefMemMap::Count as usize] = {
+    let mut m = [MemMapEntry { base: 0, size: 0 }; RefMemMap::Count as usize];
+    m[RefMemMap::Mrom as usize] = MemMapEntry {
+        base: 0x0000_1000,
+        size: 0x0000_F000,
+    };
+    m[RefMemMap::SifiveTest as usize] = MemMapEntry {
+        base: 0x0010_0000,
+        size: 0x0000_1000,
+    };
+    m[RefMemMap::Rtc as usize] = MemMapEntry {
+        base: 0x0010_1000,
+        size: 0x0000_1000,
+    };
+    m[RefMemMap::Aclint as usize] = MemMapEntry {
+        base: 0x0200_0000,
+        size: 0x0001_0000,
+    };
+    m[RefMemMap::Plic as usize] = MemMapEntry {
+        base: 0x0C00_0000,
+        size: 0x0400_0000,
+    };
+    m[RefMemMap::Uart0 as usize] = MemMapEntry {
+        base: 0x1000_0000,
+        size: 0x0000_0100,
+    };
+    m[RefMemMap::FwCfg as usize] = MemMapEntry {
+        base: 0x1010_0000,
+        size: 0x0000_0018,
+    };
+    m[RefMemMap::Virtio as usize] = MemMapEntry {
+        base: 0x1000_1000,
+        size: 0x0000_1000,
+    };
+    m[RefMemMap::Dram as usize] = MemMapEntry {
+        base: 0x8000_0000,
+        size: 0,
+    };
+    m
+};
+
+// Backward-compatible aliases (used by boot.rs, etc.).
+pub const MROM_BASE: u64 = REF_MEMMAP[RefMemMap::Mrom as usize].base;
+pub const MROM_SIZE: u64 = REF_MEMMAP[RefMemMap::Mrom as usize].size;
+pub const RAM_BASE: u64 = REF_MEMMAP[RefMemMap::Dram as usize].base;
+
+pub struct RefIrqMap {
+    pub uart0: u32,
+    pub rtc: u32,
+    pub virtio_base: u32,
+}
+
+pub const REF_IRQMAP: RefIrqMap = RefIrqMap {
+    uart0: 10,
+    rtc: 11,
+    virtio_base: 1,
+};
+
+pub const PLIC_NUM_SOURCES: u32 = 96;
+pub const VIRTIO_SLOT_COUNT: usize = 8;
+
 // PLIC context count is 2 * cpu_count (M-mode + S-mode per
 // hart), computed dynamically in init().
 
@@ -118,13 +185,15 @@ pub struct RefMachine {
     machine_state: MachineState,
     ram_size: u64,
     cpu_count: u32,
+    chardev_root: Option<MObjectNode>,
     address_space: Option<AddressSpace>,
     sysbus: Option<SysBus>,
     ram_block: Option<Arc<RamBlock>>,
     mrom_block: Option<Arc<RamBlock>>,
-    plic: Option<Arc<Mutex<Plic>>>,
-    aclint: Option<Arc<Mutex<Aclint>>>,
-    uart: Option<Arc<Mutex<Uart16550>>>,
+    plic: Option<Arc<Plic>>,
+    aclint: Option<Arc<Aclint>>,
+    uart: Option<Arc<Uart16550>>,
+    uart_chardev: Option<Arc<Mutex<ChardevObject>>>,
     virtio_mmio: Option<VirtioMmio>,
     sifive_test: Option<Arc<SifiveTest>>,
     fdt_blob: Option<Vec<u8>>,
@@ -137,6 +206,8 @@ pub struct RefMachine {
     // Stored boot options (bios / kernel paths).
     pub(crate) bios_path: Option<PathBuf>,
     pub(crate) kernel_path: Option<PathBuf>,
+    pub(crate) initrd_path: Option<PathBuf>,
+    pub(crate) kernel_cmdline: Option<String>,
     // UART → PLIC IRQ line (source 10).
     uart_irq: Option<IrqLine>,
     // Monitor callbacks for StdioChardev.
@@ -151,6 +222,7 @@ impl RefMachine {
             machine_state: MachineState::new_root("machine"),
             ram_size: 0,
             cpu_count: 0,
+            chardev_root: None,
             address_space: None,
             sysbus: None,
             ram_block: None,
@@ -158,6 +230,7 @@ impl RefMachine {
             plic: None,
             aclint: None,
             uart: None,
+            uart_chardev: None,
             virtio_mmio: None,
             sifive_test: None,
             fdt_blob: None,
@@ -166,6 +239,8 @@ impl RefMachine {
             wfi_waker: Arc::new(WfiWaker::new()),
             bios_path: None,
             kernel_path: None,
+            initrd_path: None,
+            kernel_cmdline: None,
             uart_irq: None,
             quit_cb: None,
             monitor_cb: None,
@@ -182,12 +257,108 @@ impl RefMachine {
         self.sysbus.as_ref().expect("machine not initialized")
     }
 
+    pub fn lookup_object_by_path(&self, path: &str) -> Option<MObjectInfo> {
+        self.mom_object_infos()
+            .into_iter()
+            .find(|info| info.object_path.as_deref() == Some(path))
+    }
+
+    pub fn lookup_object_by_local_id(
+        &self,
+        local_id: &str,
+    ) -> Option<MObjectInfo> {
+        self.mom_object_infos()
+            .into_iter()
+            .find(|info| info.local_id == local_id)
+    }
+
+    pub fn property_spec(
+        &self,
+        object_ref: &str,
+        property: &str,
+    ) -> Option<MPropertySpec> {
+        self.with_mdevice(object_ref, |device| {
+            device.property_spec(property).cloned()
+        })
+        .flatten()
+    }
+
+    pub fn property_value(
+        &self,
+        object_ref: &str,
+        property: &str,
+    ) -> Option<MPropertyValue> {
+        self.with_mdevice(object_ref, |device| {
+            device.property(property).cloned()
+        })
+        .flatten()
+    }
+
     fn realized_sysbus_mapping(&self, owner: &str) -> &SysBusMapping {
         self.sysbus()
             .mappings()
             .iter()
             .find(|mapping| mapping.owner == owner)
             .unwrap_or_else(|| panic!("missing sysbus mapping for '{owner}'"))
+    }
+
+    fn mom_object_infos(&self) -> Vec<MObjectInfo> {
+        let mut infos = vec![self.machine_state.object().info()];
+        if let Some(chardev_root) = &self.chardev_root {
+            infos.push(chardev_root.object_info());
+        }
+        if let Some(sysbus) = &self.sysbus {
+            infos.push(sysbus.object_info());
+        }
+        if let Some(chardev) = &self.uart_chardev {
+            infos.push(chardev.lock().unwrap().object_info());
+        }
+        if let Some(plic) = &self.plic {
+            infos.push(plic.object_info());
+        }
+        if let Some(aclint) = &self.aclint {
+            infos.push(aclint.object_info());
+        }
+        if let Some(uart) = &self.uart {
+            infos.push(uart.object_info());
+        }
+        if let Some(virtio_mmio) = &self.virtio_mmio {
+            infos.push(virtio_mmio.object_info());
+        }
+        infos
+    }
+
+    fn object_matches(object_ref: &str, info: &MObjectInfo) -> bool {
+        info.local_id == object_ref
+            || info.object_path.as_deref() == Some(object_ref)
+    }
+
+    fn with_mdevice<T>(
+        &self,
+        object_ref: &str,
+        f: impl FnOnce(&dyn MDevice) -> T,
+    ) -> Option<T> {
+        if let Some(uart) = &self.uart {
+            if Self::object_matches(object_ref, &uart.object_info()) {
+                return Some(uart.with_mdevice(f));
+            }
+        }
+        if let Some(plic) = &self.plic {
+            if Self::object_matches(object_ref, &plic.object_info()) {
+                return Some(plic.with_mdevice(f));
+            }
+        }
+        if let Some(aclint) = &self.aclint {
+            if Self::object_matches(object_ref, &aclint.object_info()) {
+                return Some(aclint.with_mdevice(f));
+            }
+        }
+        if let Some(virtio_mmio) = &self.virtio_mmio {
+            if Self::object_matches(object_ref, &virtio_mmio.object_info()) {
+                return Some(f(virtio_mmio));
+            }
+        }
+        None
     }
 
     fn sysbus_reg_cells(&self, owner: &str) -> [u32; 4] {
@@ -200,15 +371,15 @@ impl RefMachine {
         ]
     }
 
-    pub fn plic(&self) -> &Arc<Mutex<Plic>> {
+    pub fn plic(&self) -> &Arc<Plic> {
         self.plic.as_ref().expect("machine not initialized")
     }
 
-    pub fn aclint(&self) -> &Arc<Mutex<Aclint>> {
+    pub fn aclint(&self) -> &Arc<Aclint> {
         self.aclint.as_ref().expect("machine not initialized")
     }
 
-    pub fn uart(&self) -> &Arc<Mutex<Uart16550>> {
+    pub fn uart(&self) -> &Arc<Uart16550> {
         self.uart.as_ref().expect("machine not initialized")
     }
 
@@ -307,7 +478,24 @@ impl RefMachine {
         Ok(())
     }
 
+    /// Generate FDT with optional initrd range and cmdline.
+    pub fn generate_fdt_with(
+        &self,
+        initrd_range: Option<(u64, u64)>,
+        cmdline: Option<&str>,
+    ) -> Vec<u8> {
+        self.generate_fdt_inner(initrd_range, cmdline)
+    }
+
     fn generate_fdt(&self) -> Vec<u8> {
+        self.generate_fdt_inner(None, self.kernel_cmdline.as_deref())
+    }
+
+    fn generate_fdt_inner(
+        &self,
+        initrd_range: Option<(u64, u64)>,
+        cmdline: Option<&str>,
+    ) -> Vec<u8> {
         let mut fdt = FdtBuilder::new();
         let plic_mapping = self.realized_sysbus_mapping("plic0");
         let aclint_mapping = self.realized_sysbus_mapping("aclint0");
@@ -341,7 +529,10 @@ impl RefMachine {
             fdt.property_string("device_type", "cpu");
             fdt.property_u32("reg", i);
             fdt.property_string("compatible", "riscv");
-            fdt.property_string("riscv,isa", "rv64imafdc");
+            fdt.property_string(
+                "riscv,isa",
+                "rv64imafdc_zba_zbb_zbc_zbs_zicsr_zifencei",
+            );
             fdt.property_string("mmu-type", "riscv,sv39");
             fdt.property_string("status", "okay");
             // Interrupt controller sub-node.
@@ -420,18 +611,17 @@ impl RefMachine {
         // /soc/test@100000
         fdt.begin_node("test@100000");
         fdt.property_string("compatible", "sifive,test0");
-        fdt.property_u32_list(
-            "reg",
-            &[0, SIFIVE_TEST_BASE as u32, 0, SIFIVE_TEST_SIZE as u32],
-        );
+        let st = &REF_MEMMAP[RefMemMap::SifiveTest as usize];
+        fdt.property_u32_list("reg", &[0, st.base as u32, 0, st.size as u32]);
         fdt.end_node();
 
         // /soc/serial@10000000
         fdt.begin_node(&format!("serial@{:x}", uart_mapping.base.0));
         fdt.property_string("compatible", "ns16550a");
         fdt.property_u32_list("reg", &self.sysbus_reg_cells("uart0"));
-        fdt.property_u32("interrupts", UART_IRQ);
+        fdt.property_u32("interrupts", REF_IRQMAP.uart0);
         fdt.property_u32("interrupt-parent", plic_phandle);
+        fdt.property_u32("clock-frequency", 3686400);
         fdt.end_node();
 
         // /soc/virtio_mmio@10001000 (if drive configured)
@@ -442,7 +632,7 @@ impl RefMachine {
                 "reg",
                 &self.sysbus_reg_cells("virtio-mmio0"),
             );
-            fdt.property_u32("interrupts", VIRTIO_IRQ);
+            fdt.property_u32("interrupts", REF_IRQMAP.virtio_base);
             fdt.property_u32("interrupt-parent", plic_phandle);
             fdt.end_node();
         }
@@ -455,6 +645,19 @@ impl RefMachine {
             "stdout-path",
             &format!("/soc/serial@{:x}", uart_mapping.base.0),
         );
+        if let Some(cmdline) = cmdline {
+            fdt.property_string("bootargs", cmdline);
+        }
+        if let Some((start, end)) = initrd_range {
+            fdt.property_u32_list(
+                "linux,initrd-start",
+                &[(start >> 32) as u32, start as u32],
+            );
+            fdt.property_u32_list(
+                "linux,initrd-end",
+                &[(end >> 32) as u32, end as u32],
+            );
+        }
         fdt.end_node();
 
         fdt.end_node(); // root
@@ -492,6 +695,8 @@ impl Machine for RefMachine {
         self.cpu_count = opts.cpu_count;
         self.bios_path = opts.bios.clone();
         self.kernel_path = opts.kernel.clone();
+        self.initrd_path = opts.initrd.clone();
+        self.kernel_cmdline = opts.append.clone();
 
         // Create per-hart CPUs.
         {
@@ -514,61 +719,55 @@ impl Machine for RefMachine {
 
         // PLIC: 2 contexts per hart (M-mode + S-mode).
         let plic_num_contexts = 2 * opts.cpu_count;
-        let plic = Arc::new(Mutex::new(Plic::new_named(
+        let plic = Arc::new(Plic::new_named(
             "plic0",
             PLIC_NUM_SOURCES,
             plic_num_contexts,
-        )));
-        {
-            let mut p = plic.lock().unwrap();
-            p.attach_to_bus(&sysbus)?;
-            let plic_region = MemoryRegion::io(
-                "plic",
-                PLIC_SIZE,
-                Box::new(PlicMmio(Arc::clone(&plic))),
-            );
-            p.register_mmio(plic_region, GPA::new(PLIC_BASE))?;
-        }
+        ));
+        plic.attach_to_bus(&mut sysbus)?;
+        let plic_mm = &REF_MEMMAP[RefMemMap::Plic as usize];
+        let plic_region = MemoryRegion::io(
+            "plic",
+            plic_mm.size,
+            Arc::new(PlicMmio(Arc::clone(&plic))),
+        );
+        plic.register_mmio(plic_region, GPA::new(plic_mm.base))?;
         self.plic = Some(Arc::clone(&plic));
 
-        // ACLINT (CLINT-compatible).
-        let aclint =
-            Arc::new(Mutex::new(Aclint::new_named("aclint0", opts.cpu_count)));
-        {
-            let mut a = aclint.lock().unwrap();
-            a.attach_to_bus(&sysbus)?;
-            let aclint_region = MemoryRegion::io(
-                "clint",
-                ACLINT_SIZE,
-                Box::new(AclintMmio(Arc::clone(&aclint))),
-            );
-            a.register_mmio(aclint_region, GPA::new(ACLINT_BASE))?;
-        }
+        // ACLINT (CLINT-compatible) — interior mutability.
+        let aclint = Arc::new(Aclint::new_named("aclint0", opts.cpu_count));
+        aclint.attach_to_bus(&mut sysbus)?;
+        let aclint_mm = &REF_MEMMAP[RefMemMap::Aclint as usize];
+        let aclint_region = MemoryRegion::io(
+            "clint",
+            aclint_mm.size,
+            Arc::new(AclintMmio(Arc::clone(&aclint))),
+        );
+        aclint.register_mmio(aclint_region, GPA::new(aclint_mm.base))?;
         self.aclint = Some(Arc::clone(&aclint));
 
-        // UART0 is migrated through the MOM sysbus path.
-        let uart = Arc::new(Mutex::new(Uart16550::new_named("uart0")));
-        {
-            let mut u = uart.lock().unwrap();
-            u.set_chardev_property("/machine/chardev/uart0")?;
-            u.attach_to_bus(&sysbus)?;
-            let uart_region = MemoryRegion::io(
-                "uart0",
-                UART0_SIZE,
-                Box::new(Uart16550Mmio(Arc::clone(&uart))),
-            );
-            u.register_mmio(uart_region, GPA::new(UART0_BASE))?;
-        }
+        // UART0 — interior mutability, no outer Mutex.
+        let uart = Arc::new(Uart16550::new_named("uart0"));
+        uart.set_chardev_property("/machine/chardev/uart0")?;
+        uart.attach_to_bus(&mut sysbus)?;
+        let uart_mm = &REF_MEMMAP[RefMemMap::Uart0 as usize];
+        let uart_region = MemoryRegion::io(
+            "uart0",
+            uart_mm.size,
+            Arc::new(Uart16550Mmio(Arc::clone(&uart))),
+        );
+        uart.register_mmio(uart_region, GPA::new(uart_mm.base))?;
         self.uart = Some(uart);
 
         // SiFive Test (system reset/shutdown).
+        let st_mm = &REF_MEMMAP[RefMemMap::SifiveTest as usize];
         let sifive_test = Arc::new(SifiveTest::new());
         let st_region = MemoryRegion::io(
             "sifive_test",
-            SIFIVE_TEST_SIZE,
-            Box::new(SifiveTestMmio(Arc::clone(&sifive_test))),
+            st_mm.size,
+            Arc::new(SifiveTestMmio(Arc::clone(&sifive_test))),
         );
-        root.add_subregion(st_region, GPA::new(SIFIVE_TEST_BASE));
+        root.add_subregion(st_region, GPA::new(st_mm.base));
         self.sifive_test = Some(sifive_test);
 
         // MROM at 0x1000 (mask ROM for reset vector).
@@ -589,36 +788,41 @@ impl Machine for RefMachine {
             });
             let plic_sink =
                 Arc::new(PlicIrqSink(Arc::clone(self.plic.as_ref().unwrap())));
-            let virtio_irq =
-                IrqLine::new(plic_sink as Arc<dyn IrqSink>, VIRTIO_IRQ);
+            let vio_mm = &REF_MEMMAP[RefMemMap::Virtio as usize];
+            let virtio_irq = IrqLine::new(
+                plic_sink as Arc<dyn IrqSink>,
+                REF_IRQMAP.virtio_base,
+            );
             let ram_ptr = self.ram_block.as_ref().unwrap().as_ptr();
             let mut virtio_mmio = VirtioMmio::new_named(
                 "virtio-mmio0",
-                blk,
+                Box::new(blk),
                 virtio_irq,
                 ram_ptr,
                 RAM_BASE,
                 opts.ram_size,
             );
-            virtio_mmio.attach_to_bus(&sysbus)?;
+            virtio_mmio.attach_to_bus(&mut sysbus)?;
             let virtio_region =
-                virtio_mmio.make_mmio_region("virtio-mmio0", VIRTIO0_SIZE);
-            virtio_mmio.register_mmio(virtio_region, GPA::new(VIRTIO0_BASE))?;
+                virtio_mmio.make_mmio_region("virtio-mmio0", vio_mm.size);
+            virtio_mmio.register_mmio(virtio_region, GPA::new(vio_mm.base))?;
             self.virtio_mmio = Some(virtio_mmio);
         }
 
         // ---- IRQ wiring ----
         // Per-hart CPU IRQ sinks update real csr.mip bits.
 
-        // UART IRQ source 10 → PLIC.
+        // UART IRQ source -> PLIC.
         let plic_as_sink =
             Arc::new(PlicIrqSink(Arc::clone(self.plic.as_ref().unwrap())));
         let uart_irq_line = IrqLine::new(
             Arc::clone(&plic_as_sink) as Arc<dyn IrqSink>,
-            UART_IRQ,
+            REF_IRQMAP.uart0,
         );
-        self.uart_irq =
-            Some(IrqLine::new(plic_as_sink as Arc<dyn IrqSink>, UART_IRQ));
+        self.uart_irq = Some(IrqLine::new(
+            plic_as_sink as Arc<dyn IrqSink>,
+            REF_IRQMAP.uart0,
+        ));
 
         // ---- Connect PLIC context outputs ----
         // All IRQ sinks write to shared_mip which is
@@ -626,23 +830,22 @@ impl Machine for RefMachine {
         {
             let mip = &self.shared_mip;
             let wk = &self.wfi_waker;
-            let mut p = self.plic.as_ref().unwrap().lock().unwrap();
+            let p = self.plic.as_ref().unwrap();
             for hart in 0..opts.cpu_count as usize {
-                let _ = hart;
-                let mei_sink = Arc::new(RiscvCpuIrqSink::new(
-                    Arc::clone(mip),
-                    Arc::clone(wk),
-                ));
-                let mei_line =
-                    IrqLine::new(mei_sink as Arc<dyn IrqSink>, IRQ_MEI);
-                p.connect_context_output((2 * hart) as u32, mei_line);
-                let sei_sink = Arc::new(RiscvCpuIrqSink::new(
-                    Arc::clone(mip),
-                    Arc::clone(wk),
-                ));
-                let sei_line =
-                    IrqLine::new(sei_sink as Arc<dyn IrqSink>, IRQ_SEI);
-                p.connect_context_output((2 * hart + 1) as u32, sei_line);
+                let mei_sink: Arc<dyn IrqSink> = Arc::new(
+                    RiscvCpuIrqSink::new(Arc::clone(mip), Arc::clone(wk)),
+                );
+                p.connect_context_output(
+                    (2 * hart) as u32,
+                    InterruptSource::new(Arc::clone(&mei_sink), IRQ_MEI),
+                );
+                let sei_sink: Arc<dyn IrqSink> = Arc::new(
+                    RiscvCpuIrqSink::new(Arc::clone(mip), Arc::clone(wk)),
+                );
+                p.connect_context_output(
+                    (2 * hart + 1) as u32,
+                    InterruptSource::new(Arc::clone(&sei_sink), IRQ_SEI),
+                );
             }
         }
 
@@ -650,11 +853,9 @@ impl Machine for RefMachine {
         {
             let mip = &self.shared_mip;
             let wk = &self.wfi_waker;
-            let mut a = self.aclint.as_ref().unwrap().lock().unwrap();
-            // Connect WfiWaker for timer-driven WFI wakeup.
+            let a = self.aclint.as_ref().unwrap();
             a.connect_wfi_waker(Arc::clone(wk));
             for hart in 0..opts.cpu_count as usize {
-                let _ = hart;
                 let mti_sink = Arc::new(RiscvCpuIrqSink::new(
                     Arc::clone(mip),
                     Arc::clone(wk),
@@ -679,13 +880,9 @@ impl Machine for RefMachine {
             self.plic
                 .as_ref()
                 .unwrap()
-                .lock()
-                .unwrap()
                 .realize_onto(&mut sysbus, address_space)?;
             self.aclint
                 .as_ref()
-                .unwrap()
-                .lock()
                 .unwrap()
                 .realize_onto(&mut sysbus, address_space)?;
             if let Some(virtio_mmio) = self.virtio_mmio.as_mut() {
@@ -697,9 +894,6 @@ impl Machine for RefMachine {
         {
             let backend: Box<dyn Chardev + Send> = if opts.nographic {
                 let mut sc = StdioChardev::new();
-                // Install monitor callbacks if
-                // monitor_cb/quit_cb were set
-                // on self by the caller.
                 if let Some(ref qcb) = self.quit_cb {
                     sc.set_quit_cb(Arc::clone(qcb));
                 }
@@ -716,10 +910,10 @@ impl Machine for RefMachine {
             let uart_for_rx = Arc::clone(self.uart.as_ref().unwrap());
             let rx_cb: Arc<Mutex<dyn FnMut(u8) + Send>> =
                 Arc::new(Mutex::new(move |byte: u8| {
-                    uart_for_rx.lock().unwrap().receive(byte);
+                    uart_for_rx.receive(byte);
                 }));
 
-            let mut u = self.uart.as_ref().unwrap().lock().unwrap();
+            let u = self.uart.as_ref().unwrap();
             u.attach_irq(uart_irq_line)?;
             u.attach_chardev(fe)?;
             u.realize_onto(
@@ -739,13 +933,13 @@ impl Machine for RefMachine {
 
     fn reset(&mut self) {
         if let Some(plic) = &self.plic {
-            plic.lock().unwrap().reset_runtime();
+            plic.reset_runtime();
         }
         if let Some(aclint) = &self.aclint {
-            aclint.lock().unwrap().reset_runtime();
+            aclint.reset_runtime();
         }
         if let Some(uart) = &self.uart {
-            uart.lock().unwrap().reset_runtime();
+            uart.reset_runtime();
         }
         if let Some(virtio_mmio) = &mut self.virtio_mmio {
             virtio_mmio.reset_runtime();

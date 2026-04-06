@@ -266,14 +266,34 @@ pub fn boot_ref_machine(
         }
     }
 
+    // Load initrd (if provided) after the kernel.
+    let mut initrd_range: Option<(u64, u64)> = None;
+    if let Some(ref initrd_path) = machine.initrd_path {
+        let data = std::fs::read(initrd_path)?;
+        // Place initrd 32 MiB after kernel start.
+        let initrd_start = RAM_BASE + KERNEL_OFFSET + 0x200_0000;
+        let initrd_end = initrd_start + data.len() as u64;
+        let as_ = machine.address_space();
+        loader::load_binary(&data, GPA::new(initrd_start), as_)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        initrd_range = Some((initrd_start, initrd_end));
+    }
+
+    // Regenerate FDT with initrd/bootargs info.
+    let fdt = machine
+        .generate_fdt_with(initrd_range, machine.kernel_cmdline.as_deref());
+
     // Place FDT at top of RAM, aligned to 8 bytes.
-    let fdt = machine.fdt_blob().to_vec();
     let fdt_len = fdt.len() as u64;
     let ram_size = machine.ram_size();
     if fdt_len > ram_size {
         return Err("FDT blob larger than available RAM".into());
     }
-    let fdt_offset = (ram_size - fdt_len) & !0x7;
+    // Leave 64 KB margin at top of RAM for OpenSBI
+    // scratch/workspace so it doesn't access beyond RAM.
+    let margin = 0x10000u64; // 64 KB
+    let fdt_offset =
+        (ram_size - margin - fdt_len) & !0x7;
     let fdt_addr = RAM_BASE + fdt_offset;
     let as_ = machine.address_space();
     loader::load_binary(&fdt, GPA::new(fdt_addr), as_)

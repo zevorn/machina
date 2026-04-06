@@ -1219,6 +1219,10 @@ pub struct X86_64CodeGen {
     /// SoftMMU config for full-system mode. When `None`,
     /// all guest memory accesses use direct [R14+addr].
     pub mmio: Option<SoftMmuConfig>,
+    /// Byte offset of the neg_align exit flag from env
+    /// (rbp). When non-zero, emit_goto_tb checks
+    /// [rbp + neg_align_off] before the direct jump.
+    pub neg_align_off: i32,
 }
 
 impl X86_64CodeGen {
@@ -1230,6 +1234,7 @@ impl X86_64CodeGen {
             code_gen_start: 0,
             goto_tb_info: Mutex::new(Vec::new()),
             mmio: None,
+            neg_align_off: 0,
         }
     }
 
@@ -1243,23 +1248,68 @@ impl X86_64CodeGen {
         }
     }
 
-    /// Emit `goto_tb(n)`: a patchable direct jump (5 bytes: E9 + disp32).
+    /// Emit `goto_tb(n)`: a patchable direct jump (5 bytes:
+    /// E9 + disp32).
     ///
-    /// The disp32 field is aligned to 4 bytes so that concurrent
-    /// patching is atomic on x86-64 (safe for concurrent vCPUs).
+    /// The disp32 field is aligned to 4 bytes so that
+    /// concurrent patching is atomic on x86-64 (safe for
+    /// concurrent vCPUs).
+    ///
+    /// When `neg_align_off != 0`, an exit-request guard is
+    /// emitted before the jump:
+    /// ```text
+    ///   cmp DWORD [rbp + neg_align_off], 0
+    ///   js  past_jmp       ; negative → exit TB
+    ///   <nop padding>
+    ///   JMP rel32          ; patched to next TB
+    /// past_jmp:
+    /// ```
+    /// This breaks infinite goto_tb chains when a timer
+    /// interrupt sets neg_align to -1.
     pub fn emit_goto_tb(&self, buf: &mut CodeBuffer) -> (usize, usize) {
-        // Align disp32 to 4 bytes for atomic patching.
-        let disp_addr = buf.offset() + 1; // after E9 opcode
-        let aligned = (disp_addr + 3) & !3;
-        let pad = aligned - disp_addr;
-        if pad > 0 {
-            emit_nops(buf, pad);
+        let neg = self.neg_align_off;
+        if neg != 0 {
+            // CMP DWORD [rbp + neg_off], 0
+            emit_modrm_ext_offset(
+                buf,
+                OPC_ARITH_EvIb,
+                ArithOp::Cmp as u8,
+                Reg::Rbp,
+                neg,
+            );
+            buf.emit_u8(0); // imm8 = 0
+                            // JS past_jmp (Jcc rel32)
+            emit_opc(buf, OPC_JCC_long + (X86Cond::Js as u32), 0, 0);
+            let js_disp = buf.offset();
+            buf.emit_u32(0); // placeholder
+                             // Align disp32 to 4 bytes.
+            let disp_addr = buf.offset() + 1;
+            let aligned = (disp_addr + 3) & !3;
+            let pad = aligned - disp_addr;
+            if pad > 0 {
+                emit_nops(buf, pad);
+            }
+            let jmp_offset = buf.offset();
+            buf.emit_u8(0xE9);
+            buf.emit_u32(0);
+            let reset_offset = buf.offset();
+            // Patch JS to land here (past_jmp).
+            Self::patch_disp(buf, js_disp, reset_offset);
+            (jmp_offset, reset_offset)
+        } else {
+            // No exit-request guard.
+            let disp_addr = buf.offset() + 1;
+            let aligned = (disp_addr + 3) & !3;
+            let pad = aligned - disp_addr;
+            if pad > 0 {
+                emit_nops(buf, pad);
+            }
+            let jmp_offset = buf.offset();
+            buf.emit_u8(0xE9);
+            buf.emit_u32(0);
+            let reset_offset = buf.offset();
+            (jmp_offset, reset_offset)
         }
-        let jmp_offset = buf.offset();
-        buf.emit_u8(0xE9);
-        buf.emit_u32(0);
-        let reset_offset = buf.offset();
-        (jmp_offset, reset_offset)
     }
 
     /// Emit `goto_ptr(reg)`: indirect jump through a register.

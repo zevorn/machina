@@ -48,6 +48,10 @@ pub struct RiscvDisasContext {
     /// fetch_insn32 only uses the pre-fetched value
     /// when pc_next == cross_page_pc.
     pub cross_page_pc: u64,
+    /// Virtual address of the page boundary (pc_first's
+    /// page start + 0x1000). translate_insn terminates
+    /// the TB when pc_next reaches this limit.
+    pub page_byte_limit: u64,
     /// Raw instruction word being decoded.
     pub opcode: u32,
     /// Length of the current instruction (2 or 4).
@@ -80,6 +84,7 @@ impl RiscvDisasContext {
             fault_pc: TempIdx(0),
             cross_page_insn: 0,
             cross_page_pc: 0,
+            page_byte_limit: (pc & !0xFFF) + 0x1000,
             opcode: 0,
             cur_insn_len: 4,
             guest_base,
@@ -180,6 +185,18 @@ impl TranslatorOps for RiscvTranslator {
         }
 
         ctx.base.pc_next += ctx.cur_insn_len as u64;
+
+        // Terminate TB when pc_next reaches the page
+        // boundary. max_insns (avail_bytes/2) can
+        // over-estimate when 4-byte instructions are
+        // present, so this is the authoritative check.
+        // Only override Next; NoReturn (branch/undef)
+        // must not be clobbered.
+        if ctx.base.is_jmp == DisasJumpType::Next
+            && ctx.base.pc_next >= ctx.page_byte_limit
+        {
+            ctx.base.is_jmp = DisasJumpType::TooMany;
+        }
     }
 
     fn tb_stop(ctx: &mut RiscvDisasContext, ir: &mut Context) {

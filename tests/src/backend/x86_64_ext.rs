@@ -935,3 +935,269 @@ jcc_case!(jcc_ja_opcode, X86Cond::Ja, 0x87);
 jcc_case!(jcc_jl_opcode, X86Cond::Jl, 0x8C);
 jcc_case!(jcc_jge_opcode, X86Cond::Jge, 0x8D);
 jcc_case!(jcc_jg_opcode, X86Cond::Jg, 0x8F);
+
+// ==========================================================
+// Codegen dispatch tests for Clz/Ctz/CtPop/Bswap64/RotL/RotR
+// ==========================================================
+
+// -- Clz: lzcnt dst, src --
+// Constraint: n1_i2 (new output, two inputs: value + fallback)
+
+#[test]
+fn codegen_clz_i64() {
+    // lzcnt rax, rcx => F3 48 0F BD C1
+    let op = Op::new(OpIdx(0), Opcode::Clz, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rax as u8],
+        &[Reg::Rcx as u8, Reg::Rdx as u8],
+        &[],
+    );
+    assert_eq!(code, [0xF3, 0x48, 0x0F, 0xBD, 0xC1]);
+}
+
+#[test]
+fn codegen_clz_i32() {
+    // lzcnt eax, ecx => F3 0F BD C1
+    let op = Op::new(OpIdx(0), Opcode::Clz, Type::I32);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rax as u8],
+        &[Reg::Rcx as u8, Reg::Rdx as u8],
+        &[],
+    );
+    assert_eq!(code, [0xF3, 0x0F, 0xBD, 0xC1]);
+}
+
+#[test]
+fn codegen_clz_i64_extended() {
+    // lzcnt r8, r9 => F3 4D 0F BD C1
+    let op = Op::new(OpIdx(0), Opcode::Clz, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::R8 as u8],
+        &[Reg::R9 as u8, Reg::R10 as u8],
+        &[],
+    );
+    assert_eq!(code, [0xF3, 0x4D, 0x0F, 0xBD, 0xC1]);
+}
+
+// -- Ctz: tzcnt dst, src --
+// Constraint: n1_i2 (new output, two inputs: value + fallback)
+
+#[test]
+fn codegen_ctz_i64() {
+    // tzcnt rax, rcx => F3 48 0F BC C1
+    let op = Op::new(OpIdx(0), Opcode::Ctz, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rax as u8],
+        &[Reg::Rcx as u8, Reg::Rdx as u8],
+        &[],
+    );
+    assert_eq!(code, [0xF3, 0x48, 0x0F, 0xBC, 0xC1]);
+}
+
+#[test]
+fn codegen_ctz_i32() {
+    // tzcnt eax, ecx => F3 0F BC C1
+    let op = Op::new(OpIdx(0), Opcode::Ctz, Type::I32);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rax as u8],
+        &[Reg::Rcx as u8, Reg::Rdx as u8],
+        &[],
+    );
+    assert_eq!(code, [0xF3, 0x0F, 0xBC, 0xC1]);
+}
+
+#[test]
+fn codegen_ctz_i64_extended() {
+    // tzcnt r8, r9 => F3 4D 0F BC C1
+    let op = Op::new(OpIdx(0), Opcode::Ctz, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::R8 as u8],
+        &[Reg::R9 as u8, Reg::R10 as u8],
+        &[],
+    );
+    assert_eq!(code, [0xF3, 0x4D, 0x0F, 0xBC, 0xC1]);
+}
+
+// -- CtPop: popcnt dst, src --
+// Constraint: o1_i1 (output, one input)
+
+#[test]
+fn codegen_ctpop_i64() {
+    // popcnt rax, rcx => F3 48 0F B8 C1
+    let op = Op::new(OpIdx(0), Opcode::CtPop, Type::I64);
+    let code = emit_tcg_op_bytes(op, &[Reg::Rax as u8], &[Reg::Rcx as u8], &[]);
+    assert_eq!(code, [0xF3, 0x48, 0x0F, 0xB8, 0xC1]);
+}
+
+#[test]
+fn codegen_ctpop_i32() {
+    // popcnt eax, ecx => F3 0F B8 C1
+    let op = Op::new(OpIdx(0), Opcode::CtPop, Type::I32);
+    let code = emit_tcg_op_bytes(op, &[Reg::Rax as u8], &[Reg::Rcx as u8], &[]);
+    assert_eq!(code, [0xF3, 0x0F, 0xB8, 0xC1]);
+}
+
+#[test]
+fn codegen_ctpop_i64_extended() {
+    // popcnt r8, r9 => F3 4D 0F B8 C1
+    let op = Op::new(OpIdx(0), Opcode::CtPop, Type::I64);
+    let code = emit_tcg_op_bytes(op, &[Reg::R8 as u8], &[Reg::R9 as u8], &[]);
+    assert_eq!(code, [0xF3, 0x4D, 0x0F, 0xB8, 0xC1]);
+}
+
+// -- Bswap64: bswap r64 --
+// Constraint: o1_i1_alias (output aliases input 0)
+
+#[test]
+fn codegen_bswap64() {
+    // bswap rax => 48 0F C8
+    let op = Op::new(OpIdx(0), Opcode::Bswap64, Type::I64);
+    let code =
+        emit_tcg_op_bytes(op, &[Reg::Rax as u8], &[Reg::Rax as u8], &[0]);
+    assert_eq!(code, [0x48, 0x0F, 0xC8]);
+}
+
+#[test]
+fn codegen_bswap64_extended() {
+    // bswap r9 => 49 0F C9
+    let op = Op::new(OpIdx(0), Opcode::Bswap64, Type::I64);
+    let code = emit_tcg_op_bytes(op, &[Reg::R9 as u8], &[Reg::R9 as u8], &[0]);
+    assert_eq!(code, [0x49, 0x0F, 0xC9]);
+}
+
+#[test]
+fn codegen_bswap64_rdx() {
+    // bswap rdx => 48 0F CA
+    let op = Op::new(OpIdx(0), Opcode::Bswap64, Type::I64);
+    let code =
+        emit_tcg_op_bytes(op, &[Reg::Rdx as u8], &[Reg::Rdx as u8], &[0]);
+    assert_eq!(code, [0x48, 0x0F, 0xCA]);
+}
+
+// -- RotL: rol r64, cl --
+// Constraint: o1_i2_alias_fixed (output aliases input 0,
+//             input 1 = RCX)
+
+#[test]
+fn codegen_rotl_i64() {
+    // rol rax, cl => 48 D3 C0
+    let op = Op::new(OpIdx(0), Opcode::RotL, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rax as u8],
+        &[Reg::Rax as u8, Reg::Rcx as u8],
+        &[],
+    );
+    assert_eq!(code, [0x48, 0xD3, 0xC0]);
+}
+
+#[test]
+fn codegen_rotl_i32() {
+    // rol eax, cl => D3 C0
+    let op = Op::new(OpIdx(0), Opcode::RotL, Type::I32);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rax as u8],
+        &[Reg::Rax as u8, Reg::Rcx as u8],
+        &[],
+    );
+    assert_eq!(code, [0xD3, 0xC0]);
+}
+
+#[test]
+fn codegen_rotl_i64_extended() {
+    // rol r8, cl => 49 D3 C0
+    let op = Op::new(OpIdx(0), Opcode::RotL, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::R8 as u8],
+        &[Reg::R8 as u8, Reg::Rcx as u8],
+        &[],
+    );
+    assert_eq!(code, [0x49, 0xD3, 0xC0]);
+}
+
+// -- RotR: ror r64, cl --
+// Constraint: o1_i2_alias_fixed (output aliases input 0,
+//             input 1 = RCX)
+
+#[test]
+fn codegen_rotr_i64() {
+    // ror rax, cl => 48 D3 C8
+    let op = Op::new(OpIdx(0), Opcode::RotR, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rax as u8],
+        &[Reg::Rax as u8, Reg::Rcx as u8],
+        &[],
+    );
+    assert_eq!(code, [0x48, 0xD3, 0xC8]);
+}
+
+#[test]
+fn codegen_rotr_i32() {
+    // ror eax, cl => D3 C8
+    let op = Op::new(OpIdx(0), Opcode::RotR, Type::I32);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rax as u8],
+        &[Reg::Rax as u8, Reg::Rcx as u8],
+        &[],
+    );
+    assert_eq!(code, [0xD3, 0xC8]);
+}
+
+#[test]
+fn codegen_rotr_i64_extended() {
+    // ror r8, cl => 49 D3 C8
+    let op = Op::new(OpIdx(0), Opcode::RotR, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::R8 as u8],
+        &[Reg::R8 as u8, Reg::Rcx as u8],
+        &[],
+    );
+    assert_eq!(code, [0x49, 0xD3, 0xC8]);
+}
+
+// -- Cross-register variants for Clz/Ctz/CtPop --
+
+#[test]
+fn codegen_clz_i64_dst_rdx_src_rsi() {
+    // lzcnt rdx, rsi => F3 48 0F BD D6
+    let op = Op::new(OpIdx(0), Opcode::Clz, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rdx as u8],
+        &[Reg::Rsi as u8, Reg::Rdi as u8],
+        &[],
+    );
+    assert_eq!(code, [0xF3, 0x48, 0x0F, 0xBD, 0xD6]);
+}
+
+#[test]
+fn codegen_ctz_i64_dst_rdi_src_rsi() {
+    // tzcnt rdi, rsi => F3 48 0F BC FE
+    let op = Op::new(OpIdx(0), Opcode::Ctz, Type::I64);
+    let code = emit_tcg_op_bytes(
+        op,
+        &[Reg::Rdi as u8],
+        &[Reg::Rsi as u8, Reg::Rax as u8],
+        &[],
+    );
+    assert_eq!(code, [0xF3, 0x48, 0x0F, 0xBC, 0xFE]);
+}
+
+#[test]
+fn codegen_ctpop_i64_dst_rdi_src_rsi() {
+    // popcnt rdi, rsi => F3 48 0F B8 FE
+    let op = Op::new(OpIdx(0), Opcode::CtPop, Type::I64);
+    let code = emit_tcg_op_bytes(op, &[Reg::Rdi as u8], &[Reg::Rsi as u8], &[]);
+    assert_eq!(code, [0xF3, 0x48, 0x0F, 0xB8, 0xFE]);
+}

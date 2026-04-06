@@ -57,7 +57,7 @@ fn test_sysbus_realize_maps_mmio_into_address_space() {
     let region = MemoryRegion::io(
         "uart0-mmio",
         0x100,
-        Box::new(TestMmio {
+        Arc::new(TestMmio {
             value: Arc::clone(&backing),
         }),
     );
@@ -67,7 +67,7 @@ fn test_sysbus_realize_maps_mmio_into_address_space() {
     let mut address_space = make_address_space();
     assert!(!address_space.is_mapped(GPA::new(0x1000_0000), 4));
 
-    state.attach_to_bus(&bus).unwrap();
+    state.attach_to_bus(&mut bus).unwrap();
     state.realize_onto(&mut bus, &mut address_space).unwrap();
 
     assert!(address_space.is_mapped(GPA::new(0x1000_0000), 4));
@@ -91,7 +91,7 @@ fn test_sysbus_requires_mmio_before_realize() {
     let mut state = SysBusDeviceState::new("empty-dev");
     let mut address_space = make_address_space();
 
-    state.attach_to_bus(&bus).unwrap();
+    state.attach_to_bus(&mut bus).unwrap();
     let err = state
         .realize_onto(&mut bus, &mut address_space)
         .expect_err("realize without MMIO must fail");
@@ -105,7 +105,7 @@ fn test_sysbus_requires_attach_before_realize() {
     let region = MemoryRegion::io(
         "uart0-mmio",
         0x100,
-        Box::new(TestMmio {
+        Arc::new(TestMmio {
             value: Arc::new(Mutex::new(0)),
         }),
     );
@@ -129,7 +129,7 @@ fn test_sysbus_rejects_overlapping_realize() {
             MemoryRegion::io(
                 "uart0-mmio",
                 0x100,
-                Box::new(TestMmio {
+                Arc::new(TestMmio {
                     value: Arc::new(Mutex::new(0)),
                 }),
             ),
@@ -141,7 +141,7 @@ fn test_sysbus_rejects_overlapping_realize() {
             MemoryRegion::io(
                 "timer0-mmio",
                 0x100,
-                Box::new(TestMmio {
+                Arc::new(TestMmio {
                     value: Arc::new(Mutex::new(0)),
                 }),
             ),
@@ -150,8 +150,8 @@ fn test_sysbus_rejects_overlapping_realize() {
         .unwrap();
 
     let mut address_space = make_address_space();
-    first.attach_to_bus(&bus).unwrap();
-    second.attach_to_bus(&bus).unwrap();
+    first.attach_to_bus(&mut bus).unwrap();
+    second.attach_to_bus(&mut bus).unwrap();
     first.realize_onto(&mut bus, &mut address_space).unwrap();
 
     let err = second
@@ -177,7 +177,7 @@ fn test_sysbus_rejects_late_mutation_after_realize() {
             MemoryRegion::io(
                 "uart0-mmio",
                 0x100,
-                Box::new(TestMmio {
+                Arc::new(TestMmio {
                     value: Arc::new(Mutex::new(0)),
                 }),
             ),
@@ -186,7 +186,7 @@ fn test_sysbus_rejects_late_mutation_after_realize() {
         .unwrap();
 
     let mut address_space = make_address_space();
-    state.attach_to_bus(&bus).unwrap();
+    state.attach_to_bus(&mut bus).unwrap();
     state.realize_onto(&mut bus, &mut address_space).unwrap();
 
     let mmio_err = state
@@ -194,7 +194,7 @@ fn test_sysbus_rejects_late_mutation_after_realize() {
             MemoryRegion::io(
                 "late-mmio",
                 0x100,
-                Box::new(TestMmio {
+                Arc::new(TestMmio {
                     value: Arc::new(Mutex::new(0)),
                 }),
             ),
@@ -228,7 +228,7 @@ fn test_sysbus_unrealize_removes_mmio_from_address_space() {
             MemoryRegion::io(
                 "uart0-mmio",
                 0x100,
-                Box::new(TestMmio {
+                Arc::new(TestMmio {
                     value: Arc::new(Mutex::new(0)),
                 }),
             ),
@@ -237,7 +237,7 @@ fn test_sysbus_unrealize_removes_mmio_from_address_space() {
         .unwrap();
 
     let mut address_space = make_address_space();
-    state.attach_to_bus(&bus).unwrap();
+    state.attach_to_bus(&mut bus).unwrap();
     state.realize_onto(&mut bus, &mut address_space).unwrap();
     assert!(address_space.is_mapped(GPA::new(0x1000_0000), 4));
     assert_eq!(bus.mappings().len(), 1);

@@ -32,7 +32,7 @@ fn make_test_device() -> (VirtioMmio, Arc<DummySink>) {
     });
     let irq = IrqLine::new(sink.clone() as Arc<dyn IrqSink>, 1);
     let mmio = VirtioMmio::new(
-        blk,
+        Box::new(blk),
         irq,
         std::ptr::null_mut(),
         0x8000_0000,
@@ -127,7 +127,7 @@ fn test_virtio_queue_num_max() {
 fn test_virtio_realize_via_sysbus_maps_mmio() {
     let (mut dev, _) = make_test_device();
     let mut bus = SysBus::new("sysbus0");
-    dev.attach_to_bus(&bus).unwrap();
+    dev.attach_to_bus(&mut bus).unwrap();
     let region = dev.make_mmio_region("virtio-mmio0", 0x1000);
     dev.register_mmio(region, GPA::new(0x1000_1000)).unwrap();
 

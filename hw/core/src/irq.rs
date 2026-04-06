@@ -74,3 +74,34 @@ impl IrqSink for SplitIrq {
         }
     }
 }
+
+/// Lock-free interrupt output. Can be called from any
+/// thread with `&self`. Uses the underlying `IrqSink`
+/// which operates atomically (e.g. AtomicU64 for CPU
+/// mip bits).
+pub struct InterruptSource {
+    sink: Arc<dyn IrqSink>,
+    irq_num: u32,
+}
+
+impl InterruptSource {
+    pub fn new(sink: Arc<dyn IrqSink>, irq_num: u32) -> Self {
+        Self { sink, irq_num }
+    }
+
+    pub fn raise(&self) {
+        self.sink.set_irq(self.irq_num, true);
+    }
+
+    pub fn lower(&self) {
+        self.sink.set_irq(self.irq_num, false);
+    }
+
+    pub fn set(&self, level: bool) {
+        self.sink.set_irq(self.irq_num, level);
+    }
+
+    pub fn irq_num(&self) -> u32 {
+        self.irq_num
+    }
+}
