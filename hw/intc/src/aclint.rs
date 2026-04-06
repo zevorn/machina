@@ -16,7 +16,7 @@
 // methods take &self so the device can be shared via
 // Arc<Aclint> without an outer Mutex.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,10 @@ pub struct Aclint {
     msi_outputs: parking_lot::Mutex<Vec<Option<IrqLine>>>,
     wfi_waker: parking_lot::Mutex<Option<Arc<WfiWaker>>>,
     timer_state: Arc<TimerState>,
+    /// Raw pointer to each hart's neg_align (AtomicI32).
+    /// Set to -1 by the timer thread to break goto_tb
+    /// chains so the exec loop can deliver the timer IRQ.
+    neg_align_ptrs: parking_lot::Mutex<Vec<u64>>,
 }
 
 impl Aclint {
@@ -93,6 +97,7 @@ impl Aclint {
             msi_outputs: parking_lot::Mutex::new(msi),
             wfi_waker: parking_lot::Mutex::new(None),
             timer_state: Arc::new(TimerState { cancel_gen: gens }),
+            neg_align_ptrs: parking_lot::Mutex::new(vec![0; n]),
         }
     }
 
@@ -160,6 +165,15 @@ impl Aclint {
         let mut outputs = self.msi_outputs.lock();
         if (hart as usize) < outputs.len() {
             outputs[hart as usize] = Some(irq);
+        }
+    }
+
+    /// Register the neg_align pointer for a hart so timer
+    /// interrupts can break goto_tb chains.
+    pub fn connect_neg_align(&self, hart: u32, ptr: u64) {
+        let mut ptrs = self.neg_align_ptrs.lock();
+        if (hart as usize) < ptrs.len() {
+            ptrs[hart as usize] = ptr;
         }
     }
 
@@ -240,6 +254,7 @@ impl Aclint {
         };
         let waker = self.wfi_waker.lock().clone();
         let state = Arc::clone(&self.timer_state);
+        let neg_ptr = self.neg_align_ptrs.lock()[hart];
 
         std::thread::spawn(move || {
             std::thread::sleep(delay);
@@ -248,6 +263,12 @@ impl Aclint {
                 return;
             }
             line.set(true);
+            // Break goto_tb chain so the exec loop can
+            // deliver the timer interrupt promptly.
+            if neg_ptr != 0 {
+                let p = neg_ptr as *const AtomicI32;
+                unsafe { &*p }.store(-1, Ordering::Release);
+            }
             if let Some(ref wk) = waker {
                 wk.wake();
             }

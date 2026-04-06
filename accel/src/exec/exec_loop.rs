@@ -16,9 +16,8 @@ use super::{ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING};
 use crate::cpu::GuestCpu;
 use crate::ir::context::Context;
 use crate::ir::tb::{
-    cflags::{CF_SINGLE_STEP},
-    decode_tb_exit, TranslationBlock, EXCP_EBREAK, EXCP_ECALL,
-    EXCP_FENCE_I, EXCP_MRET, EXCP_PRIV_CSR, EXCP_SFENCE_VMA,
+    cflags::CF_SINGLE_STEP, decode_tb_exit, TranslationBlock, EXCP_EBREAK,
+    EXCP_ECALL, EXCP_FENCE_I, EXCP_MRET, EXCP_PRIV_CSR, EXCP_SFENCE_VMA,
     EXCP_SRET, EXCP_WFI, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
 };
 use crate::translate::translate;
@@ -87,6 +86,7 @@ where
             next_tb_hint = None;
         }
         per_cpu.stats.loop_iters += 1;
+        cpu.reset_exit_request();
 
         let stepping = cpu.gdb_single_step();
 
@@ -103,9 +103,7 @@ where
             let pc = cpu.get_pc();
             let flags = cpu.get_flags();
             let cf = CF_SINGLE_STEP | 1;
-            match tb_gen_code_cflags(
-                shared, per_cpu, cpu, pc, flags, cf,
-            ) {
+            match tb_gen_code_cflags(shared, per_cpu, cpu, pc, flags, cf) {
                 Some(idx) => idx,
                 None => {
                     if cpu.check_mem_fault() {
@@ -123,9 +121,7 @@ where
                 None => {
                     let pc = cpu.get_pc();
                     let flags = cpu.get_flags();
-                    match tb_find(
-                        shared, per_cpu, cpu, pc, flags,
-                    ) {
+                    match tb_find(shared, per_cpu, cpu, pc, flags) {
                         Some(idx) => idx,
                         None => {
                             if cpu.check_mem_fault() {
@@ -148,12 +144,11 @@ where
             continue;
         }
 
-        let _atomic_guard =
-            if shared.tb_store.get(tb_idx).contains_atomic {
-                Some(shared.atomic_lock.lock().unwrap())
-            } else {
-                None
-            };
+        let _atomic_guard = if shared.tb_store.get(tb_idx).contains_atomic {
+            Some(shared.atomic_lock.lock().unwrap())
+        } else {
+            None
+        };
         let raw_exit = cpu_tb_exec(shared, cpu, tb_idx);
         drop(_atomic_guard);
         let (last_tb, exit_code) = decode_tb_exit(raw_exit);
@@ -248,11 +243,8 @@ where
                             // Must check here to catch
                             // breakpoints at TB entry PCs
                             // (AC-3).
-                            if cpu.gdb_check_breakpoint(pc)
-                            {
-                                if cpu
-                                    .check_monitor_pause()
-                                {
+                            if cpu.gdb_check_breakpoint(pc) {
+                                if cpu.check_monitor_pause() {
                                     return ExitReason::Halted;
                                 }
                                 continue;
@@ -403,9 +395,7 @@ where
         // Deliver latched memory faults from JIT helpers.
         // Must precede interrupt check: faults have higher
         // priority and must be delivered precisely.
-        if !cpu.check_mem_fault()
-            && cpu.pending_interrupt()
-        {
+        if !cpu.check_mem_fault() && cpu.pending_interrupt() {
             cpu.handle_interrupt();
             next_tb_hint = None;
         }
@@ -510,11 +500,8 @@ where
             // Overflow: reset code buffer cursor and
             // retry with fewer instructions.
             unsafe {
-                shared.code_buf_mut().jmp_trans =
-                    std::ptr::null_mut();
-                shared.code_buf_mut().set_offset(
-                    saved_offset,
-                );
+                shared.code_buf_mut().jmp_trans = std::ptr::null_mut();
+                shared.code_buf_mut().set_offset(saved_offset);
             }
             max_insns = (max_insns / 2).max(1);
             if max_insns == 1 {
@@ -528,13 +515,11 @@ where
     }
 
     // SAFETY: we hold translate_lock.
-    let tb_idx =
-        unsafe { shared.tb_store.alloc(pc, flags, 0) }?;
+    let tb_idx = unsafe { shared.tb_store.alloc(pc, flags, 0) }?;
 
     guard.ir_ctx.reset();
     guard.ir_ctx.tb_idx = tb_idx as u32;
-    let guest_size =
-        cpu.gen_code(&mut guard.ir_ctx, pc, max_insns);
+    let guest_size = cpu.gen_code(&mut guard.ir_ctx, pc, max_insns);
     if guest_size == 0 {
         unsafe {
             let tb = shared.tb_store.get_mut(tb_idx);
@@ -550,9 +535,8 @@ where
         // Stamp TB with current global generation so that
         // invalidate_all's O(1) generation bump correctly
         // identifies stale TBs.
-        tb.gen.store(
-            shared.tb_store.global_gen(), Ordering::Release,
-        );
+        tb.gen
+            .store(shared.tb_store.global_gen(), Ordering::Release);
     }
     shared.tb_store.mark_code_page(phys_pc >> 12, tb_idx);
 
@@ -561,25 +545,19 @@ where
     // Install jmp_trans on code buffer so highwater
     // check can longjmp back here on overflow.
     unsafe {
-        shared.code_buf_mut().jmp_trans =
-            jmp_ptr as *mut u8;
+        shared.code_buf_mut().jmp_trans = jmp_ptr as *mut u8;
     }
 
     let code_buf_mut = unsafe { shared.code_buf_mut() };
-    let host_offset = translate(
-        &mut guard.ir_ctx,
-        &shared.backend,
-        code_buf_mut,
-    );
+    let host_offset =
+        translate(&mut guard.ir_ctx, &shared.backend, code_buf_mut);
 
     // Clear jmp_trans after translation completes.
     unsafe {
-        shared.code_buf_mut().jmp_trans =
-            std::ptr::null_mut();
+        shared.code_buf_mut().jmp_trans = std::ptr::null_mut();
     }
 
-    let host_size =
-        shared.code_buf().offset() - host_offset;
+    let host_size = shared.code_buf().offset() - host_offset;
 
     // SAFETY: under translate_lock.
     unsafe {
@@ -619,19 +597,15 @@ where
     B: HostCodeGen,
     C: GuestCpu<IrContext = Context>,
 {
-    if shared.code_buf().remaining()
-        < MIN_CODE_BUF_REMAINING
-    {
+    if shared.code_buf().remaining() < MIN_CODE_BUF_REMAINING {
         return None;
     }
 
-    let mut guard =
-        shared.translate_lock.lock().unwrap();
+    let mut guard = shared.translate_lock.lock().unwrap();
 
     let max_insns = TranslationBlock::max_insns(cflags);
 
-    let mut jmp_buf: SigJmpBuf =
-        unsafe { std::mem::zeroed() };
+    let mut jmp_buf: SigJmpBuf = unsafe { std::mem::zeroed() };
     let jmp_ptr = &mut jmp_buf as *mut SigJmpBuf;
     let saved_offset = shared.code_buf().offset();
     let mut cur_max = max_insns;
@@ -640,11 +614,8 @@ where
         let rc = unsafe { sigsetjmp(jmp_ptr, 0) };
         if rc == -2 {
             unsafe {
-                shared.code_buf_mut().jmp_trans =
-                    std::ptr::null_mut();
-                shared.code_buf_mut().set_offset(
-                    saved_offset,
-                );
+                shared.code_buf_mut().jmp_trans = std::ptr::null_mut();
+                shared.code_buf_mut().set_offset(saved_offset);
             }
             cur_max = (cur_max / 2).max(1);
             if cur_max == 1 && max_insns == 1 {
@@ -655,19 +626,15 @@ where
         break;
     }
 
-    let tb_idx = unsafe {
-        shared.tb_store.alloc(pc, flags, cflags)
-    }?;
+    let tb_idx = unsafe { shared.tb_store.alloc(pc, flags, cflags) }?;
 
     guard.ir_ctx.reset();
     guard.ir_ctx.tb_idx = tb_idx as u32;
-    let guest_size =
-        cpu.gen_code(&mut guard.ir_ctx, pc, cur_max);
+    let guest_size = cpu.gen_code(&mut guard.ir_ctx, pc, cur_max);
     if guest_size == 0 {
         unsafe {
             let tb = shared.tb_store.get_mut(tb_idx);
-            tb.invalid
-                .store(true, Ordering::Release);
+            tb.invalid.store(true, Ordering::Release);
         }
         return None;
     }
@@ -676,50 +643,36 @@ where
         let tb = shared.tb_store.get_mut(tb_idx);
         tb.size = guest_size;
         tb.phys_pc = phys_pc;
-        tb.gen.store(
-            shared.tb_store.global_gen(),
-            Ordering::Release,
-        );
+        tb.gen
+            .store(shared.tb_store.global_gen(), Ordering::Release);
     }
-    shared
-        .tb_store
-        .mark_code_page(phys_pc >> 12, tb_idx);
+    shared.tb_store.mark_code_page(phys_pc >> 12, tb_idx);
 
     shared.backend.clear_goto_tb_offsets();
     unsafe {
-        shared.code_buf_mut().jmp_trans =
-            jmp_ptr as *mut u8;
+        shared.code_buf_mut().jmp_trans = jmp_ptr as *mut u8;
     }
 
-    let code_buf_mut =
-        unsafe { shared.code_buf_mut() };
-    let host_offset = translate(
-        &mut guard.ir_ctx,
-        &shared.backend,
-        code_buf_mut,
-    );
+    let code_buf_mut = unsafe { shared.code_buf_mut() };
+    let host_offset =
+        translate(&mut guard.ir_ctx, &shared.backend, code_buf_mut);
 
     unsafe {
-        shared.code_buf_mut().jmp_trans =
-            std::ptr::null_mut();
+        shared.code_buf_mut().jmp_trans = std::ptr::null_mut();
     }
 
-    let host_size =
-        shared.code_buf().offset() - host_offset;
+    let host_size = shared.code_buf().offset() - host_offset;
     unsafe {
         let tb = shared.tb_store.get_mut(tb_idx);
         tb.host_offset = host_offset;
         tb.host_size = host_size;
-        tb.contains_atomic =
-            guard.ir_ctx.contains_atomic;
+        tb.contains_atomic = guard.ir_ctx.contains_atomic;
     }
 
     let offsets = shared.backend.goto_tb_offsets();
     unsafe {
         let tb = shared.tb_store.get_mut(tb_idx);
-        for (i, &(jmp, reset)) in
-            offsets.iter().enumerate().take(2)
-        {
+        for (i, &(jmp, reset)) in offsets.iter().enumerate().take(2) {
             tb.set_jmp_insn_offset(i, jmp as u32);
             tb.set_jmp_reset_offset(i, reset as u32);
         }
@@ -770,8 +723,7 @@ fn tb_add_jump<B: HostCodeGen>(
 
     let dst_tb = shared.tb_store.get(dst);
     if dst_tb.invalid.load(Ordering::Acquire)
-        || dst_tb.gen.load(Ordering::Acquire)
-            != shared.tb_store.global_gen()
+        || dst_tb.gen.load(Ordering::Acquire) != shared.tb_store.global_gen()
     {
         return;
     }

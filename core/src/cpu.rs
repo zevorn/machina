@@ -59,6 +59,11 @@ pub trait GuestCpu {
         false
     }
 
+    /// Reset the exit-request flag (neg_align) so that
+    /// goto_tb chains are not immediately broken. Called
+    /// at the start of each exec loop iteration.
+    fn reset_exit_request(&mut self) {}
+
     /// Check whether the execution loop should exit.
     /// Called after each TB to allow external stop.
     fn should_exit(&self) -> bool {

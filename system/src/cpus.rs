@@ -78,6 +78,11 @@ pub fn fault_cause_offset() -> usize {
     field - base
 }
 
+/// Byte offset of `neg_align` within RiscvCpu.
+pub fn neg_align_offset() -> i32 {
+    machina_guest_riscv::riscv::cpu::NEG_ALIGN_OFFSET as i32
+}
+
 /// Byte offset of `fault_pc` within RiscvCpu.
 pub fn fault_pc_offset() -> usize {
     let dummy = RiscvCpu::new();
@@ -313,6 +318,12 @@ impl FullSystemCpu {
                 }
             }
         }
+    }
+
+    /// Return the raw address of neg_align for ACLINT
+    /// timer interrupt exit-request signalling.
+    pub fn neg_align_ptr(&self) -> u64 {
+        &self.cpu.neg_align as *const std::sync::atomic::AtomicI32 as u64
     }
 
     pub fn shared_mip(&self) -> SharedMip {
@@ -688,6 +699,10 @@ impl GuestCpu for FullSystemCpu {
 
     fn tlb_flush_page(&mut self, vpn: u64) {
         self.cpu.mmu.flush_page(vpn);
+    }
+
+    fn reset_exit_request(&mut self) {
+        self.cpu.neg_align.store(0, Ordering::Relaxed);
     }
 
     fn should_exit(&self) -> bool {

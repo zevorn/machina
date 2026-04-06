@@ -59,6 +59,7 @@ pub fn run_difftest(opts: &MachineOpts, ram_mib: u64) {
         dirty_offset: tlb_offsets::DIRTY,
         tb_ret_addr: 0,
     });
+    backend.neg_align_off = machina_system::cpus::neg_align_offset();
     let env = ExecEnv::new(backend);
     let shared = env.shared.clone();
     let mut per_cpu = env.per_cpu;

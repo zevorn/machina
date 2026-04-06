@@ -155,15 +155,11 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "-gdb" => {
                 i += 1;
-                let s =
-                    args.get(i).ok_or("-gdb requires argument")?;
+                let s = args.get(i).ok_or("-gdb requires argument")?;
                 if s.starts_with("tcp:") || s == "stdio" {
                     cli.gdb = Some(s.clone());
                 } else {
-                    return Err(format!(
-                        "-gdb: unsupported: {}",
-                        s
-                    ));
+                    return Err(format!("-gdb: unsupported: {}", s));
                 }
             }
             "-h" | "--help" => {
@@ -299,6 +295,7 @@ fn run_machine_cycle(
         dirty_offset: tlb_offsets::DIRTY,
         tb_ret_addr: 0,
     });
+    backend.neg_align_off = machina_system::cpus::neg_align_offset();
     let env = ExecEnv::new(backend);
     let shared = env.shared.clone();
 
@@ -349,6 +346,12 @@ fn run_machine_cycle(
     if let Some(ref gs) = gdb_state {
         fs_cpu.set_gdb_state(Arc::clone(gs));
         gs.set_mem_access(ram_ptr, ram_size, 0x8000_0000, as_ptr as u64);
+    }
+    // Connect neg_align pointer to ACLINT so timer
+    // interrupts can break goto_tb chains.
+    {
+        let ptr = fs_cpu.neg_align_ptr();
+        machine.aclint().connect_neg_align(0, ptr);
     }
     cpu_mgr.add_cpu(fs_cpu);
 
@@ -488,8 +491,7 @@ fn main() {
     // GDB stub setup.
     let gdb_state: Option<Arc<machina_system::gdb::GdbState>> =
         if cli.gdb.is_some() {
-            let gs =
-                Arc::new(machina_system::gdb::GdbState::new());
+            let gs = Arc::new(machina_system::gdb::GdbState::new());
             if cli.start_paused {
                 gs.set_connected(true);
             }
@@ -504,39 +506,22 @@ fn main() {
             let gs = gdb_state.as_ref().unwrap().clone();
             let addr = addr.to_string();
             std::thread::spawn(move || {
-                let listener =
-                    std::net::TcpListener::bind(&addr)
-                        .unwrap_or_else(|e| {
-                            eprintln!(
-                                "machina: gdb bind: {}",
-                                e
-                            );
-                            process::exit(1);
-                        });
-                eprintln!(
-                    "machina: gdbstub waiting on {}",
-                    addr
-                );
-                let (stream, _) =
-                    listener.accept().unwrap();
-                eprintln!(
-                    "machina: gdb client connected"
-                );
+                let listener = std::net::TcpListener::bind(&addr)
+                    .unwrap_or_else(|e| {
+                        eprintln!("machina: gdb bind: {}", e);
+                        process::exit(1);
+                    });
+                eprintln!("machina: gdbstub waiting on {}", addr);
+                let (stream, _) = listener.accept().unwrap();
+                eprintln!("machina: gdb client connected");
                 // The server runs a simplified RSP loop.
                 // It communicates with the exec loop via
                 // GdbState (pause/resume/breakpoints).
                 // Register access is done while CPU is
                 // paused via a shared snapshot.
                 gs.set_connected(true);
-                if let Err(e) =
-                    machina_system::gdb::serve(
-                        stream, &gs,
-                    )
-                {
-                    eprintln!(
-                        "machina: gdb error: {}",
-                        e
-                    );
+                if let Err(e) = machina_system::gdb::serve(stream, &gs) {
+                    eprintln!("machina: gdb error: {}", e);
                 }
                 gs.set_connected(false);
             });

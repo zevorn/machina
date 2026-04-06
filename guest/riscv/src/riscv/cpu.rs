@@ -1,7 +1,7 @@
 //! RISC-V CPU state.
 
 use std::mem::offset_of;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32};
 
 use super::csr::{CsrFile, PrivLevel};
 
@@ -114,6 +114,13 @@ pub struct RiscvCpu {
     /// Zero means longjmp is not available.
     pub jmp_env: u64,
 
+    /// Exit flag for breaking goto_tb chains. When
+    /// negative, JIT-generated goto_tb skips the direct
+    /// jump and falls through to exit_tb, returning
+    /// control to the exec loop. Timer interrupts set
+    /// this to -1; the exec loop resets it to 0.
+    pub neg_align: AtomicI32,
+
     /// Physical pages written since last fence.i. Used
     /// for page-granularity TB invalidation.
     pub dirty_pages: Vec<u64>,
@@ -165,6 +172,9 @@ pub const UTVAL_OFFSET: i64 = UCAUSE_OFFSET + 8; // 608
 /// Byte offset of `uip`.
 pub const UIP_OFFSET: i64 = UTVAL_OFFSET + 8; // 616
 
+/// Byte offset of `neg_align` (exit flag for goto_tb).
+pub const NEG_ALIGN_OFFSET: i64 = offset_of!(RiscvCpu, neg_align) as i64;
+
 /// Byte offset of `csr.mstatus`.
 pub const MSTATUS_OFFSET: i64 =
     (offset_of!(RiscvCpu, csr) + offset_of!(CsrFile, mstatus)) as i64;
@@ -209,6 +219,7 @@ impl RiscvCpu {
             last_phys_pc: 0,
             fault_pc: 0,
             jmp_env: 0,
+            neg_align: AtomicI32::new(0),
             dirty_pages: Vec::new(),
         }
     }

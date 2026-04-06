@@ -687,6 +687,10 @@ impl HostCodeGen for X86_64CodeGen {
         }
     }
 
+    fn neg_align_offset(&self) -> i32 {
+        self.neg_align_off
+    }
+
     fn goto_tb_offsets(&self) -> Vec<(usize, usize)> {
         self.goto_tb_info.lock().unwrap().clone()
     }
