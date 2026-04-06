@@ -130,11 +130,11 @@ impl RiscvCfg {
         ext_zicbom: false,
         ext_zicbop: false,
         ext_zicboz: false,
-        // Bit manipulation: off by default.
-        ext_zba: false,
-        ext_zbb: false,
-        ext_zbc: false,
-        ext_zbs: false,
+        // Bit manipulation: on by default (QEMU virt).
+        ext_zba: true,
+        ext_zbb: true,
+        ext_zbc: true,
+        ext_zbs: true,
         // FP extensions.
         ext_zfh: false,
         ext_zfhmin: false,

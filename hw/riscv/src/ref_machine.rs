@@ -512,7 +512,10 @@ impl RefMachine {
             fdt.property_string("device_type", "cpu");
             fdt.property_u32("reg", i);
             fdt.property_string("compatible", "riscv");
-            fdt.property_string("riscv,isa", "rv64imafdc");
+            fdt.property_string(
+                "riscv,isa",
+                "rv64imafdc_zba_zbb_zbc_zbs_zicsr_zifencei",
+            );
             fdt.property_string("mmu-type", "riscv,sv39");
             fdt.property_string("status", "okay");
             // Interrupt controller sub-node.
