@@ -976,7 +976,10 @@ impl GuestCpu for FullSystemCpu {
                     .sync_from_csr(&self.cpu.csr.pmpcfg, &self.cpu.csr.pmpaddr);
             }
             if csr_addr == CSR_SATP {
-                self.cpu.mmu.set_satp(new_val);
+                // Use csr.satp (post-validation) not
+                // new_val, which may have been rejected
+                // for unsupported modes (e.g. Sv48/Sv57).
+                self.cpu.mmu.set_satp(self.cpu.csr.satp);
                 self.cpu.mmu.flush();
                 // No TB flush: matches QEMU behavior.
                 // TLB flush ensures slow-path page walk
