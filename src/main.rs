@@ -144,16 +144,12 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "-append" => {
                 i += 1;
-                let s = args
-                    .get(i)
-                    .ok_or("-append requires argument")?;
+                let s = args.get(i).ok_or("-append requires argument")?;
                 cli.append = Some(s.clone());
             }
             "-initrd" => {
                 i += 1;
-                let s = args
-                    .get(i)
-                    .ok_or("-initrd requires argument")?;
+                let s = args.get(i).ok_or("-initrd requires argument")?;
                 cli.initrd = Some(PathBuf::from(s));
             }
             "-monitor" => {

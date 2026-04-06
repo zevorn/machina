@@ -27,41 +27,16 @@ pub trait GdbTarget: Send {
     fn write_registers(&mut self, _data: &[u8]) -> bool {
         false
     }
-    fn read_register(
-        &self,
-        _reg: usize,
-    ) -> Vec<u8>;
-    fn write_register(
-        &mut self,
-        _reg: usize,
-        _val: &[u8],
-    ) -> bool {
+    fn read_register(&self, _reg: usize) -> Vec<u8>;
+    fn write_register(&mut self, _reg: usize, _val: &[u8]) -> bool {
         false
     }
-    fn read_memory(
-        &self,
-        addr: u64,
-        len: usize,
-    ) -> Vec<u8>;
-    fn write_memory(
-        &mut self,
-        addr: u64,
-        data: &[u8],
-    ) -> bool;
+    fn read_memory(&self, addr: u64, len: usize) -> Vec<u8>;
+    fn write_memory(&mut self, addr: u64, data: &[u8]) -> bool;
     /// type_: 0=sw, 1=hw, 2=write wp, 3=read wp,
     /// 4=access wp.
-    fn set_breakpoint(
-        &mut self,
-        type_: u8,
-        addr: u64,
-        kind: u32,
-    ) -> bool;
-    fn remove_breakpoint(
-        &mut self,
-        type_: u8,
-        addr: u64,
-        kind: u32,
-    ) -> bool;
+    fn set_breakpoint(&mut self, type_: u8, addr: u64, kind: u32) -> bool;
+    fn remove_breakpoint(&mut self, type_: u8, addr: u64, kind: u32) -> bool;
     fn resume(&mut self);
     fn step(&mut self);
     fn get_pc(&self) -> u64;
@@ -85,10 +60,7 @@ pub trait GdbTarget: Send {
     }
 
     // -- PhyMemMode --
-    fn set_phy_mem_mode(
-        &mut self,
-        _enabled: bool,
-    ) -> bool {
+    fn set_phy_mem_mode(&mut self, _enabled: bool) -> bool {
         false
     }
     fn phy_mem_mode(&self) -> bool {
@@ -96,9 +68,7 @@ pub trait GdbTarget: Send {
     }
 
     // -- Watchpoint hit info --
-    fn take_watchpoint_hit(
-        &mut self,
-    ) -> Option<(u64, u8)> {
+    fn take_watchpoint_hit(&mut self) -> Option<(u64, u8)> {
         None
     }
 }
@@ -112,14 +82,10 @@ pub struct GdbHandler {
 
 impl GdbHandler {
     pub fn new() -> Self {
-        Self::with_target_xml(
-            crate::target::RISCV64_TARGET_XML,
-        )
+        Self::with_target_xml(crate::target::RISCV64_TARGET_XML)
     }
 
-    pub fn with_target_xml(
-        xml: &'static str,
-    ) -> Self {
+    pub fn with_target_xml(xml: &'static str) -> Self {
         Self {
             no_ack: false,
             attached: true,
@@ -133,85 +99,48 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
     ) -> Option<String> {
         if packet == "\x03" {
-            return Some(
-                self.stop_reply(StopReason::Pause, target),
-            );
+            return Some(self.stop_reply(StopReason::Pause, target));
         }
 
         if packet.starts_with('v') {
-            return self
-                .handle_v_packet(packet, target);
+            return self.handle_v_packet(packet, target);
         }
 
         if packet.starts_with('q') {
-            let (name, args) = match packet
-                .find(|c: char| !c.is_alphabetic())
-            {
-                Some(i) => {
-                    (&packet[..i], &packet[i..])
-                }
+            let (name, args) = match packet.find(|c: char| !c.is_alphabetic()) {
+                Some(i) => (&packet[..i], &packet[i..]),
                 None => (packet, ""),
             };
-            return Some(self.handle_query(
-                name, args, target,
-            ));
+            return Some(self.handle_query(name, args, target));
         }
         if packet.starts_with('Q') {
-            let (name, args) = match packet
-                .find(|c: char| !c.is_alphabetic())
-            {
-                Some(i) => {
-                    (&packet[..i], &packet[i..])
-                }
+            let (name, args) = match packet.find(|c: char| !c.is_alphabetic()) {
+                Some(i) => (&packet[..i], &packet[i..]),
                 None => (packet, ""),
             };
-            return Some(self.handle_set(
-                name, args, target,
-            ));
+            return Some(self.handle_set(name, args, target));
         }
 
         let (cmd, args) = match packet.chars().next() {
             Some('?') => ("?", &packet[1..]),
-            Some(c) if c.is_ascii_uppercase() => {
-                (&packet[..1], &packet[1..])
-            }
-            Some(c) if c.is_ascii_lowercase() => {
-                (&packet[..1], &packet[1..])
-            }
+            Some(c) if c.is_ascii_uppercase() => (&packet[..1], &packet[1..]),
+            Some(c) if c.is_ascii_lowercase() => (&packet[..1], &packet[1..]),
             _ => (packet, ""),
         };
 
         let resp = match cmd {
             "?" => self.handle_stop_reason(target),
             "g" => self.handle_read_registers(target),
-            "G" => {
-                self.handle_write_registers(target, args)
-            }
-            "p" => {
-                self.handle_read_register(target, args)
-            }
-            "P" => {
-                self.handle_write_register(target, args)
-            }
-            "m" => {
-                self.handle_read_memory(target, args)
-            }
-            "M" => {
-                self.handle_write_memory(target, args)
-            }
-            "X" => self.handle_write_memory_binary(
-                target, args,
-            ),
-            "c" => {
-                return self.handle_continue(target)
-            }
+            "G" => self.handle_write_registers(target, args),
+            "p" => self.handle_read_register(target, args),
+            "P" => self.handle_write_register(target, args),
+            "m" => self.handle_read_memory(target, args),
+            "M" => self.handle_write_memory(target, args),
+            "X" => self.handle_write_memory_binary(target, args),
+            "c" => return self.handle_continue(target),
             "s" => return self.handle_step(target),
-            "Z" => {
-                self.handle_set_breakpoint(target, args)
-            }
-            "z" => self.handle_remove_breakpoint(
-                target, args,
-            ),
+            "Z" => self.handle_set_breakpoint(target, args),
+            "z" => self.handle_remove_breakpoint(target, args),
             "D" => {
                 self.attached = false;
                 return None;
@@ -225,28 +154,15 @@ impl GdbHandler {
         Some(resp)
     }
 
-    fn handle_stop_reason(
-        &self,
-        target: &mut dyn GdbTarget,
-    ) -> String {
-        self.stop_reply(
-            target.get_stop_reason(),
-            target,
-        )
+    fn handle_stop_reason(&self, target: &mut dyn GdbTarget) -> String {
+        self.stop_reply(target.get_stop_reason(), target)
     }
 
-    fn stop_reply(
-        &self,
-        reason: StopReason,
-        target: &dyn GdbTarget,
-    ) -> String {
+    fn stop_reply(&self, reason: StopReason, target: &dyn GdbTarget) -> String {
         let tid = target.stop_thread();
         match reason {
             StopReason::Breakpoint => {
-                format!(
-                    "T05thread:{:02x};swbreak:;",
-                    tid,
-                )
+                format!("T05thread:{:02x};swbreak:;", tid,)
             }
             StopReason::Watchpoint { addr, wtype } => {
                 let prefix = match wtype {
@@ -254,10 +170,7 @@ impl GdbHandler {
                     2 => "awatch",
                     _ => "watch",
                 };
-                format!(
-                    "T05thread:{:02x};{}:{:x};",
-                    tid, prefix, addr,
-                )
+                format!("T05thread:{:02x};{}:{:x};", tid, prefix, addr,)
             }
             StopReason::Step => {
                 format!("T05thread:{:02x};", tid)
@@ -265,9 +178,7 @@ impl GdbHandler {
             StopReason::Pause => {
                 format!("T02thread:{:02x};", tid)
             }
-            StopReason::Terminated => {
-                "W00".to_string()
-            }
+            StopReason::Terminated => "W00".to_string(),
         }
     }
 
@@ -314,10 +225,7 @@ impl GdbHandler {
         }
     }
 
-    fn handle_read_registers(
-        &self,
-        target: &mut dyn GdbTarget,
-    ) -> String {
+    fn handle_read_registers(&self, target: &mut dyn GdbTarget) -> String {
         let data = target.read_registers();
         protocol::encode_hex_bytes(&data)
     }
@@ -344,9 +252,7 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
         args: &str,
     ) -> String {
-        let reg = protocol::parse_hex(
-            args.trim_start_matches(':'),
-        ) as usize;
+        let reg = protocol::parse_hex(args.trim_start_matches(':')) as usize;
         let data = target.read_register(reg);
         if data.is_empty() {
             "E00".to_string()
@@ -360,13 +266,11 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
         args: &str,
     ) -> String {
-        let parts: Vec<&str> =
-            args.splitn(2, '=').collect();
+        let parts: Vec<&str> = args.splitn(2, '=').collect();
         if parts.len() != 2 {
             return "E01".to_string();
         }
-        let reg =
-            protocol::parse_hex(parts[0]) as usize;
+        let reg = protocol::parse_hex(parts[0]) as usize;
         match protocol::decode_hex_bytes(parts[1]) {
             Ok(data) => {
                 if target.write_register(reg, &data) {
@@ -384,14 +288,12 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
         args: &str,
     ) -> String {
-        let parts: Vec<&str> =
-            args.splitn(2, ',').collect();
+        let parts: Vec<&str> = args.splitn(2, ',').collect();
         if parts.len() != 2 {
             return "E01".to_string();
         }
         let addr = protocol::parse_hex(parts[0]);
-        let len =
-            protocol::parse_hex(parts[1]) as usize;
+        let len = protocol::parse_hex(parts[1]) as usize;
         let data = target.read_memory(addr, len);
         protocol::encode_hex_bytes(&data)
     }
@@ -407,8 +309,7 @@ impl GdbHandler {
         };
         let header = &args[..colon];
         let data_hex = &args[colon + 1..];
-        let parts: Vec<&str> =
-            header.splitn(2, ',').collect();
+        let parts: Vec<&str> = header.splitn(2, ',').collect();
         if parts.len() != 2 {
             return "E01".to_string();
         }
@@ -436,14 +337,12 @@ impl GdbHandler {
         };
         let header = &args[..colon];
         let data = &args[colon + 1..];
-        let parts: Vec<&str> =
-            header.splitn(2, ',').collect();
+        let parts: Vec<&str> = header.splitn(2, ',').collect();
         if parts.len() != 2 {
             return "E01".to_string();
         }
         let addr = protocol::parse_hex(parts[0]);
-        let unescaped =
-            unescape_binary(data.as_bytes());
+        let unescaped = unescape_binary(data.as_bytes());
         if target.write_memory(addr, &unescaped) {
             "OK".to_string()
         } else {
@@ -456,16 +355,10 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
     ) -> Option<String> {
         target.resume();
-        Some(self.stop_reply(
-            target.get_stop_reason(),
-            target,
-        ))
+        Some(self.stop_reply(target.get_stop_reason(), target))
     }
 
-    fn handle_step(
-        &mut self,
-        target: &mut dyn GdbTarget,
-    ) -> Option<String> {
+    fn handle_step(&mut self, target: &mut dyn GdbTarget) -> Option<String> {
         target.step();
         Some(self.stop_reply(StopReason::Step, target))
     }
@@ -475,13 +368,11 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
         args: &str,
     ) -> String {
-        let parts: Vec<&str> =
-            args.splitn(3, ',').collect();
+        let parts: Vec<&str> = args.splitn(3, ',').collect();
         if parts.len() < 2 {
             return "E01".to_string();
         }
-        let type_ =
-            parts[0].parse::<u8>().unwrap_or(0);
+        let type_ = parts[0].parse::<u8>().unwrap_or(0);
         let addr = protocol::parse_hex(parts[1]);
         let kind = parts
             .get(2)
@@ -499,13 +390,11 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
         args: &str,
     ) -> String {
-        let parts: Vec<&str> =
-            args.splitn(3, ',').collect();
+        let parts: Vec<&str> = args.splitn(3, ',').collect();
         if parts.len() < 2 {
             return "E01".to_string();
         }
-        let type_ =
-            parts[0].parse::<u8>().unwrap_or(0);
+        let type_ = parts[0].parse::<u8>().unwrap_or(0);
         let addr = protocol::parse_hex(parts[1]);
         let kind = parts
             .get(2)
@@ -525,20 +414,15 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
     ) -> String {
         match name {
-            "qSupported" => {
-                "multiprocess+;\
+            "qSupported" => "multiprocess+;\
                  vContSupported+;\
                  QStartNoAckMode+;\
                  PacketSize=4000;\
                  qXfer:features:read+;\
                  hwbreak+;\
                  swbreak+"
-                    .to_string()
-            }
-            "qAttached" => {
-                if self.attached { "1" } else { "0" }
-                    .to_string()
-            }
+                .to_string(),
+            "qAttached" => if self.attached { "1" } else { "0" }.to_string(),
             "qC" => "QC01".to_string(),
             "qfThreadInfo" => {
                 let n = target.cpu_count();
@@ -553,61 +437,33 @@ impl GdbHandler {
             }
             "qsThreadInfo" => "l".to_string(),
             "qOffsets" => String::new(),
-            _ if name.starts_with("qSymbol") => {
-                "OK".to_string()
-            }
-            _ if name.starts_with(
-                "qThreadExtraInfo",
-            ) =>
-            {
+            _ if name.starts_with("qSymbol") => "OK".to_string(),
+            _ if name.starts_with("qThreadExtraInfo") => {
                 // Extract thread ID from args.
-                let tid_str =
-                    args.trim_start_matches(',');
-                let tid =
-                    protocol::parse_hex(tid_str)
-                        as usize;
-                let desc = format!(
-                    "CPU {}",
-                    tid.saturating_sub(1),
-                );
-                protocol::encode_hex_bytes(
-                    desc.as_bytes(),
-                )
+                let tid_str = args.trim_start_matches(',');
+                let tid = protocol::parse_hex(tid_str) as usize;
+                let desc = format!("CPU {}", tid.saturating_sub(1),);
+                protocol::encode_hex_bytes(desc.as_bytes())
             }
-            _ if name.starts_with("qRcmd") => {
-                self.handle_qrcmd(args, target)
-            }
+            _ if name.starts_with("qRcmd") => self.handle_qrcmd(args, target),
             _ if name.starts_with("qqemu") => {
                 self.handle_qemu_query(name, target)
             }
-            _ if name.starts_with("qXfer") => {
-                self.handle_qxfer(args)
-            }
+            _ if name.starts_with("qXfer") => self.handle_qxfer(args),
             _ => String::new(),
         }
     }
 
-    fn handle_qrcmd(
-        &self,
-        args: &str,
-        _target: &mut dyn GdbTarget,
-    ) -> String {
+    fn handle_qrcmd(&self, args: &str, _target: &mut dyn GdbTarget) -> String {
         let hex = args.trim_start_matches(',');
-        let cmd_bytes =
-            match protocol::decode_hex_bytes(hex) {
-                Ok(b) => b,
-                Err(_) => {
-                    return encode_o_packet(
-                        "Error: invalid hex\n",
-                    )
-                }
-            };
-        let cmd =
-            String::from_utf8_lossy(&cmd_bytes);
+        let cmd_bytes = match protocol::decode_hex_bytes(hex) {
+            Ok(b) => b,
+            Err(_) => return encode_o_packet("Error: invalid hex\n"),
+        };
+        let cmd = String::from_utf8_lossy(&cmd_bytes);
         // Return the command as an O packet echo
         // (monitor passthrough placeholder).
-        let output =
-            format!("Unknown monitor command: {}\n", cmd);
+        let output = format!("Unknown monitor command: {}\n", cmd);
         encode_o_packet(&output)
     }
 
@@ -616,9 +472,7 @@ impl GdbHandler {
         name: &str,
         target: &mut dyn GdbTarget,
     ) -> String {
-        if name == "qqemuPhyMemMode"
-            || name.contains("PhyMemMode")
-        {
+        if name == "qqemuPhyMemMode" || name.contains("PhyMemMode") {
             let mode = target.phy_mem_mode();
             return if mode {
                 "1".to_string()
@@ -630,8 +484,7 @@ impl GdbHandler {
     }
 
     fn handle_qxfer(&self, args: &str) -> String {
-        let parts: Vec<&str> =
-            args.split(':').collect();
+        let parts: Vec<&str> = args.split(':').collect();
         if parts.len() < 5 {
             return String::new();
         }
@@ -647,17 +500,12 @@ impl GdbHandler {
             return String::new();
         }
 
-        let range_parts: Vec<&str> =
-            range.split(',').collect();
+        let range_parts: Vec<&str> = range.split(',').collect();
         if range_parts.len() != 2 {
             return String::new();
         }
-        let offset =
-            protocol::parse_hex(range_parts[0])
-                as usize;
-        let length =
-            protocol::parse_hex(range_parts[1])
-                as usize;
+        let offset = protocol::parse_hex(range_parts[0]) as usize;
+        let length = protocol::parse_hex(range_parts[1]) as usize;
 
         let xml = self.target_xml;
         if offset >= xml.len() {
@@ -665,16 +513,13 @@ impl GdbHandler {
         }
         let end = (offset + length).min(xml.len());
         let data = &xml.as_bytes()[offset..end];
-        let mut resp =
-            String::with_capacity(data.len() + 1);
+        let mut resp = String::with_capacity(data.len() + 1);
         if offset + data.len() < xml.len() {
             resp.push('m');
         } else {
             resp.push('l');
         }
-        resp.push_str(
-            std::str::from_utf8(data).unwrap_or(""),
-        );
+        resp.push_str(std::str::from_utf8(data).unwrap_or(""));
         resp
     }
 
@@ -689,11 +534,8 @@ impl GdbHandler {
                 self.no_ack = true;
                 "OK".to_string()
             }
-            "QqemuPhyMemMode"
-            | _ if name.contains("PhyMemMode") =>
-            {
-                let val_str =
-                    args.trim_start_matches(':');
+            _ if name.contains("PhyMemMode") => {
+                let val_str = args.trim_start_matches(':');
                 match val_str {
                     "0" => {
                         target.set_phy_mem_mode(false);
@@ -716,13 +558,9 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
     ) -> Option<String> {
         if packet == "vCont?" {
-            return Some(
-                "vCont;c;C;s;S;t".to_string(),
-            );
+            return Some("vCont;c;C;s;S;t".to_string());
         }
-        if let Some(rest) =
-            packet.strip_prefix("vCont")
-        {
+        if let Some(rest) = packet.strip_prefix("vCont") {
             if rest.is_empty() || rest == ";" {
                 return Some("OK".to_string());
             }
@@ -740,19 +578,14 @@ impl GdbHandler {
         target: &mut dyn GdbTarget,
     ) -> Option<String> {
         // vCont;action[:thread];action[:thread]...
-        let actions: Vec<&str> = args
-            .trim_start_matches(';')
-            .split(';')
-            .collect();
+        let actions: Vec<&str> =
+            args.trim_start_matches(';').split(';').collect();
         let action = actions.first()?;
 
-        let (cmd, _thread): (&str, &str) =
-            match action.find(':') {
-                Some(i) => {
-                    (&action[..i], &action[i + 1..])
-                }
-                None => (*action, ""),
-            };
+        let (cmd, _thread): (&str, &str) = match action.find(':') {
+            Some(i) => (&action[..i], &action[i + 1..]),
+            None => (*action, ""),
+        };
 
         match cmd {
             "c" | "C" => self.handle_continue(target),
@@ -769,13 +602,9 @@ impl GdbHandler {
 /// Encode a string as a GDB O packet (hex-encoded
 /// console output).
 fn encode_o_packet(s: &str) -> String {
-    let mut out = String::with_capacity(
-        1 + s.len() * 2,
-    );
+    let mut out = String::with_capacity(1 + s.len() * 2);
     out.push('O');
-    out.push_str(&protocol::encode_hex_bytes(
-        s.as_bytes(),
-    ));
+    out.push_str(&protocol::encode_hex_bytes(s.as_bytes()));
     out
 }
 

@@ -96,10 +96,7 @@ pub extern "C" fn helper_clmul(rs1: u64, rs2: u64) -> u64 {
 
 /// Carry-less multiply (high half).
 #[no_mangle]
-pub extern "C" fn helper_clmulh(
-    rs1: u64,
-    rs2: u64,
-) -> u64 {
+pub extern "C" fn helper_clmulh(rs1: u64, rs2: u64) -> u64 {
     let mut result = 0u64;
     for i in 1..64 {
         if (rs2 >> i) & 1 != 0 {
@@ -111,10 +108,7 @@ pub extern "C" fn helper_clmulh(
 
 /// Carry-less multiply (reversed).
 #[no_mangle]
-pub extern "C" fn helper_clmulr(
-    rs1: u64,
-    rs2: u64,
-) -> u64 {
+pub extern "C" fn helper_clmulr(rs1: u64, rs2: u64) -> u64 {
     let mut result = 0u64;
     for i in 0..64 {
         if (rs2 >> i) & 1 != 0 {
