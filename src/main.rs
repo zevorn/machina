@@ -361,13 +361,15 @@ fn run_machine_cycle(
         fs_cpu.set_gdb_state(Arc::clone(gs));
         gs.set_mem_access(ram_ptr, ram_size, 0x8000_0000, as_ptr as u64);
     }
+    cpu_mgr.add_cpu(fs_cpu);
     // Connect neg_align pointer to ACLINT so timer
-    // interrupts can break goto_tb chains.
+    // interrupts can break goto_tb chains. Must be
+    // AFTER add_cpu because the move changes the
+    // address of the RiscvCpu/neg_align field.
     {
-        let ptr = fs_cpu.neg_align_ptr();
+        let ptr = cpu_mgr.cpu(0).neg_align_ptr();
         machine.aclint().connect_neg_align(0, ptr);
     }
-    cpu_mgr.add_cpu(fs_cpu);
 
     // Wire SiFive Test to execution control.
     let shutdown_reason: Arc<std::sync::Mutex<Option<ShutdownReason>>> =

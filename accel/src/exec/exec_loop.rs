@@ -86,15 +86,24 @@ where
             next_tb_hint = None;
         }
         per_cpu.stats.loop_iters += 1;
-        cpu.reset_exit_request();
 
         let stepping = cpu.gdb_single_step();
 
         // Suppress interrupts during GDB single-step
         // (IRQ delivery would corrupt step semantics).
         if !stepping && cpu.pending_interrupt() {
+            cpu.reset_exit_request();
             cpu.handle_interrupt();
             next_tb_hint = None;
+        } else if !stepping && cpu.has_pending_irq() {
+            // Interrupts are pending but not deliverable
+            // (e.g., SIE=0 in a critical section). Keep
+            // neg_align set so goto_tb chains break on
+            // every iteration, letting us re-check once
+            // the guest re-enables interrupts.
+            cpu.set_exit_request();
+        } else {
+            cpu.reset_exit_request();
         }
 
         let tb_idx = if stepping {
@@ -236,6 +245,8 @@ where
                     {
                         if cpu.pending_interrupt() {
                             cpu.handle_interrupt();
+                        } else if cpu.has_pending_irq() {
+                            cpu.set_exit_request();
                         } else {
                             // GDB breakpoint check:
                             // exit_target cache bypasses
@@ -271,7 +282,6 @@ where
             v if v == EXCP_MRET as usize => {
                 per_cpu.stats.real_exit += 1;
                 cpu.execute_mret();
-                // Continue at new PC (mepc).
             }
             v if v == EXCP_SRET as usize => {
                 per_cpu.stats.real_exit += 1;
@@ -404,6 +414,8 @@ where
         if !cpu.check_mem_fault() && cpu.pending_interrupt() {
             cpu.handle_interrupt();
             next_tb_hint = None;
+        } else if cpu.has_pending_irq() {
+            cpu.set_exit_request();
         }
 
         // External stop check BEFORE monitor pause.

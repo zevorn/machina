@@ -86,8 +86,8 @@ fn zext_h(rd: u32, rs1: u32) -> u32 {
 
 // rev8 / orc.b (full 12-bit immediate)
 fn rev8(rd: u32, rs1: u32) -> u32 {
-    // imm12=0b011010_011000 = 0x698
-    rv_i(0x698, rs1, 0b101, rd, OP_IMM)
+    // RV64 imm12=0b011010_111000 = 0x6B8 (shamt=56)
+    rv_i(0x6B8, rs1, 0b101, rd, OP_IMM)
 }
 fn orc_b(rd: u32, rs1: u32) -> u32 {
     // imm12=0b001010_000111 = 0x287

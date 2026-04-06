@@ -706,6 +706,15 @@ impl GuestCpu for FullSystemCpu {
         self.cpu.mmu.flush_page(vpn);
     }
 
+    fn has_pending_irq(&self) -> bool {
+        let dev_mip = self.shared_mip.load(Ordering::Relaxed);
+        ((self.cpu.csr.mip | dev_mip) & self.cpu.csr.mie) != 0
+    }
+
+    fn set_exit_request(&mut self) {
+        self.cpu.neg_align.store(-1, Ordering::Relaxed);
+    }
+
     fn reset_exit_request(&mut self) {
         self.cpu.neg_align.store(0, Ordering::Relaxed);
     }

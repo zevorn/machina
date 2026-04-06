@@ -44,6 +44,11 @@ impl CpuManager {
         self.cpus.push(cpu);
     }
 
+    /// Access a managed CPU by index.
+    pub fn cpu(&self, idx: usize) -> &FullSystemCpu {
+        &self.cpus[idx]
+    }
+
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(ref wk) = self.wfi_waker {

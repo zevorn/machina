@@ -59,6 +59,19 @@ pub trait GuestCpu {
         false
     }
 
+    /// Check whether any interrupt is pending (regardless
+    /// of whether it can be delivered in the current
+    /// privilege/enable state). Used to keep goto_tb
+    /// chains broken while interrupts wait for delivery.
+    fn has_pending_irq(&self) -> bool {
+        self.pending_interrupt()
+    }
+
+    /// Set the exit-request flag (neg_align = -1) to
+    /// break goto_tb chains on the next iteration. Used
+    /// when interrupts are pending but not yet deliverable.
+    fn set_exit_request(&mut self) {}
+
     /// Reset the exit-request flag (neg_align) so that
     /// goto_tb chains are not immediately broken. Called
     /// at the start of each exec loop iteration.
