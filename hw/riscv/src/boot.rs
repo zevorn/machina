@@ -289,7 +289,11 @@ pub fn boot_ref_machine(
     if fdt_len > ram_size {
         return Err("FDT blob larger than available RAM".into());
     }
-    let fdt_offset = (ram_size - fdt_len) & !0x7;
+    // Leave 64 KB margin at top of RAM for OpenSBI
+    // scratch/workspace so it doesn't access beyond RAM.
+    let margin = 0x10000u64; // 64 KB
+    let fdt_offset =
+        (ram_size - margin - fdt_len) & !0x7;
     let fdt_addr = RAM_BASE + fdt_offset;
     let as_ = machine.address_space();
     loader::load_binary(&fdt, GPA::new(fdt_addr), as_)

@@ -649,11 +649,16 @@ impl GuestCpu for FullSystemCpu {
     }
 
     fn handle_interrupt(&mut self) {
-        let dev_mip = self.shared_mip.load(Ordering::Relaxed);
-        let saved = self.cpu.csr.mip;
-        self.cpu.csr.mip = saved | dev_mip;
+        // Precise mirror of hardware-controlled mip bits
+        // from shared_mip. Software bits (STIP=5, SSIP=1)
+        // are left untouched.
+        let hw_mask: u64 =
+            (1 << 3) | (1 << 7) | (1 << 9) | (1 << 11);
+        let shared =
+            self.shared_mip.load(Ordering::SeqCst);
+        self.cpu.csr.mip =
+            (self.cpu.csr.mip & !hw_mask) | (shared & hw_mask);
         self.cpu.handle_interrupt();
-        self.cpu.csr.mip &= !dev_mip;
     }
 
     fn handle_exception(&mut self, excp: u64, tval: u64) {
