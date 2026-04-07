@@ -315,24 +315,39 @@ where
             v if v == EXCP_SRET as usize => {
                 per_cpu.stats.real_exit += 1;
                 if !cpu.execute_sret() {
-                    // Illegal: sret in U-mode.
+                    // Illegal: TSR trap or U-mode sret.
+                    // PC points to next insn; rewind to
+                    // the sret itself for mepc.
+                    let cur =
+                        cpu.get_pc().wrapping_sub(4);
+                    cpu.set_pc(cur);
                     cpu.handle_exception(2, 0);
                 }
             }
             v if v == EXCP_SFENCE_VMA as usize => {
                 per_cpu.stats.real_exit += 1;
-                // sfence.vma: flush TLB, jump cache, and
-                // invalidate all TBs. TB invalidation is
-                // needed because goto_tb chaining bypasses
-                // tb_find's phys_pc validation. Without
-                // it, a chained TB may execute stale code
-                // from a previous page-table mapping.
-                cpu.tlb_flush();
-                shared
-                    .tb_store
-                    .invalidate_all(shared.code_buf(), &shared.backend);
-                per_cpu.jump_cache.invalidate();
-                next_tb_hint = None;
+                // TVM trap: sfence.vma in S-mode with
+                // mstatus.TVM=1 raises IllegalInstruction.
+                // PC was set to the sfence.vma instruction
+                // by the translator.
+                if cpu.check_sfence_trap() {
+                    // TVM trap: PC points to next insn;
+                    // rewind to the sfence.vma itself.
+                    let cur = cpu.get_pc().wrapping_sub(4);
+                    cpu.set_pc(cur);
+                    cpu.handle_exception(2, 0);
+                } else {
+                    // Normal path: PC already at next insn.
+                    cpu.tlb_flush();
+                    shared
+                        .tb_store
+                        .invalidate_all(
+                            shared.code_buf(),
+                            &shared.backend,
+                        );
+                    per_cpu.jump_cache.invalidate();
+                    next_tb_hint = None;
+                }
             }
             v if v == EXCP_FENCE_I as usize => {
                 per_cpu.stats.real_exit += 1;
@@ -420,8 +435,9 @@ where
             v if v == EXCP_UNDEF as usize => {
                 // Illegal instruction — raise exception
                 // cause=2 so the guest kernel can handle.
-                let pc = cpu.get_pc();
-                cpu.handle_exception(2, pc);
+                // tval=0 per RISC-V spec (mtval is either 0
+                // or the faulting insn word; we use 0).
+                cpu.handle_exception(2, 0);
             }
             _ => {
                 per_cpu.stats.real_exit += 1;

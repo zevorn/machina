@@ -21,6 +21,8 @@ mod gen_rvm;
 mod gen_zba;
 mod gen_zbb;
 mod gen_zbc;
+mod gen_zbkb;
+mod gen_zbkx;
 mod gen_zbs;
 mod helpers;
 
@@ -320,7 +322,8 @@ impl Decode<Context> for RiscvDisasContext {
     }
 
     fn trans_sret(&mut self, ir: &mut Context, _a: &ArgsEmpty) -> bool {
-        let next = self.base.pc_next + self.cur_insn_len as u64;
+        let next =
+            self.base.pc_next + self.cur_insn_len as u64;
         let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
         ir.gen_exit_tb(EXCP_SRET);
@@ -338,9 +341,10 @@ impl Decode<Context> for RiscvDisasContext {
     }
 
     fn trans_sfence_vma(&mut self, ir: &mut Context, _a: &ArgsR) -> bool {
-        // Full TLB flush (conservative but correct).
-        // TODO: page-specific flush optimisation.
-        let next = self.base.pc_next + self.cur_insn_len as u64;
+        // PC is set to next-instruction for the normal
+        // path. The exec loop subtracts 4 for TVM traps.
+        let next =
+            self.base.pc_next + self.cur_insn_len as u64;
         let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
         ir.gen_exit_tb(EXCP_SFENCE_VMA);
@@ -958,6 +962,64 @@ impl Decode<Context> for RiscvDisasContext {
     fn trans_bseti(&mut self, ir: &mut Context, a: &ArgsShift) -> bool {
         require_cfg!(self, ext_zbs);
         self.gen_bseti(ir, a)
+    }
+
+    // ============================================================
+    // Zbkb — Crypto Bit Manipulation (RV64)
+    // ============================================================
+
+    fn trans_brev8(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2,
+    ) -> bool {
+        require_cfg!(self, ext_zbkb);
+        self.gen_brev8(ir, a)
+    }
+    fn trans_pack(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zbkb);
+        self.gen_pack(ir, a)
+    }
+    fn trans_packh(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zbkb);
+        self.gen_packh(ir, a)
+    }
+    fn trans_packw(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zbkb);
+        self.gen_packw(ir, a)
+    }
+
+    // ============================================================
+    // Zbkx — Crypto Crossbar Permutation
+    // ============================================================
+
+    fn trans_xperm4(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zbkx);
+        self.gen_xperm4(ir, a)
+    }
+    fn trans_xperm8(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zbkx);
+        self.gen_xperm8(ir, a)
     }
 
     // ============================================================
@@ -1822,6 +1884,622 @@ impl Decode<Context> for RiscvDisasContext {
         self.gen_set_fs_dirty(ir);
         let src = self.gpr_or_zero(ir, a.rs1);
         self.fpr_store(ir, a.rd, src);
+        true
+    }
+
+    // ============================================================
+    // Zfh — Half-Precision Floating-Point
+    // ============================================================
+
+    fn trans_flh(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsI,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_load_h(ir, a)
+    }
+    fn trans_fsh(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsS,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_store_h(ir, a)
+    }
+
+    fn trans_fmadd_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR4Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let rs3 = self.fpr_load(ir, a.rs3);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fmadd_h as *const ()) as usize,
+            &[self.env, rs1, rs2, rs3, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fmsub_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR4Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let rs3 = self.fpr_load(ir, a.rs3);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fmsub_h as *const ()) as usize,
+            &[self.env, rs1, rs2, rs3, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fnmsub_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR4Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let rs3 = self.fpr_load(ir, a.rs3);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fnmsub_h as *const ()) as usize,
+            &[self.env, rs1, rs2, rs3, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fnmadd_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR4Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let rs3 = self.fpr_load(ir, a.rs3);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fnmadd_h as *const ()) as usize,
+            &[self.env, rs1, rs2, rs3, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+
+    fn trans_fadd_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsRRm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fadd_h as *const ()) as usize,
+            &[self.env, rs1, rs2, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fsub_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsRRm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fsub_h as *const ()) as usize,
+            &[self.env, rs1, rs2, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fmul_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsRRm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fmul_h as *const ()) as usize,
+            &[self.env, rs1, rs2, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fdiv_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsRRm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fdiv_h as *const ()) as usize,
+            &[self.env, rs1, rs2, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fsqrt_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fsqrt_h as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+
+    fn trans_fsgnj_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fsgnj_h as *const ()) as usize,
+            &[self.env, rs1, rs2],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fsgnjn_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fsgnjn_h as *const ()) as usize,
+            &[self.env, rs1, rs2],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fsgnjx_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fsgnjx_h as *const ()) as usize,
+            &[self.env, rs1, rs2],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fmin_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fmin_h as *const ()) as usize,
+            &[self.env, rs1, rs2],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fmax_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fmax_h as *const ()) as usize,
+            &[self.env, rs1, rs2],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+
+    fn trans_feq_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_feq_h as *const ()) as usize,
+            &[self.env, rs1, rs2],
+        );
+        self.gen_set_gpr(ir, a.rd, res);
+        true
+    }
+    fn trans_flt_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_flt_h as *const ()) as usize,
+            &[self.env, rs1, rs2],
+        );
+        self.gen_set_gpr(ir, a.rd, res);
+        true
+    }
+    fn trans_fle_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rs2 = self.fpr_load(ir, a.rs2);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fle_h as *const ()) as usize,
+            &[self.env, rs1, rs2],
+        );
+        self.gen_set_gpr(ir, a.rd, res);
+        true
+    }
+    fn trans_fclass_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fclass_h as *const ()) as usize,
+            &[self.env, rs1],
+        );
+        self.gen_set_gpr(ir, a.rd, res);
+        true
+    }
+
+    // -- Float-to-integer conversions (half) ---------
+
+    fn trans_fcvt_w_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_w_h as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.gen_set_gpr(ir, a.rd, res);
+        true
+    }
+    fn trans_fcvt_wu_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_wu_h as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.gen_set_gpr(ir, a.rd, res);
+        true
+    }
+    fn trans_fcvt_l_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_l_h as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.gen_set_gpr(ir, a.rd, res);
+        true
+    }
+    fn trans_fcvt_lu_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_lu_h as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.gen_set_gpr(ir, a.rd, res);
+        true
+    }
+
+    // -- Integer-to-float conversions (half) ---------
+
+    fn trans_fcvt_h_w(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.gpr_or_zero(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_h_w as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fcvt_h_wu(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.gpr_or_zero(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_h_wu as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fcvt_h_l(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.gpr_or_zero(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_h_l as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fcvt_h_lu(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.gpr_or_zero(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_h_lu as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+
+    // -- Cross-format conversions (half) -------------
+
+    fn trans_fcvt_s_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_s_h as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fcvt_h_s(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_h_s as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fcvt_d_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_d_h as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+    fn trans_fcvt_h_d(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2Rm,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let rs1 = self.fpr_load(ir, a.rs1);
+        let rm = ir.new_const(Type::I64, a.rm as u64);
+        let res = self.gen_helper_call(
+            ir,
+            (fpu::helper_fcvt_h_d as *const ()) as usize,
+            &[self.env, rs1, rm],
+        );
+        self.fpr_store(ir, a.rd, res);
+        true
+    }
+
+    // -- Bitcast moves (half) ------------------------
+
+    fn trans_fmv_x_h(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        let val = self.fpr_load(ir, a.rs1);
+        // Sign-extend low 16 bits to XLEN
+        let c48 = ir.new_const(Type::I64, 48);
+        let sh = ir.new_temp(Type::I64);
+        ir.gen_shl(Type::I64, sh, val, c48);
+        let sx = ir.new_temp(Type::I64);
+        ir.gen_sar(Type::I64, sx, sh, c48);
+        self.gen_set_gpr(ir, a.rd, sx);
+        true
+    }
+    fn trans_fmv_h_x(
+        &mut self,
+        ir: &mut Context,
+        a: &ArgsR2,
+    ) -> bool {
+        require_cfg!(self, ext_zfh);
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let src = self.gpr_or_zero(ir, a.rs1);
+        let mask16 = ir.new_const(Type::I64, 0xffff);
+        let lo16 = ir.new_temp(Type::I64);
+        ir.gen_and(Type::I64, lo16, src, mask16);
+        let nbox =
+            ir.new_const(Type::I64, 0xffff_ffff_ffff_0000u64);
+        let boxed = ir.new_temp(Type::I64);
+        ir.gen_or(Type::I64, boxed, lo16, nbox);
+        self.fpr_store(ir, a.rd, boxed);
         true
     }
 }

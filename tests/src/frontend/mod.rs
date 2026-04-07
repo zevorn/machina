@@ -1565,6 +1565,8 @@ fn cfg_rv64i_only() -> RiscvCfg {
         ext_zba: false,
         ext_zbb: false,
         ext_zbc: false,
+        ext_zbkb: false,
+        ext_zbkx: false,
         ext_zbs: false,
         ext_zfh: false,
         ext_zfhmin: false,

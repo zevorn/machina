@@ -92,8 +92,8 @@ run_tests() {
     #     changes which instructions are illegal
     #   rv64mzicbo-p-zero: Zicbo stubs are NOP (no real
     #     cache effects)
-    local skip_re='zbkb|zbkx|zfh|ziccid'
-    local skip_exact='rv64mi-p-illegal rv64mzicbo-p-zero'
+    local skip_re='ziccid'
+    local skip_exact='rv64mzicbo-p-zero'
 
     for test_name in "${tests[@]}"; do
         # Skip unsupported extensions.

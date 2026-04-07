@@ -5,7 +5,7 @@
 
 use machina_softfloat::env::{ExcFlags, FloatEnv, RoundMode};
 use machina_softfloat::ops::{compare, convert, minmax};
-use machina_softfloat::types::{Float32, Float64};
+use machina_softfloat::types::{Float16, Float32, Float64};
 
 use super::cpu::RiscvCpu;
 
@@ -118,6 +118,66 @@ fn neg_f32(v: Float32) -> Float32 {
 
 fn neg_f64(v: Float64) -> Float64 {
     Float64::from_bits(v.to_bits() ^ 0x8000_0000_0000_0000)
+}
+
+// ---------------------------------------------------------------
+// NaN boxing (f16 in 64-bit FP register)
+// ---------------------------------------------------------------
+
+fn nanbox_h(bits: u16) -> u64 {
+    0xffff_ffff_ffff_0000u64 | (bits as u64)
+}
+
+fn unbox_f16(raw: u64) -> Float16 {
+    if (raw >> 16) != 0xffff_ffff_ffff {
+        Float16::from_bits(0x7e00) // canonical NaN
+    } else {
+        Float16::from_bits(raw as u16)
+    }
+}
+
+fn neg_f16(v: Float16) -> Float16 {
+    Float16::from_bits(v.to_bits() ^ 0x8000)
+}
+
+// ---------------------------------------------------------------
+// Classification (f16)
+// ---------------------------------------------------------------
+
+fn fclass_f16(bits: u16) -> u64 {
+    let sign = (bits >> 15) != 0;
+    let exp = (bits >> 10) & 0x1f;
+    let frac = bits & 0x3ff;
+    let is_inf = exp == 0x1f && frac == 0;
+    let is_nan = exp == 0x1f && frac != 0;
+    let is_zero = exp == 0 && frac == 0;
+    let is_sub = exp == 0 && frac != 0;
+    let is_norm = exp != 0 && exp != 0x1f;
+    let is_snan = is_nan && (frac & (1 << 9)) == 0;
+    let is_qnan = is_nan && !is_snan;
+    let mut out = 0u64;
+    if is_inf && sign {
+        out |= 1 << 0;
+    } else if is_norm && sign {
+        out |= 1 << 1;
+    } else if is_sub && sign {
+        out |= 1 << 2;
+    } else if is_zero && sign {
+        out |= 1 << 3;
+    } else if is_zero && !sign {
+        out |= 1 << 4;
+    } else if is_sub && !sign {
+        out |= 1 << 5;
+    } else if is_norm && !sign {
+        out |= 1 << 6;
+    } else if is_inf && !sign {
+        out |= 1 << 7;
+    } else if is_snan {
+        out |= 1 << 8;
+    } else if is_qnan {
+        out |= 1 << 9;
+    }
+    out
 }
 
 // ---------------------------------------------------------------
@@ -895,4 +955,462 @@ pub extern "C" fn helper_fcsr_write(env: *mut RiscvCpu, val: u64) -> u64 {
     env.fflags = val & FFLAGS_MASK;
     env.frm = (val >> FCSR_RD_SHIFT) & FRM_MASK;
     old
+}
+
+// ===============================================================
+// Zfh (half-precision) helpers
+// ===============================================================
+
+// ---------------------------------------------------------------
+// Arithmetic
+// ---------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn helper_fadd_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res = unbox_f16(a).add(unbox_f16(b), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fsub_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res = unbox_f16(a).sub(unbox_f16(b), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fmul_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res = unbox_f16(a).mul(unbox_f16(b), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fdiv_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res = unbox_f16(a).div(unbox_f16(b), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fsqrt_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res = unbox_f16(a).sqrt(&mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+// ---------------------------------------------------------------
+// Fused multiply-add variants (half)
+// ---------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn helper_fmadd_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+    c: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res =
+        unbox_f16(a).fma(unbox_f16(b), unbox_f16(c), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fmsub_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+    c: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let nc = neg_f16(unbox_f16(c));
+    let res = unbox_f16(a).fma(unbox_f16(b), nc, &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fnmsub_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+    c: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let na = neg_f16(unbox_f16(a));
+    let res = na.fma(unbox_f16(b), unbox_f16(c), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fnmadd_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+    c: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let na = neg_f16(unbox_f16(a));
+    let nc = neg_f16(unbox_f16(c));
+    let res = na.fma(unbox_f16(b), nc, &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+// ---------------------------------------------------------------
+// Sign injection (half, pure bit manipulation)
+// ---------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn helper_fsgnj_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let _ = env;
+    let ab = unbox_f16(a).to_bits();
+    let bb = unbox_f16(b).to_bits();
+    let sign = bb & 0x8000;
+    nanbox_h((ab & 0x7fff) | sign)
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fsgnjn_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let _ = env;
+    let ab = unbox_f16(a).to_bits();
+    let bb = unbox_f16(b).to_bits();
+    let sign = (!bb) & 0x8000;
+    nanbox_h((ab & 0x7fff) | sign)
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fsgnjx_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let _ = env;
+    let ab = unbox_f16(a).to_bits();
+    let bb = unbox_f16(b).to_bits();
+    let sign = (ab ^ bb) & 0x8000;
+    nanbox_h((ab & 0x7fff) | sign)
+}
+
+// ---------------------------------------------------------------
+// Min / Max (half)
+// ---------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn helper_fmin_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = FloatEnv::new(RoundMode::NearEven);
+    fe.set_default_nan(true);
+    let res =
+        minmax::min(unbox_f16(a), unbox_f16(b), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fmax_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = FloatEnv::new(RoundMode::NearEven);
+    fe.set_default_nan(true);
+    let res =
+        minmax::max(unbox_f16(a), unbox_f16(b), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+// ---------------------------------------------------------------
+// Comparison (half)
+// ---------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn helper_feq_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = FloatEnv::new(RoundMode::NearEven);
+    fe.set_default_nan(true);
+    let res =
+        compare::eq(unbox_f16(a), unbox_f16(b), &mut fe);
+    commit_flags(cpu, &fe);
+    res as u64
+}
+
+#[no_mangle]
+pub extern "C" fn helper_flt_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = FloatEnv::new(RoundMode::NearEven);
+    fe.set_default_nan(true);
+    let res =
+        compare::lt(unbox_f16(a), unbox_f16(b), &mut fe);
+    commit_flags(cpu, &fe);
+    res as u64
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fle_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = FloatEnv::new(RoundMode::NearEven);
+    fe.set_default_nan(true);
+    let res =
+        compare::le(unbox_f16(a), unbox_f16(b), &mut fe);
+    commit_flags(cpu, &fe);
+    res as u64
+}
+
+// ---------------------------------------------------------------
+// Classification (half)
+// ---------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn helper_fclass_h(
+    env: *mut RiscvCpu,
+    a: u64,
+) -> u64 {
+    let _ = env;
+    fclass_f16(unbox_f16(a).to_bits())
+}
+
+// ---------------------------------------------------------------
+// Float-to-integer conversions (half)
+// ---------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_w_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let val: i32 = convert::to_i32(unbox_f16(a), &mut fe);
+    commit_flags(cpu, &fe);
+    val as i64 as u64
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_wu_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let val: u32 = convert::to_u32(unbox_f16(a), &mut fe);
+    commit_flags(cpu, &fe);
+    val as i32 as i64 as u64
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_l_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let val: i64 = convert::to_i64(unbox_f16(a), &mut fe);
+    commit_flags(cpu, &fe);
+    val as u64
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_lu_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let val: u64 = convert::to_u64(unbox_f16(a), &mut fe);
+    commit_flags(cpu, &fe);
+    val
+}
+
+// ---------------------------------------------------------------
+// Integer-to-float conversions (half)
+// ---------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_h_w(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res: Float16 = convert::from_i32(a as i32, &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_h_wu(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res: Float16 =
+        convert::from_u32(a as u32, &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_h_l(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res: Float16 = convert::from_i64(a as i64, &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_h_lu(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res: Float16 = convert::from_u64(a, &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+// ---------------------------------------------------------------
+// Cross-format conversions (half <-> single / double)
+// ---------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_s_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res: Float32 =
+        convert::convert(unbox_f16(a), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_h_s(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res: Float16 =
+        convert::convert(unbox_f32(a), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_d_h(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res: Float64 =
+        convert::convert(unbox_f16(a), &mut fe);
+    commit_flags(cpu, &fe);
+    res.to_bits()
+}
+
+#[no_mangle]
+pub extern "C" fn helper_fcvt_h_d(
+    env: *mut RiscvCpu,
+    a: u64,
+    rm: u64,
+) -> u64 {
+    let cpu = unsafe { &mut *env };
+    let mut fe = make_env_or_invalid(cpu, rm);
+    let res: Float16 =
+        convert::convert(Float64::from_bits(a), &mut fe);
+    commit_flags(cpu, &fe);
+    nanbox_h(res.to_bits())
 }

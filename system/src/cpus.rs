@@ -687,12 +687,22 @@ impl GuestCpu for FullSystemCpu {
         self.cpu.raise_exception(e, tval);
     }
 
+    fn set_pc(&mut self, pc: u64) {
+        self.cpu.pc = pc;
+    }
+
     fn execute_mret(&mut self) {
         self.cpu.execute_mret();
     }
 
     fn execute_sret(&mut self) -> bool {
         self.cpu.execute_sret()
+    }
+
+    fn check_sfence_trap(&self) -> bool {
+        use machina_guest_riscv::riscv::csr::PrivLevel;
+        self.cpu.priv_level == PrivLevel::Supervisor
+            && (self.cpu.csr.mstatus & (1 << 20)) != 0
     }
 
     fn set_jmp_env(&mut self, ptr: u64) {

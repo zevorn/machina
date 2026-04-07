@@ -37,8 +37,14 @@ pub trait GuestCpu {
     fn privilege_level(&self) -> u8 {
         0
     }
+    fn set_pc(&mut self, _pc: u64) {}
     fn handle_interrupt(&mut self) {}
     fn handle_exception(&mut self, _cause: u64, _tval: u64) {}
+
+    /// Check if sfence.vma should trap (TVM=1 in S-mode).
+    fn check_sfence_trap(&self) -> bool {
+        false
+    }
     fn execute_mret(&mut self) {}
     fn execute_sret(&mut self) -> bool {
         true
