@@ -58,7 +58,6 @@ struct CliArgs {
     monitor: Option<String>,
     gdb: Option<String>,
     start_paused: bool,
-    append: Option<String>,
     initrd: Option<PathBuf>,
 }
 
@@ -76,7 +75,6 @@ impl Default for CliArgs {
             monitor: None,
             gdb: None,
             start_paused: false,
-            append: None,
             initrd: None,
         }
     }
@@ -152,11 +150,6 @@ fn parse_args() -> Result<CliArgs, String> {
             "-device" => {
                 // Accept and skip for QEMU compat.
                 i += 1;
-            }
-            "-append" => {
-                i += 1;
-                let s = args.get(i).ok_or("-append requires argument")?;
-                cli.append = Some(s.clone());
             }
             "-initrd" => {
                 i += 1;
