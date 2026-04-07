@@ -141,119 +141,66 @@ fn neg_f16(v: Float16) -> Float16 {
 }
 
 // ---------------------------------------------------------------
-// Classification (f16)
+// Classification (shared logic for f16/f32/f64)
 // ---------------------------------------------------------------
 
-fn fclass_f16(bits: u16) -> u64 {
-    let sign = (bits >> 15) != 0;
-    let exp = (bits >> 10) & 0x1f;
-    let frac = bits & 0x3ff;
-    let is_inf = exp == 0x1f && frac == 0;
-    let is_nan = exp == 0x1f && frac != 0;
+fn fclass_bits(
+    sign: bool,
+    exp: u64,
+    frac: u64,
+    exp_max: u64,
+    qnan_bit: u64,
+) -> u64 {
+    let is_inf = exp == exp_max && frac == 0;
+    let is_nan = exp == exp_max && frac != 0;
     let is_zero = exp == 0 && frac == 0;
     let is_sub = exp == 0 && frac != 0;
-    let is_norm = exp != 0 && exp != 0x1f;
-    let is_snan = is_nan && (frac & (1 << 9)) == 0;
+    let is_norm = exp != 0 && exp != exp_max;
+    let is_snan = is_nan && (frac & qnan_bit) == 0;
     let is_qnan = is_nan && !is_snan;
-    let mut out = 0u64;
-    if is_inf && sign {
-        out |= 1 << 0;
-    } else if is_norm && sign {
-        out |= 1 << 1;
-    } else if is_sub && sign {
-        out |= 1 << 2;
-    } else if is_zero && sign {
-        out |= 1 << 3;
-    } else if is_zero && !sign {
-        out |= 1 << 4;
-    } else if is_sub && !sign {
-        out |= 1 << 5;
-    } else if is_norm && !sign {
-        out |= 1 << 6;
-    } else if is_inf && !sign {
-        out |= 1 << 7;
-    } else if is_snan {
-        out |= 1 << 8;
-    } else if is_qnan {
-        out |= 1 << 9;
+    match () {
+        _ if is_inf && sign => 1 << 0,
+        _ if is_norm && sign => 1 << 1,
+        _ if is_sub && sign => 1 << 2,
+        _ if is_zero && sign => 1 << 3,
+        _ if is_zero => 1 << 4,
+        _ if is_sub => 1 << 5,
+        _ if is_norm => 1 << 6,
+        _ if is_inf => 1 << 7,
+        _ if is_snan => 1 << 8,
+        _ if is_qnan => 1 << 9,
+        _ => 0,
     }
-    out
 }
 
-// ---------------------------------------------------------------
-// Classification (bit-pattern based, no softfloat needed)
-// ---------------------------------------------------------------
+fn fclass_f16(bits: u16) -> u64 {
+    fclass_bits(
+        (bits >> 15) != 0,
+        ((bits >> 10) & 0x1f) as u64,
+        (bits & 0x3ff) as u64,
+        0x1f,
+        1 << 9,
+    )
+}
 
 fn fclass_f32(bits: u32) -> u64 {
-    let sign = (bits >> 31) != 0;
-    let exp = (bits >> 23) & 0xff;
-    let frac = bits & 0x7f_ffff;
-    let is_inf = exp == 0xff && frac == 0;
-    let is_nan = exp == 0xff && frac != 0;
-    let is_zero = exp == 0 && frac == 0;
-    let is_sub = exp == 0 && frac != 0;
-    let is_norm = exp != 0 && exp != 0xff;
-    let is_snan = is_nan && (frac & (1 << 22)) == 0;
-    let is_qnan = is_nan && !is_snan;
-    let mut out = 0u64;
-    if is_inf && sign {
-        out |= 1 << 0;
-    } else if is_norm && sign {
-        out |= 1 << 1;
-    } else if is_sub && sign {
-        out |= 1 << 2;
-    } else if is_zero && sign {
-        out |= 1 << 3;
-    } else if is_zero && !sign {
-        out |= 1 << 4;
-    } else if is_sub && !sign {
-        out |= 1 << 5;
-    } else if is_norm && !sign {
-        out |= 1 << 6;
-    } else if is_inf && !sign {
-        out |= 1 << 7;
-    } else if is_snan {
-        out |= 1 << 8;
-    } else if is_qnan {
-        out |= 1 << 9;
-    }
-    out
+    fclass_bits(
+        (bits >> 31) != 0,
+        ((bits >> 23) & 0xff) as u64,
+        (bits & 0x7f_ffff) as u64,
+        0xff,
+        1 << 22,
+    )
 }
 
 fn fclass_f64(bits: u64) -> u64 {
-    let sign = (bits >> 63) != 0;
-    let exp = (bits >> 52) & 0x7ff;
-    let frac = bits & 0x000f_ffff_ffff_ffff;
-    let is_inf = exp == 0x7ff && frac == 0;
-    let is_nan = exp == 0x7ff && frac != 0;
-    let is_zero = exp == 0 && frac == 0;
-    let is_sub = exp == 0 && frac != 0;
-    let is_norm = exp != 0 && exp != 0x7ff;
-    let is_snan = is_nan && (frac & (1 << 51)) == 0;
-    let is_qnan = is_nan && !is_snan;
-    let mut out = 0u64;
-    if is_inf && sign {
-        out |= 1 << 0;
-    } else if is_norm && sign {
-        out |= 1 << 1;
-    } else if is_sub && sign {
-        out |= 1 << 2;
-    } else if is_zero && sign {
-        out |= 1 << 3;
-    } else if is_zero && !sign {
-        out |= 1 << 4;
-    } else if is_sub && !sign {
-        out |= 1 << 5;
-    } else if is_norm && !sign {
-        out |= 1 << 6;
-    } else if is_inf && !sign {
-        out |= 1 << 7;
-    } else if is_snan {
-        out |= 1 << 8;
-    } else if is_qnan {
-        out |= 1 << 9;
-    }
-    out
+    fclass_bits(
+        (bits >> 63) != 0,
+        (bits >> 52) & 0x7ff,
+        bits & 0x000f_ffff_ffff_ffff,
+        0x7ff,
+        1 << 51,
+    )
 }
 
 // ===============================================================
@@ -1109,11 +1056,10 @@ pub extern "C" fn helper_fnmadd_h(
 
 #[no_mangle]
 pub extern "C" fn helper_fsgnj_h(
-    env: *mut RiscvCpu,
+    _env: *mut RiscvCpu,
     a: u64,
     b: u64,
 ) -> u64 {
-    let _ = env;
     let ab = unbox_f16(a).to_bits();
     let bb = unbox_f16(b).to_bits();
     let sign = bb & 0x8000;
@@ -1122,11 +1068,10 @@ pub extern "C" fn helper_fsgnj_h(
 
 #[no_mangle]
 pub extern "C" fn helper_fsgnjn_h(
-    env: *mut RiscvCpu,
+    _env: *mut RiscvCpu,
     a: u64,
     b: u64,
 ) -> u64 {
-    let _ = env;
     let ab = unbox_f16(a).to_bits();
     let bb = unbox_f16(b).to_bits();
     let sign = (!bb) & 0x8000;
@@ -1135,11 +1080,10 @@ pub extern "C" fn helper_fsgnjn_h(
 
 #[no_mangle]
 pub extern "C" fn helper_fsgnjx_h(
-    env: *mut RiscvCpu,
+    _env: *mut RiscvCpu,
     a: u64,
     b: u64,
 ) -> u64 {
-    let _ = env;
     let ab = unbox_f16(a).to_bits();
     let bb = unbox_f16(b).to_bits();
     let sign = (ab ^ bb) & 0x8000;
@@ -1235,10 +1179,9 @@ pub extern "C" fn helper_fle_h(
 
 #[no_mangle]
 pub extern "C" fn helper_fclass_h(
-    env: *mut RiscvCpu,
+    _env: *mut RiscvCpu,
     a: u64,
 ) -> u64 {
-    let _ = env;
     fclass_f16(unbox_f16(a).to_bits())
 }
 

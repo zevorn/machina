@@ -102,10 +102,8 @@ pub extern "C" fn helper_xperm4(rs1: u64, rs2: u64) -> u64 {
     let mut r = 0u64;
     for i in 0..16 {
         let idx = ((rs2 >> (i * 4)) & 0xF) as u32;
-        if idx < 16 {
-            let nibble = (rs1 >> (idx * 4)) & 0xF;
-            r |= nibble << (i * 4);
-        }
+        let nibble = (rs1 >> (idx * 4)) & 0xF;
+        r |= nibble << (i * 4);
     }
     r
 }

@@ -701,8 +701,9 @@ impl GuestCpu for FullSystemCpu {
 
     fn check_sfence_trap(&self) -> bool {
         use machina_guest_riscv::riscv::csr::PrivLevel;
+        const MSTATUS_TVM: u64 = 1 << 20;
         self.cpu.priv_level == PrivLevel::Supervisor
-            && (self.cpu.csr.mstatus & (1 << 20)) != 0
+            && (self.cpu.csr.mstatus & MSTATUS_TVM) != 0
     }
 
     fn set_jmp_env(&mut self, ptr: u64) {
