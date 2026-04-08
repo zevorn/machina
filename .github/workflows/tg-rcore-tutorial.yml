@@ -37,6 +37,7 @@ jobs:
       - name: Install cargo tools
         run: |
           cargo install cargo-clone
+          cargo install cargo-binutils
           cargo install tg-rcore-tutorial-checker
 
       - name: Clone tg-rcore-tutorial
