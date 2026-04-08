@@ -91,6 +91,8 @@ pub struct RiscvCfg {
     pub ext_zbb: bool,
     pub ext_zbc: bool,
     pub ext_zbs: bool,
+    pub ext_zbkb: bool,
+    pub ext_zbkx: bool,
 
     // ── FP extensions ─────────────────────────────
     pub ext_zfh: bool,
@@ -135,8 +137,10 @@ impl RiscvCfg {
         ext_zbb: true,
         ext_zbc: true,
         ext_zbs: true,
+        ext_zbkb: true,
+        ext_zbkx: true,
         // FP extensions.
-        ext_zfh: false,
+        ext_zfh: true,
         ext_zfhmin: false,
         // Supervisor extensions.
         ext_ssvnapot: false,

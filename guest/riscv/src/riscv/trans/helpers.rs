@@ -80,6 +80,48 @@ pub extern "C" fn helper_orc_b(val: u64) -> u64 {
     r
 }
 
+// ── Zbkb: brev8 helper ────────────────────────────
+
+/// Reverse bits within each byte.
+#[no_mangle]
+pub extern "C" fn helper_brev8(val: u64) -> u64 {
+    let mut r = 0u64;
+    for i in 0..8 {
+        let byte = ((val >> (i * 8)) & 0xFF) as u8;
+        let rev = byte.reverse_bits();
+        r |= (rev as u64) << (i * 8);
+    }
+    r
+}
+
+// ── Zbkx: xperm helpers ──────────────────────────
+
+/// 4-bit nibble permutation.
+#[no_mangle]
+pub extern "C" fn helper_xperm4(rs1: u64, rs2: u64) -> u64 {
+    let mut r = 0u64;
+    for i in 0..16 {
+        let idx = ((rs2 >> (i * 4)) & 0xF) as u32;
+        let nibble = (rs1 >> (idx * 4)) & 0xF;
+        r |= nibble << (i * 4);
+    }
+    r
+}
+
+/// 8-bit byte permutation.
+#[no_mangle]
+pub extern "C" fn helper_xperm8(rs1: u64, rs2: u64) -> u64 {
+    let mut r = 0u64;
+    for i in 0..8 {
+        let idx = ((rs2 >> (i * 8)) & 0xFF) as u32;
+        if idx < 8 {
+            let byte = (rs1 >> (idx * 8)) & 0xFF;
+            r |= byte << (i * 8);
+        }
+    }
+    r
+}
+
 // ── Zbc: carry-less multiplication helpers ────────
 
 /// Carry-less multiply (low half).

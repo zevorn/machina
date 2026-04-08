@@ -53,6 +53,7 @@ const MSTATUS_MPIE: u64 = 1 << 7;
 const MSTATUS_SPP: u64 = 1 << 8;
 const MSTATUS_MPP_MASK: u64 = 0x3 << 11;
 const MSTATUS_MPP_SHIFT: u32 = 11;
+const MSTATUS_TSR: u64 = 1 << 22;
 
 // ── Interrupt priority table ────────────────────────────────────
 
@@ -244,6 +245,12 @@ impl RiscvCpu {
     /// (current privilege < S-mode).
     pub fn execute_sret(&mut self) -> bool {
         if self.priv_level < PrivLevel::Supervisor {
+            return false;
+        }
+        // TSR: sret in S-mode with TSR=1 traps.
+        if self.priv_level == PrivLevel::Supervisor
+            && self.csr.mstatus & MSTATUS_TSR != 0
+        {
             return false;
         }
         // Restore priv from SPP (1 bit: 0=U, 1=S).

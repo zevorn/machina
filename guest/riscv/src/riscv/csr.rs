@@ -335,7 +335,15 @@ impl CsrFile {
             CSR_SCAUSE => Ok(self.scause),
             CSR_STVAL => Ok(self.stval),
             CSR_SIP => Ok(self.mip & self.mideleg & SIP_MASK),
-            CSR_SATP => Ok(self.satp),
+            CSR_SATP => {
+                // TVM: trap satp access in S-mode.
+                if priv_level == PrivLevel::Supervisor
+                    && self.mstatus & MSTATUS_TVM != 0
+                {
+                    return Err(CAUSE_ILLEGAL_INSN);
+                }
+                Ok(self.satp)
+            }
 
             // -- Machine info (read-only) --
             CSR_MHARTID => Ok(self.hart_id),
@@ -505,8 +513,11 @@ impl CsrFile {
                 Ok(())
             }
             CSR_SATP => {
-                // Only accept valid SATP modes:
-                // 0 = Bare, 8 = Sv39.
+                if priv_level == PrivLevel::Supervisor
+                    && self.mstatus & MSTATUS_TVM != 0
+                {
+                    return Err(CAUSE_ILLEGAL_INSN);
+                }
                 let mode = (val >> 60) & 0xF;
                 if mode == 0 || mode == 8 {
                     self.satp = val;

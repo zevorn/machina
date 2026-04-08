@@ -143,6 +143,72 @@ impl RiscvDisasContext {
         true
     }
 
+    /// Half-precision FP load with f16 NaN boxing.
+    pub(super) fn gen_fp_load_h(
+        &self,
+        ir: &mut Context,
+        a: &ArgsI,
+    ) -> bool {
+        self.gen_fp_check(ir);
+        self.gen_set_fs_dirty(ir);
+        let base = self.gpr_or_zero(ir, a.rs1);
+        let addr = if a.imm != 0 {
+            let imm =
+                ir.new_const(Type::I64, a.imm as u64);
+            let t = ir.new_temp(Type::I64);
+            ir.gen_add(Type::I64, t, base, imm)
+        } else {
+            base
+        };
+        self.sync_pc(ir);
+        let val = ir.new_temp(Type::I64);
+        ir.gen_qemu_ld(
+            Type::I64,
+            val,
+            addr,
+            MemOp::uw().bits() as u32,
+        );
+        // NaN box: bits[63:16] = all 1s
+        let mask = ir.new_const(
+            Type::I64,
+            0xffff_ffff_ffff_0000u64,
+        );
+        let boxed = ir.new_temp(Type::I64);
+        ir.gen_or(Type::I64, boxed, val, mask);
+        self.fpr_store(ir, a.rd, boxed);
+        true
+    }
+
+    /// Half-precision FP store (low 16 bits of FPR).
+    pub(super) fn gen_fp_store_h(
+        &self,
+        ir: &mut Context,
+        a: &ArgsS,
+    ) -> bool {
+        self.gen_fp_check(ir);
+        let base = self.gpr_or_zero(ir, a.rs1);
+        let addr = if a.imm != 0 {
+            let imm =
+                ir.new_const(Type::I64, a.imm as u64);
+            let t = ir.new_temp(Type::I64);
+            ir.gen_add(Type::I64, t, base, imm)
+        } else {
+            base
+        };
+        let val = self.fpr_load(ir, a.rs2);
+        let mask = ir.new_const(Type::I64, 0xffff);
+        let lo16 = ir.new_temp(Type::I64);
+        ir.gen_and(Type::I64, lo16, val, mask);
+        self.sync_pc(ir);
+        ir.gen_qemu_st(
+            Type::I64,
+            lo16,
+            addr,
+            MemOp::uw().bits() as u32,
+        );
+        true
+    }
+
     pub(super) fn gen_fp_store(
         &self,
         ir: &mut Context,
