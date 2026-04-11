@@ -1,98 +1,111 @@
 # CLAUDE.md
 
-This file defines how Claude Code should work in this repository.
+This file is the authoritative source of rules for all AI agents and human
+contributors working in this repository. Tool-specific files (e.g. AGENTS.md)
+point here and add only tool-specific context on top.
 
-## Core Principle
+Detailed coding guidelines live under `docs/en/` (English) and `docs/zh/`
+(Chinese). When in doubt, this file takes precedence.
 
-- Follow a spec-first workflow for any non-trivial feature, behavior change,
-  or refactor.
-- Treat the spec as the contract. Implementation may vary, but externally
-  visible behavior must match the spec.
-- Prefer correctness, reproducibility, and narrow changes over speed or
-  novelty.
+## Project Overview
 
-## Before Writing Code
+Machina is a modular RISC-V full-system emulator written in Rust, featuring a
+JIT dynamic binary translation engine. It reimplements core QEMU concepts
+(TCG, device models, full-system emulation) to boot rCore-Tutorial ch1-ch8.
 
-- Read the relevant code and tests first. Do not guess hidden invariants.
-- If the request changes behavior in a meaningful way, work from a written
-  spec before editing code.
-- If no spec exists for non-trivial work, draft a minimal one or ask for one
-  before implementation.
-- A useful spec should define the goal, interface, expected behavior, edge
-  cases, failure handling, and a concrete test plan.
-- When matching external behavior, verify against the authoritative upstream
-  source and record that reference in the spec or change notes.
+## Quick Start
 
-## Change Scope
+```bash
+make build          # build all crates (debug)
+make release        # build all crates (release)
+make test           # run all tests
+make clippy         # lint with -D warnings
+make fmt            # auto-format
+make fmt-check      # check formatting
+make docs           # generate rustdocs
+make clean          # clean build artifacts
+```
 
-- Keep the change boundary as small as possible.
-- Do not perform opportunistic refactors unless they are required for
-  correctness, safety, or testability.
-- Prefer removing dead or obsolete code over preserving unused paths.
-- Follow existing local patterns unless the spec requires a deliberate change.
+See the `Makefile` for the full list of targets.
 
-## Implementation Rules
+## Boundary Constraints
 
-- Prefer simple, explicit code over clever abstractions.
-- New `unsafe` requires a short justification comment and must remain narrowly
-  scoped.
-- Do not hide missing functionality behind silent success, early exits, or
-  vague fallback behavior.
-- Unimplemented behavior must fail explicitly so tests can detect it.
-- Do not treat `skip`, `not handled`, or `not reached` as `pass`.
-- Keep comments sparse and in English. Explain only non-obvious logic.
+### Unsafe Rust
 
-## Testing Rules
+`unsafe` is only permitted in these scenarios:
 
-- Tests are the primary quality gate. Human review is useful, but it is not
-  the main proof of correctness.
-- Every bug fix must add or update a regression test.
-- Every new feature must include tests for the expected path, edge cases, and
-  failure cases defined by the spec.
-- Run the narrowest useful tests while iterating, then run the relevant full
-  validation before finishing.
-- A change is not done if tests fail, are silently skipped, or do not check the
-  claimed behavior.
-- Keep formatting clean and keep `cargo clippy -- -D warnings` passing for the
-  touched code.
+- JIT code buffer allocation and execution (mmap + mprotect RWX)
+- Calling generated host code (function pointer cast from code buffer)
+- Raw pointer access for guest memory emulation (TLB fast path)
+- Inline assembly in the backend code emitter
+- FFI interfaces to external libraries
 
-## Documentation Rules
+Everything else must be safe Rust. Every `unsafe` block requires a short
+justification comment and must remain narrowly scoped.
 
-- Update the spec whenever behavior, interfaces, or assumptions change.
-- Update documentation when a change affects workflow, semantics, or
-  verification.
-- Keep this file focused on behavioral rules for future work.
-- Do not turn this file into a project tour, directory listing, or code-level
-  reference.
+### Test Centralization
 
-## Communication Rules
+All tests **must** live in the `tests/` crate (`machina-tests`). Do not add
+tests in individual crate `#[cfg(test)] mod tests` blocks or per-crate
+`tests/` directories. Individual crates expose `pub` interfaces for the test
+crate to call.
 
-- State assumptions, risks, and verification results clearly.
-- Ask focused questions when ambiguity would change behavior in a meaningful
-  way.
-- Surface conflicts between the request and the spec before implementing.
-- When trade-offs exist, prefer the option that is easier to test and review.
+### Code Style
 
-## Review Exceptions
+- 80-column line width for all code and code comments
+- 4-space indentation, no tabs
+- `cargo fmt` before committing
+- `cargo clippy -- -D warnings` must pass with zero warnings
+- English comments only, and only at key logic points
 
-- Security-sensitive code still requires human review.
-- Complex concurrency changes still require human review.
-- `unsafe`-heavy design changes still require human review.
-- In these cases, tests are necessary but not sufficient.
-
-## Definition of Done
-
-- The implementation matches the current spec.
-- Relevant tests are present and passing.
-- Failure modes are explicit and observable.
-- New `unsafe` is justified and minimal.
-- Documentation is updated where needed.
+Full style guide: `docs/en/coding-style.md` / `docs/zh/coding-style.md`
 
 ## Commit Rules
 
-- Use English commit messages.
-- Format the subject as `module: subject`.
-- Keep the subject within 72 characters.
-- Use the body for what changed and why, not a code walkthrough.
-- For commits created in this repository, add a `Signed-off-by` line that
-  matches the current `git config user.name` and `git config user.email`.
+- English commit messages
+- Format: `module: subject` (imperative mood, <= 72 characters)
+- Body: describe what changed and why, <= 80 characters per line
+- Add `Signed-off-by: Name <email>` for commits in this repository
+- No AI-related sign-off lines (e.g. `Co-Authored-By: Claude`)
+
+Full git guidelines: `docs/en/git-guidelines.md` / `docs/zh/git-guidelines.md`
+
+## Testing Rules
+
+- Every bug fix must add or update a regression test
+- Every new feature must include tests for expected path, edge cases, and
+  failure cases
+- A change is not done if tests fail, are silently skipped, or do not check
+  the claimed behavior
+- Run the narrowest useful tests while iterating, then full validation before
+  finishing
+
+Full testing guide: `docs/en/testing.md` / `docs/zh/testing.md`
+
+## Documentation
+
+When behavior, interfaces, or assumptions change, update the corresponding
+docs under `docs/`. Existing documentation:
+
+| File | Content |
+|------|---------|
+| `coding-style.md` | Line width, formatting, naming conventions |
+| `coding-guidelines.md` | General coding guidelines |
+| `rust-guidelines.md` | Rust-specific guidelines |
+| `git-guidelines.md` | Git commit and PR conventions |
+| `testing.md` | Test organization and policies |
+| `design.md` | Architecture and design docs |
+| `ir-ops.md` | IR opcode reference |
+| `x86_64-backend.md` | x86-64 code generation docs |
+| `linux-boot.md` | Linux boot guide |
+| `mom.md` | Memory management docs |
+| `performance.md` | Performance analysis |
+
+## Quality Gates
+
+Before submitting any change:
+
+1. `make fmt-check` passes
+2. `make clippy` passes
+3. `make test` passes
+4. Relevant documentation is updated
