@@ -13,30 +13,15 @@
 
 ## Overview
 
-Machina is a Rust reimplementation of core QEMU concepts — TCG (Tiny Code Generator), device models, and full-system emulation — designed to boot and run [rCore-Tutorial](https://github.com/rcore-os/rCore-Tutorial-v3) chapters 1–8 on a RISC-V virtual machine.
+Machina is a Rust reimplementation of core QEMU concepts — TCG (Tiny Code Generator), device models, and full-system emulation — for the RISC-V architecture.
 
-### What It Can Do
+### Features
 
 - **JIT binary translation**: RISC-V → x86-64 with TB caching, chaining, and optimization
 - **Full-system emulation**: PLIC, ACLINT, UART, Sv39 MMU, SBI firmware
-- **VirtIO block device**: mmap'd raw disk images for file system chapters
+- **VirtIO block device**: mmap'd raw disk images
 - **Monitor console**: QMP-compatible JSON protocol + HMP text commands
 - **Difftest**: Instruction-level comparison against QEMU via GDB RSP
-- **1039 tests**, zero failures
-
-### rCore-Tutorial Support
-
-| Chapter | Feature | Status |
-|---------|---------|--------|
-| ch1 | Hello World | ✅ Pass |
-| ch2 | Batch Processing | ✅ Pass |
-| ch3 | Multitasking + Timer | ✅ Pass |
-| ch4 | Sv39 Virtual Memory | ✅ Pass |
-| ch5 | Process Management | ✅ Pass (shell) |
-| ch6 | File System (VirtIO) | ✅ Pass (shell) |
-| ch7 | IPC & Signals | ✅ Pass (shell) |
-| ch8 | Concurrency | ✅ Pass (shell) |
-
 ## Quick Start
 
 ### Build
@@ -44,29 +29,24 @@ Machina is a Rust reimplementation of core QEMU concepts — TCG (Tiny Code Gene
 ```bash
 git clone https://github.com/gevico/machina.git
 cd machina
-cargo build --release
+make release
 ```
 
-### Run rCore-Tutorial
+### Run
 
 ```bash
-# Ch1-Ch5: bare-metal kernel (no disk needed)
-./target/release/machina -nographic -bios none -kernel path/to/ch5.elf
+# Boot a kernel
+./target/release/machina -nographic -bios none -kernel path/to/kernel.elf
 
-# Ch6-Ch8: with VirtIO block device
+# With VirtIO block device
 ./target/release/machina -nographic \
-  -drive file=path/to/fs.img \
-  -kernel path/to/ch6.elf
+  -drive file=path/to/disk.img \
+  -kernel path/to/kernel.elf
 
 # With monitor console (QMP over TCP)
 ./target/release/machina -nographic \
   -monitor tcp:127.0.0.1:4444 \
-  -bios none -kernel path/to/ch5.elf
-
-# Instruction-level difftest against QEMU
-./target/release/machina --difftest \
-  -bios none -kernel path/to/ch1.elf
-
+  -bios none -kernel path/to/kernel.elf
 ```
 
 ### Keyboard Shortcuts (-nographic)
@@ -87,16 +67,8 @@ Machina is an AI-agent collaborative development project. Contributions are welc
 2. **Fork the repository** — create your own copy
 3. **Create a branch** — `git checkout -b feature/your-feature`
 4. **Make changes** — follow the coding style (80-column, `cargo fmt`, `cargo clippy`)
-5. **Test** — `cargo test --workspace` must pass
+5. **Test** — `make test` must pass
 6. **Submit a Pull Request** — reference the issue number
-
-### Coding Style
-
-- 80-column line width
-- `cargo fmt` for formatting
-- `cargo clippy -- -D warnings` for zero warnings
-- English comments, only at key logic points
-- Commit messages: `module: subject` format
 
 ### AI Agent Workflow
 
