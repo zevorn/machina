@@ -45,7 +45,10 @@ impl TapBackend {
         // SAFETY: opening /dev/net/tun is a standard
         // TAP-creation syscall sequence.
         let fd = unsafe {
-            libc::open(c"/dev/net/tun".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC)
+            libc::open(
+                c"/dev/net/tun".as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
         };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
@@ -103,13 +106,16 @@ impl NetBackend for TapBackend {
     }
 
     fn write_packet(&self, buf: &[u8]) -> std::io::Result<usize> {
-        // SAFETY: write to our owned TAP fd from the
-        // caller-supplied buffer.
+        // SAFETY: write to our owned nonblocking TAP fd.
         let n = unsafe {
             libc::write(self.fd, buf.as_ptr() as *const libc::c_void, buf.len())
         };
         if n < 0 {
-            Err(std::io::Error::last_os_error())
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(0);
+            }
+            Err(err)
         } else {
             Ok(n as usize)
         }
