@@ -559,6 +559,97 @@ fn test_net_rx_descriptor_payload() {
     }
 }
 
+// ── AC-2: negotiated 12-byte MRG_RXBUF RX header ─
+
+#[test]
+fn test_net_rx_mrg_rxbuf_12byte_header() {
+    let ram = alloc_guest_ram(RAM_SIZE);
+    let pipe = PipeBackend::new().unwrap();
+    let backend = Arc::new(pipe);
+    let nb: Arc<dyn NetBackend> = Arc::clone(&backend) as _;
+    let net = VirtioNet::new_default(nb);
+    let sink = Arc::new(DummySink {
+        level: AtomicBool::new(false),
+    });
+    let irq = IrqLine::new(sink.clone() as Arc<dyn IrqSink>, 1);
+    let dev =
+        VirtioMmio::new(Box::new(net), irq, ram, RAM_BASE, RAM_SIZE as u64);
+
+    // Negotiate features with MRG_RXBUF.
+    // Low 32 bits: MAC(1<<5) | MRG_RXBUF(1<<15) |
+    //              STATUS(1<<16)
+    let feat_lo: u32 = (1 << 5) | (1 << 15) | (1 << 16);
+    // High 32 bits: VERSION_1(bit 0 of high word)
+    let feat_hi: u32 = 1;
+    dev.write(0x024, 4, 0); // DRIVER_FEATURES_SEL=0
+    dev.write(0x020, 4, feat_lo as u64);
+    dev.write(0x024, 4, 1); // DRIVER_FEATURES_SEL=1
+    dev.write(0x020, 4, feat_hi as u64);
+    // Set STATUS = FEATURES_OK (triggers ack_features)
+    dev.write(0x070, 4, 0x08);
+
+    let desc_off: u64 = 0x40000;
+    let avail_off: u64 = 0x41000;
+    let used_off: u64 = 0x42000;
+    let buf_off: u64 = 0x43000;
+
+    setup_rx_queue(ram, desc_off, avail_off, used_off, buf_off, 4096);
+
+    dev.write(0x030, 4, 0); // QUEUE_SEL = 0
+    dev.write(0x038, 4, 16); // QUEUE_NUM
+    dev.write(0x080, 4, (RAM_BASE + desc_off) & 0xFFFF_FFFF);
+    dev.write(0x084, 4, (RAM_BASE + desc_off) >> 32);
+    dev.write(0x090, 4, (RAM_BASE + avail_off) & 0xFFFF_FFFF);
+    dev.write(0x094, 4, (RAM_BASE + avail_off) >> 32);
+    dev.write(0x0a0, 4, (RAM_BASE + used_off) & 0xFFFF_FFFF);
+    dev.write(0x0a4, 4, (RAM_BASE + used_off) >> 32);
+    dev.write(0x044, 4, 1); // QUEUE_READY
+    dev.write(0x070, 4, 0x0f); // DRIVER_OK
+
+    let payload = b"MRG_PAYLOAD";
+    backend.inject_packet(payload).unwrap();
+
+    let mut used = 0u16;
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        used = read_used_idx(ram, used_off);
+        if used > 0 {
+            break;
+        }
+    }
+    assert!(
+        used > 0,
+        "RX worker did not consume packet \
+         with MRG_RXBUF"
+    );
+
+    let hdr = VIRTIO_NET_HDR_SIZE_MRG; // 12
+    let used_len = read_used_len(ram, used_off, 0) as usize;
+    assert_eq!(
+        used_len,
+        hdr + payload.len(),
+        "used length should be 12 + payload"
+    );
+
+    let buf_ptr = unsafe { ram.add(buf_off as usize) };
+    let header_bytes = unsafe { std::slice::from_raw_parts(buf_ptr, hdr) };
+    assert!(
+        header_bytes.iter().all(|&b| b == 0),
+        "12-byte vnet header should be zeros"
+    );
+    let payload_bytes =
+        unsafe { std::slice::from_raw_parts(buf_ptr.add(hdr), payload.len()) };
+    assert_eq!(
+        payload_bytes, payload,
+        "payload after 12-byte header mismatch"
+    );
+
+    drop(dev);
+    unsafe {
+        libc::munmap(ram as *mut libc::c_void, RAM_SIZE);
+    }
+}
+
 // ── AC-3: restart-after-reset ────────────────────────
 
 #[test]
