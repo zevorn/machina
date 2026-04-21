@@ -390,18 +390,14 @@ fn setup_tx_queue(
 
 #[test]
 fn test_net_tx_strips_header_and_sends() {
+    use machina_hw_virtio::queue::VirtQueue;
+
     let ram = alloc_guest_ram(RAM_SIZE);
     let pipe = PipeBackend::new().unwrap();
     let pipe_arc = Arc::new(pipe);
     let nb: Arc<dyn machina_hw_virtio::net::NetBackend> =
         Arc::clone(&pipe_arc) as _;
-    let net = VirtioNet::new_default(nb);
-    let sink = Arc::new(DummySink {
-        level: AtomicBool::new(false),
-    });
-    let irq = IrqLine::new(sink.clone() as Arc<dyn IrqSink>, 1);
-    let dev =
-        VirtioMmio::new(Box::new(net), irq, ram, RAM_BASE, RAM_SIZE as u64);
+    let mut net = VirtioNet::new_default(nb);
 
     let desc_off: u64 = 0x1000;
     let avail_off: u64 = 0x2000;
@@ -414,31 +410,30 @@ fn test_net_tx_strips_header_and_sends() {
         ram, desc_off, avail_off, used_off, data_off, payload, hdr_size,
     );
 
-    // Configure TX queue (queue 1).
-    dev.write(0x030, 4, 1); // QUEUE_SEL = 1
-    dev.write(0x038, 4, 16); // QUEUE_NUM = 16
-    dev.write(0x080, 4, (RAM_BASE + desc_off) & 0xFFFF_FFFF);
-    dev.write(0x084, 4, (RAM_BASE + desc_off) >> 32);
-    dev.write(0x090, 4, (RAM_BASE + avail_off) & 0xFFFF_FFFF);
-    dev.write(0x094, 4, (RAM_BASE + avail_off) >> 32);
-    dev.write(0x0a0, 4, (RAM_BASE + used_off) & 0xFFFF_FFFF);
-    dev.write(0x0a4, 4, (RAM_BASE + used_off) >> 32);
-    dev.write(0x044, 4, 1); // QUEUE_READY = 1
-    dev.write(0x070, 4, 0x0f); // STATUS = DRIVER_OK
+    // Call handle_queue directly to avoid RX worker
+    // competing on the pipe read fd.
+    let mut queue = VirtQueue::new();
+    queue.num = 16;
+    queue.ready = true;
+    queue.desc_addr = RAM_BASE + desc_off;
+    queue.avail_addr = RAM_BASE + avail_off;
+    queue.used_addr = RAM_BASE + used_off;
 
-    // Kick TX queue.
-    dev.write(0x050, 4, 1); // QUEUE_NOTIFY = 1
+    let n = unsafe {
+        net.handle_queue(1, &mut queue, ram, RAM_BASE, RAM_SIZE as u64)
+    };
+    assert!(n > 0, "handle_queue should process TX");
 
-    // Read what the backend received.
+    // Read what the backend sent via its write_packet.
     let mut recv_buf = [0u8; 256];
-    let n = pipe_arc.read_packet(&mut recv_buf).unwrap();
+    let nr = pipe_arc.read_packet(&mut recv_buf).unwrap();
     assert_eq!(
-        &recv_buf[..n],
+        &recv_buf[..nr],
         payload,
         "TX should strip vnet header and send payload"
     );
 
-    drop(dev);
+    drop(net);
     unsafe {
         libc::munmap(ram as *mut libc::c_void, RAM_SIZE);
     }
