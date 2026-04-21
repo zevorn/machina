@@ -587,6 +587,11 @@ unsafe fn fill_rx_queue_raw(
 
     // Build the full frame: header + payload.
     let mut frame = vec![0u8; total_len];
+    // For mergeable RX buffers (12-byte header),
+    // num_buffers at offset 10 must be 1.
+    if hdr_size == VIRTIO_NET_HDR_SIZE_MRG {
+        frame[10..12].copy_from_slice(&1u16.to_le_bytes());
+    }
     frame[hdr_size..].copy_from_slice(packet);
 
     let desc_head = unsafe {
@@ -619,7 +624,13 @@ unsafe fn fill_rx_queue_raw(
         remaining = &remaining[copy_len..];
     }
 
-    let written = (total_len - remaining.len()) as u32;
+    // If the frame didn't fit, drop the packet rather
+    // than completing a truncated frame.
+    if !remaining.is_empty() {
+        return 0;
+    }
+
+    let written = total_len as u32;
     unsafe {
         queue.write_used(
             used_idx,

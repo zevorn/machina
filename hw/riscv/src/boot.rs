@@ -355,12 +355,16 @@ pub fn boot_builtin(
             // returned entry is already biased, so check
             // the pre-bias value.
             let raw_entry = info.entry.0 - info.bias.unwrap_or(0);
+            let bias = info.bias.unwrap_or(0);
             let entry = if raw_entry != 0 {
                 info.entry.0
             } else {
-                loader::elf_find_symbol(&data, "_start")
-                    .or_else(|| loader::elf_find_symbol(&data, "__start"))
-                    .unwrap_or(RAM_BASE)
+                let sym = loader::elf_find_symbol(&data, "_start")
+                    .or_else(|| loader::elf_find_symbol(&data, "__start"));
+                match sym {
+                    Some(addr) => addr + bias,
+                    None => RAM_BASE,
+                }
             };
             kernel_entry = Some(entry);
         } else {

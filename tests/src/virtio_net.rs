@@ -633,10 +633,14 @@ fn test_net_rx_mrg_rxbuf_12byte_header() {
 
     let buf_ptr = unsafe { ram.add(buf_off as usize) };
     let header_bytes = unsafe { std::slice::from_raw_parts(buf_ptr, hdr) };
+    // First 10 bytes zero, last 2 = num_buffers = 1.
     assert!(
-        header_bytes.iter().all(|&b| b == 0),
-        "12-byte vnet header should be zeros"
+        header_bytes[..10].iter().all(|&b| b == 0),
+        "first 10 header bytes should be zeros"
     );
+    let num_buffers =
+        u16::from_le_bytes(header_bytes[10..12].try_into().unwrap());
+    assert_eq!(num_buffers, 1, "num_buffers should be 1");
     let payload_bytes =
         unsafe { std::slice::from_raw_parts(buf_ptr.add(hdr), payload.len()) };
     assert_eq!(
