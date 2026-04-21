@@ -351,7 +351,7 @@ pub fn boot_builtin(
         if is_elf(&data) {
             let info = loader::load_elf(&data, RAM_BASE, as_)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            kernel_end = RAM_BASE + info.size;
+            kernel_end = info.high_addr;
             let raw_entry = info.entry.0 - info.bias.unwrap_or(0);
             let bias = info.bias.unwrap_or(0);
             let entry = if raw_entry != 0 {
@@ -368,7 +368,7 @@ pub fn boot_builtin(
         } else {
             let info = loader::load_binary(&data, GPA::new(RAM_BASE), as_)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            kernel_end = RAM_BASE + info.size;
+            kernel_end = info.high_addr;
             kernel_entry = Some(RAM_BASE);
         }
     }

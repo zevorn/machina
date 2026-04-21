@@ -9,6 +9,9 @@ pub struct LoadInfo {
     pub entry: GPA,
     /// Total bytes loaded.
     pub size: u64,
+    /// Highest guest physical address written
+    /// (load_addr + p_memsz of the last segment).
+    pub high_addr: u64,
     /// Load bias applied for ET_DYN images (None for ET_EXEC).
     pub bias: Option<u64>,
 }
@@ -20,9 +23,11 @@ pub fn load_binary(
     as_: &AddressSpace,
 ) -> Result<LoadInfo, String> {
     write_bytes(as_, addr, data);
+    let end = addr.0 + data.len() as u64;
     Ok(LoadInfo {
         entry: addr,
         size: data.len() as u64,
+        high_addr: end,
         bias: None,
     })
 }
@@ -121,6 +126,7 @@ pub fn load_elf(
     let is_dyn = hdr.e_type == ET_DYN;
 
     let mut total_loaded: u64 = 0;
+    let mut high_addr: u64 = 0;
 
     for i in 0..hdr.e_phnum {
         let off = hdr.e_phoff + i * hdr.e_phentsize;
@@ -176,6 +182,10 @@ pub fn load_elf(
         }
 
         total_loaded += p_memsz;
+        let seg_end = load_addr + p_memsz;
+        if seg_end > high_addr {
+            high_addr = seg_end;
+        }
     }
 
     // For ET_DYN the actual entry = base_addr + e_entry.
@@ -190,6 +200,7 @@ pub fn load_elf(
     Ok(LoadInfo {
         entry: GPA::new(entry),
         size: total_loaded,
+        high_addr,
         bias,
     })
 }
