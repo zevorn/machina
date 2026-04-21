@@ -2,7 +2,7 @@
 
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::mmio::VirtioMmioState;
 use crate::queue::{VirtQueue, VRING_DESC_F_WRITE};
@@ -247,7 +247,7 @@ pub struct VirtioNet {
     pub acked_features: u64,
     stop_flag: Arc<AtomicBool>,
     rx_handle: Option<std::thread::JoinHandle<()>>,
-    mmio_state: Option<Arc<Mutex<VirtioMmioState>>>,
+    mmio_state: Option<Weak<Mutex<VirtioMmioState>>>,
 }
 
 impl VirtioNet {
@@ -312,12 +312,14 @@ impl VirtioDevice for VirtioNet {
     }
 
     fn reset(&mut self) {
-        let mmio = self.mmio_state.take();
+        let weak = self.mmio_state.take();
         self.stop_rx_worker();
         self.acked_features = 0;
         self.stop_flag = Arc::new(AtomicBool::new(false));
-        if let Some(ms) = mmio {
-            self.start_rx_worker(ms);
+        if let Some(w) = weak {
+            if let Some(arc) = w.upgrade() {
+                self.start_rx_worker(arc);
+            }
         }
     }
 
@@ -408,16 +410,10 @@ impl VirtioNet {
             }
 
             // Skip the virtio-net header and send.
+            // Backpressure (EAGAIN) silently drops the
+            // frame — standard for network devices.
             if pkt.len() > hdr_size {
-                match self.backend.write_packet(&pkt[hdr_size..]) {
-                    Ok(n) if n > 0 => {}
-                    _ => {
-                        // Backpressure or error: don't
-                        // complete the buffer so the
-                        // guest can retry.
-                        break;
-                    }
-                }
+                let _ = self.backend.write_packet(&pkt[hdr_size..]);
             }
 
             let written = 0u32;
@@ -450,7 +446,7 @@ impl VirtioNet {
     /// fd and injects received packets into the RX queue.
     pub fn start_rx_worker(&mut self, mmio_state: Arc<Mutex<VirtioMmioState>>) {
         self.stop_rx_worker();
-        self.mmio_state = Some(Arc::clone(&mmio_state));
+        self.mmio_state = Some(Arc::downgrade(&mmio_state));
 
         self.stop_flag.store(false, Ordering::SeqCst);
         let stop = Arc::clone(&self.stop_flag);
