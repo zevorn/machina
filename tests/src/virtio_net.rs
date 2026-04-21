@@ -223,3 +223,37 @@ fn test_net_drop_joins_rx_thread() {
         elapsed
     );
 }
+
+#[test]
+fn test_net_reset_does_not_deadlock() {
+    let pipe = PipeBackend::new().unwrap();
+    let backend = Arc::new(pipe);
+    let net_backend: Arc<dyn machina_hw_virtio::net::NetBackend> =
+        Arc::clone(&backend) as _;
+    let net = VirtioNet::new_default(net_backend);
+    let sink = Arc::new(DummySink {
+        level: AtomicBool::new(false),
+    });
+    let irq = IrqLine::new(sink.clone() as Arc<dyn IrqSink>, 1);
+    let mmio = VirtioMmio::new(
+        Box::new(net),
+        irq,
+        std::ptr::null_mut(),
+        0x8000_0000,
+        128 * 1024 * 1024,
+    );
+    // Inject a packet so the RX worker has data.
+    backend.inject_packet(b"hello").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Reset via MMIO STATUS write (holds MMIO lock
+    // during device.reset()). Must not deadlock.
+    let start = std::time::Instant::now();
+    mmio.write(0x070, 4, 0); // STATUS = 0 → reset
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(300),
+        "reset deadlocked: {:?}",
+        elapsed
+    );
+    drop(mmio);
+}

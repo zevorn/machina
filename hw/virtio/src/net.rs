@@ -495,8 +495,12 @@ fn rx_worker_loop(
         };
         let packet = &buf[..n];
 
-        // Lock briefly to inject the packet.
-        let mut state = mmio_state.lock().unwrap();
+        // Non-blocking lock: if the transport is
+        // resetting, drop the packet and retry.
+        let mut state = match mmio_state.try_lock() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
         let (ram, ram_base, ram_size) = state.ram_info();
         let feats = state.negotiated_features();
         let hdr_size = if feats & VIRTIO_NET_F_MRG_RXBUF != 0 {

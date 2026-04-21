@@ -610,3 +610,52 @@ fn test_ref_machine_blk_device_unaffected() {
     let magic = as_.read(GPA::new(0x1000_1000), 4);
     assert_eq!(magic, 0x74726976); // "virt"
 }
+
+#[test]
+fn test_ref_machine_net_via_pipe_backend() {
+    use machina_hw_virtio::net::{PipeBackend, VirtioNet};
+    use std::sync::Arc;
+
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+
+    let pipe = PipeBackend::new().unwrap();
+    let net = VirtioNet::new_default(Arc::new(pipe));
+    m.add_virtio_net(net).expect("add_virtio_net failed");
+
+    let as_ = m.address_space();
+    assert!(
+        as_.is_mapped(GPA::new(0x1000_2000), 4),
+        "net MMIO should be mapped at 0x10002000"
+    );
+    let magic = as_.read(GPA::new(0x1000_2000), 4);
+    assert_eq!(magic, 0x74726976);
+    let dev_id = as_.read(GPA::new(0x1000_2000 + 0x008), 4);
+    assert_eq!(dev_id, 1); // net device
+
+    assert!(m
+        .sysbus()
+        .mappings()
+        .iter()
+        .any(|m| m.owner == "virtio-mmio1"));
+}
+
+#[test]
+fn test_ref_machine_net_fdt_node() {
+    use machina_hw_virtio::net::{PipeBackend, VirtioNet};
+    use std::sync::Arc;
+
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+
+    let pipe = PipeBackend::new().unwrap();
+    let net = VirtioNet::new_default(Arc::new(pipe));
+    m.add_virtio_net(net).expect("add_virtio_net failed");
+
+    let fdt = m.fdt_blob();
+    let node = b"virtio_mmio@10002000";
+    assert!(
+        fdt.windows(node.len()).any(|w| w == node),
+        "FDT should contain virtio_mmio@10002000"
+    );
+}

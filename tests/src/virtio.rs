@@ -208,11 +208,77 @@ fn test_multiqueue_blk_still_one_queue() {
 #[test]
 fn test_multiqueue_notify_queue1_with_driver_ok() {
     let (dev, _) = make_net_device();
-    // Set STATUS = DRIVER_OK (0x0f).
     dev.write(0x070, 4, 0x0f);
-    // QUEUE_NOTIFY for queue 1 (TX) should dispatch
-    // to handle_queue(1, ...) without crashing, even
-    // with no descriptors set up. No IRQ asserted
-    // because TX queue has no pending work.
     dev.write(0x050, 4, 1);
+}
+
+use std::sync::atomic::AtomicU32;
+
+struct SpyDevice {
+    called: Arc<AtomicU32>,
+    last_queue: Arc<AtomicU32>,
+}
+
+impl machina_hw_virtio::VirtioDevice for SpyDevice {
+    fn device_id(&self) -> u32 {
+        99
+    }
+    fn features(&self) -> u64 {
+        1 << 32
+    }
+    fn ack_features(&mut self, _f: u64) {}
+    fn num_queues(&self) -> usize {
+        2
+    }
+    fn config_read(&self, _offset: u64, _size: u32) -> u64 {
+        0
+    }
+    unsafe fn handle_queue(
+        &mut self,
+        idx: u32,
+        _queue: &mut VirtQueue,
+        _ram: *mut u8,
+        _ram_base: u64,
+        _ram_size: u64,
+    ) -> u32 {
+        self.called.fetch_add(1, Ordering::SeqCst);
+        self.last_queue.store(idx, Ordering::SeqCst);
+        0
+    }
+}
+
+#[test]
+fn test_queue1_notify_dispatches_handle_queue() {
+    let called = Arc::new(AtomicU32::new(0));
+    let last_q = Arc::new(AtomicU32::new(u32::MAX));
+    let spy = SpyDevice {
+        called: Arc::clone(&called),
+        last_queue: Arc::clone(&last_q),
+    };
+    let sink = Arc::new(DummySink {
+        level: AtomicBool::new(false),
+    });
+    let irq = IrqLine::new(sink.clone() as Arc<dyn IrqSink>, 1);
+    let dev = VirtioMmio::new(
+        Box::new(spy),
+        irq,
+        std::ptr::null_mut(),
+        0x8000_0000,
+        128 * 1024 * 1024,
+    );
+    // Set up queue 1: select, set size, mark ready.
+    dev.write(0x030, 4, 1); // QUEUE_SEL = 1
+    dev.write(0x038, 4, 16); // QUEUE_NUM = 16
+    dev.write(0x044, 4, 1); // QUEUE_READY = 1
+    dev.write(0x070, 4, 0x0f); // DRIVER_OK
+    dev.write(0x050, 4, 1); // QUEUE_NOTIFY q=1
+    assert!(
+        called.load(Ordering::SeqCst) > 0,
+        "handle_queue was not called"
+    );
+    assert_eq!(
+        last_q.load(Ordering::SeqCst),
+        1,
+        "wrong queue index dispatched"
+    );
 }

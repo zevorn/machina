@@ -260,6 +260,38 @@ impl RefMachine {
         self.sysbus.as_ref().expect("machine not initialized")
     }
 
+    /// Attach a pre-built VirtIO net device. Useful for
+    /// tests that cannot create a TapBackend.
+    pub fn add_virtio_net(
+        &mut self,
+        net: machina_hw_virtio::net::VirtioNet,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let plic = self.plic.as_ref().unwrap();
+        let plic_sink = Arc::new(PlicIrqSink(Arc::clone(plic)));
+        let net_irq =
+            IrqLine::new(plic_sink as Arc<dyn IrqSink>, REF_IRQMAP.virtio_net);
+        let ram_ptr = self.ram_block.as_ref().unwrap().as_ptr();
+        let ram_size = self.ram_size();
+        let net_mm = &REF_MEMMAP[RefMemMap::VirtioNet as usize];
+        let mut mmio = VirtioMmio::new_named(
+            "virtio-mmio1",
+            Box::new(net),
+            net_irq,
+            ram_ptr,
+            RAM_BASE,
+            ram_size,
+        );
+        let sysbus = self.sysbus.as_mut().unwrap();
+        mmio.attach_to_bus(sysbus)?;
+        let region = mmio.make_mmio_region("virtio-mmio1", net_mm.size);
+        mmio.register_mmio(region, GPA::new(net_mm.base))?;
+        let as_ = self.address_space.as_mut().unwrap();
+        mmio.realize_onto(sysbus, as_)?;
+        self.virtio_mmio_net = Some(mmio);
+        self.fdt_blob = Some(self.generate_fdt());
+        Ok(())
+    }
+
     pub fn lookup_object_by_path(&self, path: &str) -> Option<MObjectInfo> {
         self.mom_object_infos()
             .into_iter()
