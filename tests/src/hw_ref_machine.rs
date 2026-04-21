@@ -666,3 +666,39 @@ fn test_ref_machine_net_fdt_node() {
         "FDT net node should contain IRQ 12"
     );
 }
+
+#[test]
+fn test_ref_machine_blk_and_net_coexist() {
+    use machina_hw_virtio::net::{PipeBackend, VirtioNet};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let disk = dir.path().join("disk.raw");
+    {
+        let mut f = fs::File::create(&disk).unwrap();
+        f.write_all(&[0u8; 512]).unwrap();
+    }
+    let mut m = RefMachine::new();
+    let opts = MachineOpts {
+        drive: Some(disk),
+        ..default_opts()
+    };
+    m.init(&opts).expect("init failed");
+
+    let pipe = PipeBackend::new().unwrap();
+    let net = VirtioNet::new_default(Arc::new(pipe));
+    m.add_virtio_net(net).expect("add_virtio_net failed");
+
+    let as_ = m.address_space();
+    // Block device at 0x10001000 still works.
+    assert!(as_.is_mapped(GPA::new(0x1000_1000), 4));
+    assert_eq!(as_.read(GPA::new(0x1000_1000), 4), 0x74726976);
+    // Net device at 0x10002000 also works.
+    assert!(as_.is_mapped(GPA::new(0x1000_2000), 4));
+    assert_eq!(as_.read(GPA::new(0x1000_2000), 4), 0x74726976);
+    // Different device IDs.
+    let blk_id = as_.read(GPA::new(0x1000_1000 + 8), 4);
+    let net_id = as_.read(GPA::new(0x1000_2000 + 8), 4);
+    assert_eq!(blk_id, 2); // block
+    assert_eq!(net_id, 1); // net
+}

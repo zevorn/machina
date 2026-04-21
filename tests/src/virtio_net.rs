@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use machina_hw_virtio::net::{
-    parse_mac, PipeBackend, TapBackend, VirtioNet, DEFAULT_MAC,
+    parse_mac, NetBackend, PipeBackend, TapBackend, VirtioNet, DEFAULT_MAC,
     VIRTIO_NET_HDR_SIZE_BASE, VIRTIO_NET_HDR_SIZE_MRG,
 };
 use machina_hw_virtio::VirtioDevice;
@@ -319,4 +319,127 @@ fn test_net_irq_distinct_from_blk() {
         "net IRQ must differ from block IRQ"
     );
     assert_eq!(REF_IRQMAP.virtio_net, 12);
+}
+
+// ── AC-2: descriptor-backed TX test ──────────────────
+
+fn alloc_guest_ram(size: usize) -> *mut u8 {
+    // SAFETY: mmap anonymous pages for test guest RAM.
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(ptr, libc::MAP_FAILED, "mmap failed");
+    ptr as *mut u8
+}
+
+const RAM_BASE: u64 = 0x8000_0000;
+const RAM_SIZE: usize = 4 * 1024 * 1024;
+
+fn setup_tx_queue(
+    ram: *mut u8,
+    desc_off: u64,
+    avail_off: u64,
+    used_off: u64,
+    data_off: u64,
+    payload: &[u8],
+    hdr_size: usize,
+) {
+    // Write vnet header (zeros) + payload into data buf.
+    let data_ptr = unsafe { ram.add(data_off as usize) };
+    unsafe {
+        std::ptr::write_bytes(data_ptr, 0, hdr_size);
+        std::ptr::copy_nonoverlapping(
+            payload.as_ptr(),
+            data_ptr.add(hdr_size),
+            payload.len(),
+        );
+    }
+
+    let total = hdr_size + payload.len();
+    // Descriptor 0: points to data buffer.
+    let dp = unsafe { ram.add(desc_off as usize) };
+    unsafe {
+        (dp as *mut u64).write_unaligned(RAM_BASE + data_off);
+        (dp.add(8) as *mut u32).write_unaligned(total as u32);
+        (dp.add(12) as *mut u16).write_unaligned(0);
+        (dp.add(14) as *mut u16).write_unaligned(0);
+    }
+
+    // Avail ring: flags=0, idx=1, ring[0]=0.
+    let ap = unsafe { ram.add(avail_off as usize) };
+    unsafe {
+        (ap as *mut u16).write_unaligned(0); // flags
+        (ap.add(2) as *mut u16).write_unaligned(1); // idx
+        (ap.add(4) as *mut u16).write_unaligned(0); // ring[0]
+    }
+
+    // Used ring: flags=0, idx=0 (empty).
+    let up = unsafe { ram.add(used_off as usize) };
+    unsafe {
+        (up as *mut u16).write_unaligned(0);
+        (up.add(2) as *mut u16).write_unaligned(0);
+    }
+}
+
+#[test]
+fn test_net_tx_strips_header_and_sends() {
+    let ram = alloc_guest_ram(RAM_SIZE);
+    let pipe = PipeBackend::new().unwrap();
+    let pipe_arc = Arc::new(pipe);
+    let nb: Arc<dyn machina_hw_virtio::net::NetBackend> =
+        Arc::clone(&pipe_arc) as _;
+    let net = VirtioNet::new_default(nb);
+    let sink = Arc::new(DummySink {
+        level: AtomicBool::new(false),
+    });
+    let irq = IrqLine::new(sink.clone() as Arc<dyn IrqSink>, 1);
+    let dev =
+        VirtioMmio::new(Box::new(net), irq, ram, RAM_BASE, RAM_SIZE as u64);
+
+    let desc_off: u64 = 0x1000;
+    let avail_off: u64 = 0x2000;
+    let used_off: u64 = 0x3000;
+    let data_off: u64 = 0x4000;
+    let payload = b"ETHERNET_FRAME_DATA";
+    let hdr_size = VIRTIO_NET_HDR_SIZE_BASE;
+
+    setup_tx_queue(
+        ram, desc_off, avail_off, used_off, data_off, payload, hdr_size,
+    );
+
+    // Configure TX queue (queue 1).
+    dev.write(0x030, 4, 1); // QUEUE_SEL = 1
+    dev.write(0x038, 4, 16); // QUEUE_NUM = 16
+    dev.write(0x080, 4, (RAM_BASE + desc_off) & 0xFFFF_FFFF);
+    dev.write(0x084, 4, (RAM_BASE + desc_off) >> 32);
+    dev.write(0x090, 4, (RAM_BASE + avail_off) & 0xFFFF_FFFF);
+    dev.write(0x094, 4, (RAM_BASE + avail_off) >> 32);
+    dev.write(0x0a0, 4, (RAM_BASE + used_off) & 0xFFFF_FFFF);
+    dev.write(0x0a4, 4, (RAM_BASE + used_off) >> 32);
+    dev.write(0x044, 4, 1); // QUEUE_READY = 1
+    dev.write(0x070, 4, 0x0f); // STATUS = DRIVER_OK
+
+    // Kick TX queue.
+    dev.write(0x050, 4, 1); // QUEUE_NOTIFY = 1
+
+    // Read what the backend received.
+    let mut recv_buf = [0u8; 256];
+    let n = pipe_arc.read_packet(&mut recv_buf).unwrap();
+    assert_eq!(
+        &recv_buf[..n],
+        payload,
+        "TX should strip vnet header and send payload"
+    );
+
+    drop(dev);
+    unsafe {
+        libc::munmap(ram as *mut libc::c_void, RAM_SIZE);
+    }
 }
