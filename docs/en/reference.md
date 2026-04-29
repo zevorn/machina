@@ -1397,26 +1397,26 @@ APIs.
 **Test pyramid**:
 
 ```
-              +----------------+
-              |    Difftest    |  machina vs QEMU
-              |   (35 tests)   |
-              +----------------+
-              |    Frontend    |  decode -> IR -> codegen -> execute
-              |   (91 tests)   |  RV32I/RV64I/RVC/RV32F
-              +----------------+
-              |  Integration   |  IR -> liveness -> regalloc
-              |  (105 tests)   |  -> codegen -> execute
-              +----------------+
-              |    Machine     |  mtest framework, device tests
-              |   (48 tests)   |  boot tests, MMIO validation
-         +----+----------------+----+
-         |        Unit Tests        |  core(192) + accel(256)
-         |       (685 tests)        |  + decode(93) + exec(26)
-         |                          |  + machine(118)
-         +--+----+----+----+----+---+
+              +-------------------+
+              |     Difftest      |  machina vs QEMU
+              |    (35 tests)     |
+              +-------------------+
+              |     Frontend      |  decode -> IR -> codegen
+              |   (252 tests)     |  -> execute
+              +-------------------+  RV32I/RV64I/RVC/RV32F/Zb*
+              |   Integration     |  IR -> liveness -> regalloc
+              |   (105 tests)     |  -> codegen -> execute
+              +-------------------+
+              | System & Hardware |  RISC-V CSR/MMU/PMP, devices
+              |   (277 tests)     |  VirtIO, boot, exec loop
+         +----+-------------------+----+
+         |          Unit Tests         |  core(224) + backend(277)
+         |         (756 tests)         |  + decode(93) + softfloat(62)
+         |                             |  + gdbstub(57) + misc(43)
+         +----+----+----+----+----+----+
 ```
 
-**Total: 964 tests**.
+**Total: 1425 tests**.
 
 ---
 
@@ -1426,41 +1426,39 @@ APIs.
 
 ```
 tests/
-+-- Cargo.toml                    # Dependencies: core, accel,
-|                                 #   frontend, decode
++-- Cargo.toml
 +-- src/
-|   +-- lib.rs                    # Module declarations
-|   +-- core/                     # Core IR unit tests (192)
-|   |   +-- context.rs
-|   |   +-- label.rs
-|   |   +-- op.rs
-|   |   +-- opcode.rs
-|   |   +-- regset.rs
-|   |   +-- tb.rs
-|   |   +-- temp.rs
-|   |   +-- types.rs
-|   +-- backend/                  # Backend unit tests (256)
-|   |   +-- code_buffer.rs
-|   |   +-- x86_64.rs
-|   |   +-- mod.rs
+|   +-- lib.rs                    # 37 module declarations
+|   +-- core.rs                   # Core IR unit tests (219)
+|   +-- core_address.rs           # Address type tests (5)
+|   +-- backend/                  # Backend unit tests (277)
 |   +-- decode/                   # Decoder generator tests (93)
-|   |   +-- mod.rs
 |   +-- frontend/                 # Frontend instruction tests
-|   |   +-- mod.rs                #   (91 + 35)
-|   |   +-- difftest.rs           #   RV32I/RV64I/RVC execution
-|   +-- integration/              #   machina vs QEMU differential
-|   |   +-- mod.rs                # Integration tests (105)
-|   +-- exec/                     # Execution loop tests (26)
-|   |   +-- mod.rs
-|   +-- machine/                  # Machine-level tests (48)
-|       +-- mod.rs                #   mtest framework entry
-|       +-- device.rs             #   Device model tests
-|       +-- boot.rs               #   Boot flow tests
+|   |   +-- mod.rs                #   RV32I/RV64I/RVC/RV32F (116)
+|   |   +-- difftest.rs           #   machina vs QEMU (35)
+|   |   +-- riscv_zba.rs          #   Zba extension (17)
+|   |   +-- riscv_zbb.rs          #   Zbb extension (34)
+|   |   +-- riscv_zbc.rs          #   Zbc extension (22)
+|   |   +-- riscv_zbs.rs          #   Zbs extension (28)
+|   +-- integration/              # Integration tests (105)
+|   +-- exec/                     # Execution loop tests (31)
+|   +-- softmmu.rs                # Software MMU tests (28)
+|   +-- softmmu_exec.rs           # SoftMMU exec tests (11)
+|   +-- softfloat.rs              # IEEE 754 tests (62)
+|   +-- gdbstub.rs                # GDB protocol tests (57)
+|   +-- disas_bitmanip.rs         # Disassembler tests (43)
+|   +-- monitor.rs                # Monitor console tests (20)
+|   +-- hw_*.rs                   # Hardware device tests (108)
+|   +-- virtio.rs                 # VirtIO core tests (16)
+|   +-- virtio_net.rs             # VirtIO net tests (28)
+|   +-- riscv_*.rs                # RISC-V subsystem tests (38)
+|   +-- system_cpu_manager.rs     # CPU manager tests (6)
+|   +-- ...                       # Other modules
 +-- mtest/                        # mtest test firmware
     +-- Makefile
     +-- src/
         +-- uart_echo.S           # UART loopback test
-        +-- timer_irq.S          # Timer interrupt test
+        +-- timer_irq.S           # Timer interrupt test
         +-- boot_hello.S          # Minimal boot test
 ```
 
@@ -1468,21 +1466,26 @@ tests/
 
 | Module | Tests | Share | Description |
 |--------|-------|-------|-------------|
-| backend | 256 | 26.6% | x86-64 instruction encoding, code buffer |
-| core | 192 | 19.9% | IR types, Opcode, Temp, Label, Op, Context |
-| machine | 118 | 12.2% | Device models, MMIO dispatch, boot flow |
-| integration | 105 | 10.9% | IR --> codegen --> execute full pipeline |
-| decode | 93 | 9.6% | .decode parsing, code generation, field extraction |
-| frontend | 91 | 9.4% | RISC-V instruction execution (incl. RVC, RV32F) |
-| mtest | 48 | 5.0% | Machine-level firmware tests (UART/Timer/Boot) |
-| difftest | 35 | 3.6% | machina vs QEMU differential comparison |
-| exec | 26 | 2.7% | TB cache, execution loop, multi-threaded vCPU concurrency |
+| backend | 277 | 19.4% | x86-64 instruction encoding, code buffer |
+| frontend | 252 | 17.7% | RISC-V instruction execution (RV32I/RV64I/RVC/RV32F/Zb*) |
+| core | 224 | 15.7% | IR types, Opcode, Temp, Label, Op, Context, Address |
+| hw_* | 108 | 7.6% | Device models: PLIC, ACLINT, UART, QDev, SysBus, FDT |
+| integration | 105 | 7.4% | IR --> codegen --> execute full pipeline |
+| decode | 93 | 6.5% | .decode parsing, code generation, field extraction |
+| softfloat | 62 | 4.4% | IEEE 754 floating-point operations |
+| gdbstub | 57 | 4.0% | GDB remote protocol handling |
+| disas_bitmanip | 43 | 3.0% | Disassembler and bit-manipulation tests |
+| virtio | 44 | 3.1% | VirtIO MMIO transport, block, and net devices |
+| exec | 31 | 2.2% | TB cache, execution loop, multi-threaded vCPU |
+| riscv_* | 38 | 2.7% | CSR, MMU, PMP, exception handling |
+| difftest | 35 | 2.5% | machina vs QEMU differential comparison |
+| other | 56 | 3.9% | Monitor, softmmu, system, tools, trace |
 
 ---
 
 ### 4. Unit Tests
 
-#### 4.1 Core Module (192 tests)
+#### 4.1 Core Module (224 tests)
 
 Verifies correctness of the IR foundational data structures.
 
@@ -1501,7 +1504,7 @@ Verifies correctness of the IR foundational data structures.
 cargo test -p machina-tests core::
 ```
 
-#### 4.2 Backend Module (256 tests)
+#### 4.2 Backend Module (277 tests)
 
 Verifies correctness of the x86-64 instruction encoder.
 
@@ -1569,7 +1572,7 @@ cargo test -p machina-tests integration::
 
 ---
 
-### 6. Frontend Instruction Tests (91 tests)
+### 6. Frontend Instruction Tests (252 tests)
 
 **Source file**: `tests/src/frontend/mod.rs`
 

@@ -8,7 +8,7 @@
 
 Machina is a RISC-V full-system emulator that reimplements QEMU's TCG (Tiny Code Generator) dynamic binary translation engine in Rust. It translates guest architecture instructions into host machine code at runtime, and provides complete device models, a memory subsystem, and interrupt controllers to support full-system emulation.
 
-For the current MOM device-model architecture, see `reference.md#device-model-reference`.
+For the current MOM device-model architecture, see [Device Model Reference](reference.md#part-3-device-model-reference).
 
 ```
 +-------------+    +------------+    +--------+    +-----------+    +----------+

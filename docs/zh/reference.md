@@ -1322,26 +1322,26 @@ Machina 采用分层测试策略，从底层数据结构到完整的全系统模
 **测试金字塔**：
 
 ```
-              +----------------+
-              |    Difftest    |  machina vs QEMU
-              |   (35 tests)   |
-              +----------------+
-              |    Frontend    |  decode -> IR -> codegen -> execute
-              |   (91 tests)   |  RV32I/RV64I/RVC/RV32F
-              +----------------+
-              |  Integration   |  IR -> liveness -> regalloc
-              |  (105 tests)   |  -> codegen -> execute
-              +----------------+
-              |    Machine     |  mtest framework, device tests
-              |   (48 tests)   |  boot tests, MMIO validation
-         +----+----------------+----+
-         |        Unit Tests        |  core(192) + accel(256)
-         |       (685 tests)        |  + decode(93) + exec(26)
-         |                          |  + machine(118)
-         +--+----+----+----+----+---+
+              +-------------------+
+              |     Difftest      |  machina vs QEMU
+              |    (35 tests)     |
+              +-------------------+
+              |     Frontend      |  decode -> IR -> codegen
+              |   (252 tests)     |  -> execute
+              +-------------------+  RV32I/RV64I/RVC/RV32F/Zb*
+              |   Integration     |  IR -> liveness -> regalloc
+              |   (105 tests)     |  -> codegen -> execute
+              +-------------------+
+              | System & Hardware |  RISC-V CSR/MMU/PMP, devices
+              |   (277 tests)     |  VirtIO, boot, exec loop
+         +----+-------------------+----+
+         |          Unit Tests         |  core(224) + backend(277)
+         |         (756 tests)         |  + decode(93) + softfloat(62)
+         |                             |  + gdbstub(57) + misc(43)
+         +----+----+----+----+----+----+
 ```
 
-**总计：964 个测试**。
+**总计：1425 个测试**。
 
 ---
 
@@ -1351,36 +1351,34 @@ Machina 采用分层测试策略，从底层数据结构到完整的全系统模
 
 ```
 tests/
-+-- Cargo.toml                    # 依赖：core, accel, frontend,
-|                                 #        decode
++-- Cargo.toml
 +-- src/
-|   +-- lib.rs                    # 模块声明
-|   +-- core/                     # 核心 IR 单元测试 (192)
-|   |   +-- context.rs
-|   |   +-- label.rs
-|   |   +-- op.rs
-|   |   +-- opcode.rs
-|   |   +-- regset.rs
-|   |   +-- tb.rs
-|   |   +-- temp.rs
-|   |   +-- types.rs
-|   +-- backend/                  # 后端单元测试 (256)
-|   |   +-- code_buffer.rs
-|   |   +-- x86_64.rs
-|   |   +-- mod.rs
+|   +-- lib.rs                    # 37 个模块声明
+|   +-- core.rs                   # 核心 IR 单元测试 (219)
+|   +-- core_address.rs           # 地址类型测试 (5)
+|   +-- backend/                  # 后端单元测试 (277)
 |   +-- decode/                   # 解码器生成器测试 (93)
-|   |   +-- mod.rs
-|   +-- frontend/                 # 前端指令测试 (91 + 35)
-|   |   +-- mod.rs                #   RV32I/RV64I/RVC 执行
-|   |   +-- difftest.rs           #   machina vs QEMU 差分
+|   +-- frontend/                 # 前端指令测试
+|   |   +-- mod.rs                #   RV32I/RV64I/RVC/RV32F (116)
+|   |   +-- difftest.rs           #   machina vs QEMU (35)
+|   |   +-- riscv_zba.rs          #   Zba 扩展 (17)
+|   |   +-- riscv_zbb.rs          #   Zbb 扩展 (34)
+|   |   +-- riscv_zbc.rs          #   Zbc 扩展 (22)
+|   |   +-- riscv_zbs.rs          #   Zbs 扩展 (28)
 |   +-- integration/              # 集成测试 (105)
-|   |   +-- mod.rs
-|   +-- exec/                     # 执行循环测试 (26)
-|   |   +-- mod.rs
-|   +-- machine/                  # 机器级测试 (48)
-|       +-- mod.rs                #   mtest 框架入口
-|       +-- device.rs             #   设备模型测试
-|       +-- boot.rs               #   引导流程测试
+|   +-- exec/                     # 执行循环测试 (31)
+|   +-- softmmu.rs                # 软件 MMU 测试 (28)
+|   +-- softmmu_exec.rs           # SoftMMU 执行测试 (11)
+|   +-- softfloat.rs              # IEEE 754 测试 (62)
+|   +-- gdbstub.rs                # GDB 协议测试 (57)
+|   +-- disas_bitmanip.rs         # 反汇编器测试 (43)
+|   +-- monitor.rs                # 控制台测试 (20)
+|   +-- hw_*.rs                   # 硬件设备测试 (108)
+|   +-- virtio.rs                 # VirtIO 核心测试 (16)
+|   +-- virtio_net.rs             # VirtIO 网络测试 (28)
+|   +-- riscv_*.rs                # RISC-V 子系统测试 (38)
+|   +-- system_cpu_manager.rs     # CPU 管理器测试 (6)
+|   +-- ...                       # 其他模块
 +-- mtest/                        # mtest 测试固件
     +-- Makefile
     +-- src/
@@ -1393,21 +1391,26 @@ tests/
 
 | 模块 | 测试数 | 占比 | 说明 |
 |------|--------|------|------|
-| backend | 256 | 26.6% | x86-64 指令编码、代码缓冲区 |
-| core | 192 | 19.9% | IR 类型、Opcode、Temp、Label、Op、Context |
-| machine | 118 | 12.2% | 设备模型、MMIO 分发、引导流程 |
-| integration | 105 | 10.9% | IR --> codegen --> 执行全流水线 |
-| decode | 93 | 9.6% | .decode 解析、代码生成、字段提取 |
-| frontend | 91 | 9.4% | RISC-V 指令执行（含 RVC、RV32F） |
-| mtest | 48 | 5.0% | 机器级固件测试（UART/Timer/Boot） |
-| difftest | 35 | 3.6% | machina vs QEMU 差分对比 |
-| exec | 26 | 2.7% | TB 缓存、执行循环、多 vCPU 并发 |
+| backend | 277 | 19.4% | x86-64 指令编码、代码缓冲区 |
+| frontend | 252 | 17.7% | RISC-V 指令执行（RV32I/RV64I/RVC/RV32F/Zb*） |
+| core | 224 | 15.7% | IR 类型、Opcode、Temp、Label、Op、Context、Address |
+| hw_* | 108 | 7.6% | 设备模型：PLIC、ACLINT、UART、QDev、SysBus、FDT |
+| integration | 105 | 7.4% | IR --> codegen --> 执行全流水线 |
+| decode | 93 | 6.5% | .decode 解析、代码生成、字段提取 |
+| softfloat | 62 | 4.4% | IEEE 754 浮点运算 |
+| gdbstub | 57 | 4.0% | GDB 远程协议处理 |
+| disas_bitmanip | 43 | 3.0% | 反汇编器和位操作测试 |
+| virtio | 44 | 3.1% | VirtIO MMIO 传输、块和网络设备 |
+| exec | 31 | 2.2% | TB 缓存、执行循环、多 vCPU |
+| riscv_* | 38 | 2.7% | CSR、MMU、PMP、异常处理 |
+| difftest | 35 | 2.5% | machina vs QEMU 差分对比 |
+| 其他 | 56 | 3.9% | 控制台、softmmu、系统、工具、跟踪 |
 
 ---
 
 ### 4. 单元测试
 
-#### 4.1 Core 模块（192 tests）
+#### 4.1 Core 模块（224 tests）
 
 验证 IR 基础数据结构的正确性。
 
@@ -1426,7 +1429,7 @@ tests/
 cargo test -p machina-tests core::
 ```
 
-#### 4.2 Backend 模块（256 tests）
+#### 4.2 Backend 模块（277 tests）
 
 验证 x86-64 指令编码器的正确性。
 
@@ -1492,7 +1495,7 @@ cargo test -p machina-tests integration::
 
 ---
 
-### 6. 前端指令测试（91 tests）
+### 6. 前端指令测试（252 tests）
 
 **源文件**：`tests/src/frontend/mod.rs`
 
