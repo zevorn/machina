@@ -1397,7 +1397,7 @@ tests/
 | hw_* | 108 | 7.6% | 设备模型：PLIC、ACLINT、UART、QDev、SysBus、FDT |
 | integration | 105 | 7.4% | IR --> codegen --> 执行全流水线 |
 | decode | 93 | 6.5% | .decode 解析、代码生成、字段提取 |
-| 其他 | 91 | 6.4% | 定时器、CLI netdev、内存区域、控制台、softmmu、CPU 管理器、工具、跟踪 |
+| 其他 | 91 | 6.4% | accel_timer、cli_netdev、memory_region、monitor、softmmu、softmmu_exec、system_cpu_manager、tools、trace |
 | softfloat | 62 | 4.4% | IEEE 754 浮点运算 |
 | gdbstub | 57 | 4.0% | GDB 远程协议处理 |
 | virtio | 44 | 3.1% | VirtIO MMIO 传输、块和网络设备 |
@@ -1497,7 +1497,13 @@ cargo test -p machina-tests integration::
 
 ### 6. 前端指令测试（217 tests）
 
-**源文件**：`tests/src/frontend/mod.rs`
+**源文件**：`tests/src/frontend/mod.rs`（116 tests）、
+`tests/src/frontend/riscv_zba.rs`（17）、
+`tests/src/frontend/riscv_zbb.rs`（34）、
+`tests/src/frontend/riscv_zbc.rs`（22）、
+`tests/src/frontend/riscv_zbs.rs`（28）。
+`tests/src/frontend/difftest.rs` 中的 35 个差分测试不计入此处，
+在第 7 节单独记录。
 
 #### 6.1 测试运行器
 

@@ -1472,7 +1472,7 @@ tests/
 | hw_* | 108 | 7.6% | Device models: PLIC, ACLINT, UART, QDev, SysBus, FDT |
 | integration | 105 | 7.4% | IR --> codegen --> execute full pipeline |
 | decode | 93 | 6.5% | .decode parsing, code generation, field extraction |
-| other | 91 | 6.4% | Timer, CLI netdev, memory region, monitor, softmmu, CPU manager, tools, trace |
+| other | 91 | 6.4% | accel_timer, cli_netdev, memory_region, monitor, softmmu, softmmu_exec, system_cpu_manager, tools, trace |
 | softfloat | 62 | 4.4% | IEEE 754 floating-point operations |
 | gdbstub | 57 | 4.0% | GDB remote protocol handling |
 | virtio | 44 | 3.1% | VirtIO MMIO transport, block, and net devices |
@@ -1574,7 +1574,13 @@ cargo test -p machina-tests integration::
 
 ### 6. Frontend Instruction Tests (217 tests)
 
-**Source file**: `tests/src/frontend/mod.rs`
+**Source files**: `tests/src/frontend/mod.rs` (116 tests),
+`tests/src/frontend/riscv_zba.rs` (17),
+`tests/src/frontend/riscv_zbb.rs` (34),
+`tests/src/frontend/riscv_zbc.rs` (22),
+`tests/src/frontend/riscv_zbs.rs` (28).
+The 35 differential tests in `tests/src/frontend/difftest.rs`
+are excluded here and documented separately in Section 7.
 
 #### 6.1 Test Runners
 
