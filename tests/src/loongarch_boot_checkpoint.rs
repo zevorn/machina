@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use machina_accel::exec::{ExecEnv, ExitReason};
+use machina_accel::exec::{cpu_exec_loop_env, ExecEnv, ExitReason};
 use machina_accel::ir::tb::EXCP_LOONGARCH_WFI;
 use machina_accel::{ArchExitAction, GuestCpu, X86_64CodeGen};
 use machina_core::address::GPA;
@@ -30,6 +30,7 @@ use machina_system::loongarch_cpu::{
 use machina_system::CpuManager;
 
 const IDLE_OP: u32 = 0b00000110010010001;
+const OP_ADDI_D: u32 = 0b0000001011;
 const OP_LD_D: u32 = 0b0010100011;
 const TIMER_INTERRUPT: u64 = 1 << 11;
 const TASK48_CP4_BOOT_TIMEOUT: &str = "20s";
@@ -221,10 +222,11 @@ fn task47_loongarch_wfi_expires_enabled_timer_for_cp3() {
 }
 
 #[test]
-fn task47_loongarch_runtime_tb_tick_expires_enabled_timer_for_cp3() {
+fn task85_check_mem_fault_does_not_tick_enabled_timer() {
     let ram = [0u32; 4];
     let mut cpu = LoongArchCpu::new();
-    cpu.csr_write(CSR_TCFG, 0x0011);
+    cpu.csr_write(CSR_TCFG, 0x0101);
+    let before = cpu.tval();
 
     let mut sys = unsafe {
         LoongArchFullSystemCpu::new(
@@ -237,11 +239,11 @@ fn task47_loongarch_runtime_tb_tick_expires_enabled_timer_for_cp3() {
         )
     };
 
-    assert!(!sys.check_mem_fault());
-    assert_eq!(
-        sys.cpu.csr_read(CSR_ESTAT) & TIMER_INTERRUPT,
-        TIMER_INTERRUPT
-    );
+    for _ in 0..4 {
+        assert!(!sys.check_mem_fault());
+    }
+    assert_eq!(sys.cpu.tval(), before);
+    assert_eq!(sys.cpu.csr_read(CSR_ESTAT) & TIMER_INTERRUPT, 0);
 }
 
 #[test]
@@ -277,9 +279,44 @@ fn task48_periodic_timer_does_not_refire_immediately_after_ticlr() {
     }
     assert_eq!(
         sys.cpu.csr_read(CSR_ESTAT) & TIMER_INTERRUPT,
-        TIMER_INTERRUPT,
-        "periodic timer must refire after enough virtual cycles elapse"
+        0,
+        "fault polling must not advance the periodic timer"
     );
+}
+
+#[test]
+fn task85_timer_advances_once_from_executed_tb_not_fault_polling() {
+    let code = [r2_si12(OP_ADDI_D, 0, 0, 0), 0];
+    let mut cpu = LoongArchCpu::new();
+    cpu.csr_write(CSR_CRMD, CRMD_DA);
+    cpu.csr_write(CSR_TCFG, 0x0101);
+
+    let mut sys = unsafe {
+        LoongArchFullSystemCpu::new(
+            cpu,
+            code.as_ptr().cast::<u8>(),
+            0,
+            (code.len() * 4) as u64,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )
+    };
+
+    let mut backend = X86_64CodeGen::new();
+    backend.set_guest_base_offset(GUEST_BASE_CPU_OFFSET);
+    backend.mmio = Some(loongarch_soft_mmu_config());
+    backend.neg_align_off = i32::try_from(NEG_ALIGN_CPU_OFFSET).unwrap();
+    let mut env = ExecEnv::new(backend);
+
+    let exit = unsafe { cpu_exec_loop_env(&mut env, &mut sys) };
+
+    assert_eq!(exit, ExitReason::Halted);
+    assert_eq!(
+        sys.cpu.tval(),
+        0x100 - 2,
+        "two translated LoongArch instructions must count as two timer cycles"
+    );
+    assert_eq!(sys.cpu.csr_read(CSR_ESTAT) & TIMER_INTERRUPT, 0);
 }
 
 #[test]

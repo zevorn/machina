@@ -174,6 +174,7 @@ where
         let (last_tb, exit_code) = decode_tb_exit(raw_exit);
 
         let src_tb = last_tb.unwrap_or(tb_idx);
+        cpu.on_tb_executed(shared.tb_store.get(src_tb).size);
 
         // Self-modifying code detection: if stores wrote
         // to pages containing translated code, invalidate

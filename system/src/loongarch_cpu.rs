@@ -28,7 +28,6 @@ const TARGET_PAGE_SIZE: u64 = 0x1000;
 const TARGET_PAGE_MASK: u64 = !(TARGET_PAGE_SIZE - 1);
 const TARGET_PAGE_OFFSET_MASK: u64 = TARGET_PAGE_SIZE - 1;
 const LOONGARCH_MAX_TB_INSNS: u32 = 64;
-const RUNTIME_TIMER_TICK: u64 = LOONGARCH_MAX_TB_INSNS as u64;
 
 #[must_use]
 pub fn loongarch_soft_mmu_config() -> SoftMmuConfig {
@@ -217,8 +216,13 @@ impl GuestCpu for LoongArchFullSystemCpu {
 
     fn check_mem_fault(&mut self) -> bool {
         self.apply_async_interrupts();
-        self.cpu.timer_tick(RUNTIME_TIMER_TICK);
         self.cpu.take_translation_fault_pending()
+    }
+
+    fn on_tb_executed(&mut self, guest_size: u32) {
+        self.apply_async_interrupts();
+        let insns = (guest_size / 4).max(1);
+        self.cpu.timer_tick(u64::from(insns));
     }
 
     fn set_exit_request(&mut self) {
@@ -405,6 +409,12 @@ fn translate_for_helper(
 
 unsafe fn read_phys_sized(cpu: *const LoongArchCpu, pa: u64, size: u32) -> u64 {
     let cpu_ref = &*cpu;
+    let address_space = address_space_for(cpu_ref);
+    if let Some(as_) = address_space {
+        if as_.is_mapped(GPA::new(pa), size) {
+            return as_.read(GPA::new(pa), size);
+        }
+    }
     if pa >= cpu_ref.ram_base_val()
         && pa
             .checked_add(u64::from(size))
@@ -418,8 +428,7 @@ unsafe fn read_phys_sized(cpu: *const LoongArchCpu, pa: u64, size: u32) -> u64 {
             8 => (ptr as *const u64).read_unaligned(),
             _ => 0,
         }
-    } else if cpu_ref.address_space_ptr() != 0 {
-        let as_ = &*(cpu_ref.address_space_ptr() as *const AddressSpace);
+    } else if let Some(as_) = address_space {
         as_.read(GPA::new(pa), size)
     } else {
         0
@@ -442,6 +451,13 @@ unsafe fn write_phys_sized(
     size: u32,
 ) {
     let cpu_ref = &*cpu;
+    let address_space = address_space_for(cpu_ref);
+    if let Some(as_) = address_space {
+        if as_.is_mapped(GPA::new(pa), size) {
+            as_.write(GPA::new(pa), size, val);
+            return;
+        }
+    }
     if pa >= cpu_ref.ram_base_val()
         && pa
             .checked_add(u64::from(size))
@@ -455,9 +471,17 @@ unsafe fn write_phys_sized(
             8 => (ptr as *mut u64).write_unaligned(val),
             _ => {}
         }
-    } else if cpu_ref.address_space_ptr() != 0 {
-        let as_ = &*(cpu_ref.address_space_ptr() as *const AddressSpace);
+    } else if let Some(as_) = address_space {
         as_.write(GPA::new(pa), size, val);
+    }
+}
+
+unsafe fn address_space_for(cpu_ref: &LoongArchCpu) -> Option<&AddressSpace> {
+    let ptr = cpu_ref.address_space_ptr();
+    if ptr == 0 {
+        None
+    } else {
+        Some(&*(ptr as *const AddressSpace))
     }
 }
 

@@ -16,10 +16,10 @@ use machina_guest_loongarch::loongarch::csr::{
 };
 use machina_hw_loongarch::interrupt::LOONGARCH_DEVICE_HWI;
 use machina_hw_loongarch::virt_machine::{
-    LoongArchVirtMachine, VIRT_UART_BASE,
+    LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_IPI_BASE, VIRT_UART_BASE,
 };
 use machina_system::loongarch_cpu::{
-    loongarch_soft_mmu_config, LoongArchFullSystemCpu,
+    loongarch_mem_write, loongarch_soft_mmu_config, LoongArchFullSystemCpu,
 };
 use machina_system::CpuManager;
 
@@ -176,6 +176,62 @@ fn task83_runtime_cpu_owns_jit_state_and_receives_async_uart_irq() {
     assert!(runtime_cpu.pending_interrupt());
     runtime_cpu.handle_interrupt();
     assert_eq!(runtime_cpu.cpu.pc(), 0x1000);
+}
+
+#[test]
+fn task85_runtime_low_mmio_dispatches_before_low_ram_fast_path() {
+    let mut opts = default_opts();
+    opts.ram_size = 64 * 1024 * 1024;
+
+    let mut machine = LoongArchVirtMachine::new();
+    machine.init(&opts).unwrap();
+
+    let mut runtime_cpu = take_runtime_cpu(
+        &mut machine,
+        opts.ram_size,
+        Arc::new(AtomicBool::new(true)),
+    );
+    runtime_cpu.cpu.csr_write(CSR_CRMD, CRMD_DA);
+
+    let ipi_enable_pa = VIRT_IPI_BASE + 0x004;
+    let eiointc_enable_pa = VIRT_EIOINTC_BASE + 0x0200;
+    let ram = machine.ram_block().as_ptr();
+    unsafe {
+        (ram.add(ipi_enable_pa as usize) as *mut u32)
+            .write_unaligned(0x1122_3344);
+        (ram.add(eiointc_enable_pa as usize) as *mut u32)
+            .write_unaligned(0x5566_7788);
+
+        loongarch_mem_write(
+            runtime_cpu.env_ptr(),
+            ipi_enable_pa,
+            0xa5a5_5a5a,
+            4,
+        );
+        loongarch_mem_write(
+            runtime_cpu.env_ptr(),
+            eiointc_enable_pa,
+            0x0000_00f0,
+            4,
+        );
+    }
+
+    assert_eq!(
+        unsafe {
+            (ram.add(ipi_enable_pa as usize) as *const u32).read_unaligned()
+        },
+        0x1122_3344,
+        "IPI MMIO must not be shadowed by low runtime RAM"
+    );
+    assert_eq!(
+        unsafe {
+            (ram.add(eiointc_enable_pa as usize) as *const u32).read_unaligned()
+        },
+        0x5566_7788,
+        "EIOINTC MMIO must not be shadowed by low runtime RAM"
+    );
+    assert_eq!(machine.ipi().mmio_read_sized(0, 0x004, 4), 0xa5a5_5a5a);
+    assert_eq!(machine.eiointc().mmio_read_sized(0, 0x0200, 4), 0xf0);
 }
 
 #[test]

@@ -115,6 +115,10 @@ pub trait GuestCpu {
         false
     }
 
+    /// Advance architecture runtime state after one translated TB executed.
+    /// `guest_size` is the translated guest byte span for the TB.
+    fn on_tb_executed(&mut self, _guest_size: u32) {}
+
     /// Returns true if all TBs should be invalidated
     /// (e.g. after satp write). Clears the flag.
     fn take_tb_flush_pending(&mut self) -> bool {
