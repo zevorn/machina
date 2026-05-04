@@ -3934,6 +3934,100 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         true
     }
 
+    fn trans_tlbclr(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsEmpty,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_LOONGARCH_DONE);
+        ir.gen_set_label(label_ok);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_tlbclr as *const () as u64,
+            &[env_tmp],
+        );
+        let pc_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_tlbflush(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsEmpty,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_LOONGARCH_DONE);
+        ir.gen_set_label(label_ok);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_tlbflush as *const () as u64,
+            &[env_tmp],
+        );
+        let pc_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_cacop(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsCopRSi12,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_LOONGARCH_DONE);
+        ir.gen_set_label(label_ok);
+        true
+    }
+
     fn trans_lddir(
         &mut self,
         ir: &mut Context,

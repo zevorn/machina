@@ -34,9 +34,12 @@ const OP_ST_W: u32 = 0b0010100110;
 const OP_ST_D: u32 = 0b0010100111;
 const OP_JIRL: u32 = 0b010011;
 const TLBSRCH_INSN: u32 = 0x0648_2800;
+const TLBCLR_INSN: u32 = 0x0648_2000;
+const TLBFLUSH_INSN: u32 = 0x0648_2400;
 const TLBRD_INSN: u32 = 0x0648_2C00;
 const TLBWR_INSN: u32 = 0x0648_3000;
 const TLBFILL_INSN: u32 = 0x0648_3400;
+const CACOP_OP: u32 = 0b0000011000;
 const INVTLB_OP: u32 = 0b00000110010010011;
 const IBAR_OP: u32 = 0b00111000011100101;
 const LDDIR_OP: u32 = 0b00000110010000;
@@ -161,6 +164,10 @@ fn r2_insn(op: u32, rj: u32, rd: u32) -> u32 {
 
 fn r2_si12(op: u32, si12: i16, rj: u32, rd: u32) -> u32 {
     (op << 22) | ((si12 as u16 as u32 & 0x0FFF) << 10) | (rj << 5) | rd
+}
+
+fn cop_r_si12(op: u32, si12: i16, rj: u32, cop: u32) -> u32 {
+    (op << 22) | ((si12 as u16 as u32 & 0x0FFF) << 10) | (rj << 5) | cop
 }
 
 fn r2_si16(op: u32, si16: i16, rj: u32, rd: u32) -> u32 {
@@ -3291,6 +3298,189 @@ fn task25_tlbwr_tlbfill_translated_preserve_fields_and_flush_fast_tlb() {
     assert_eq!(mtlb_entry.page_size, mtlb_ps);
     assert_eq!(mtlb_entry.asid, 0x78);
     assert!(cpu.take_tb_flush());
+}
+
+#[test]
+fn task86_tlbclr_tlbflush_cacop_translate_without_illegal_instruction() {
+    let cases = [
+        ("tlbclr", TLBCLR_INSN, true),
+        ("tlbflush", TLBFLUSH_INSN, true),
+        ("cacop", cop_r_si12(CACOP_OP, -16, 5, 3), false),
+    ];
+
+    for (name, insn, flushes_tb) in cases {
+        let mut cpu = LoongArchCpu::new();
+        cpu.csr_write(CSR_EENTRY, 0x100);
+
+        let exit = run_priv_la(&mut cpu, &[insn]);
+
+        assert_eq!(exit, 0, "{name} did not exit through the normal TB path");
+        assert_eq!(cpu.pc(), 4, "{name} did not advance past the insn");
+        assert_ne!(
+            (cpu.csr_read(CSR_ESTAT) >> 16) & 0x3F,
+            u64::from(ECODE_INE),
+            "{name} trapped as an illegal instruction"
+        );
+        assert_eq!(
+            cpu.take_tb_flush(),
+            flushes_tb,
+            "{name} TB flush request mismatch"
+        );
+    }
+}
+
+#[test]
+fn task86_tlbclr_clears_non_global_matching_asid_line_and_requests_flush() {
+    let ps = 14;
+    let set = 9;
+    let matching_idx = mmu::stlb_flat_index(set, 0).unwrap();
+    let global_idx = mmu::stlb_flat_index(set, 1).unwrap();
+    let other_asid_idx = mmu::stlb_flat_index(set, 2).unwrap();
+    let other_set_idx = mmu::stlb_flat_index(set + 1, 0).unwrap();
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.csr_write(CSR_STLBPS, ps as u64);
+    write_test_tlb_entry(
+        &mut cpu,
+        matching_idx,
+        0x0000_0000_A100_0120,
+        ps,
+        0x22,
+        tlbelo_test(0xA1000, true, true, 0, 0, false, false),
+        tlbelo_test(0xA1001, true, true, 0, 0, false, false),
+    );
+    write_test_tlb_entry(
+        &mut cpu,
+        global_idx,
+        0x0000_0000_A200_0120,
+        ps,
+        0x22,
+        tlbelo_test(0xA2000, true, true, 0, 0, true, false),
+        tlbelo_test(0xA2001, true, true, 0, 0, true, false),
+    );
+    write_test_tlb_entry(
+        &mut cpu,
+        other_asid_idx,
+        0x0000_0000_A300_0120,
+        ps,
+        0x33,
+        tlbelo_test(0xA3000, true, true, 0, 0, false, false),
+        tlbelo_test(0xA3001, true, true, 0, 0, false, false),
+    );
+    write_test_tlb_entry(
+        &mut cpu,
+        other_set_idx,
+        0x0000_0000_A400_0120,
+        ps,
+        0x22,
+        tlbelo_test(0xA4000, true, true, 0, 0, false, false),
+        tlbelo_test(0xA4001, true, true, 0, 0, false, false),
+    );
+    let _ = cpu.take_tb_flush();
+
+    cpu.csr_write(CSR_ASID, 0x22);
+    cpu.csr_write(CSR_TLBIDX, (u64::from(ps) << 24) | matching_idx as u64);
+
+    assert_eq!(run_priv_la(&mut cpu, &[TLBCLR_INSN]), 0);
+
+    assert!(!cpu.mmu().stlb[set][0].valid);
+    assert!(cpu.mmu().stlb[set][1].valid);
+    assert!(cpu.mmu().stlb[set][2].valid);
+    assert!(cpu.mmu().stlb[set + 1][0].valid);
+    assert!(cpu.take_tb_flush());
+}
+
+#[test]
+fn task86_tlbflush_clears_selected_stlb_line_and_mtlb_entries() {
+    let ps = 14;
+    let set = 17;
+    let stlb_idx = mmu::stlb_flat_index(set, 3).unwrap();
+    let other_set_idx = mmu::stlb_flat_index(set + 1, 0).unwrap();
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.csr_write(CSR_STLBPS, ps as u64);
+    write_test_tlb_entry(
+        &mut cpu,
+        stlb_idx,
+        0x0000_0000_B100_0120,
+        ps,
+        0x44,
+        tlbelo_test(0xB1000, true, true, 0, 0, true, false),
+        tlbelo_test(0xB1001, true, true, 0, 0, true, false),
+    );
+    write_test_tlb_entry(
+        &mut cpu,
+        other_set_idx,
+        0x0000_0000_B200_0120,
+        ps,
+        0x44,
+        tlbelo_test(0xB2000, true, true, 0, 0, false, false),
+        tlbelo_test(0xB2001, true, true, 0, 0, false, false),
+    );
+    let _ = cpu.take_tb_flush();
+
+    cpu.csr_write(CSR_TLBIDX, (u64::from(ps) << 24) | stlb_idx as u64);
+    assert_eq!(run_priv_la(&mut cpu, &[TLBFLUSH_INSN]), 0);
+
+    for way in 0..mmu::STLB_WAYS {
+        assert!(!cpu.mmu().stlb[set][way].valid);
+    }
+    assert!(cpu.mmu().stlb[set + 1][0].valid);
+    assert!(cpu.take_tb_flush());
+
+    let mtlb_a = mmu::mtlb_flat_index(4).unwrap();
+    let mtlb_b = mmu::mtlb_flat_index(5).unwrap();
+    write_test_tlb_entry(
+        &mut cpu,
+        mtlb_a,
+        0x0000_0000_B300_0120,
+        21,
+        0x55,
+        tlbelo_test(0xB3000, true, true, 0, 0, true, false),
+        tlbelo_test(0xB3001, true, true, 0, 0, true, false),
+    );
+    write_test_tlb_entry(
+        &mut cpu,
+        mtlb_b,
+        0x0000_0000_B400_0120,
+        21,
+        0x66,
+        tlbelo_test(0xB4000, true, true, 0, 0, false, false),
+        tlbelo_test(0xB4001, true, true, 0, 0, false, false),
+    );
+    let _ = cpu.take_tb_flush();
+
+    cpu.csr_write(CSR_TLBIDX, mmu::STLB_SIZE as u64);
+    assert_eq!(run_priv_la(&mut cpu, &[TLBFLUSH_INSN]), 0);
+
+    assert!(!cpu.mmu().mtlb[4].valid);
+    assert!(!cpu.mmu().mtlb[5].valid);
+    assert!(cpu.take_tb_flush());
+}
+
+#[test]
+fn task86_tlbclr_tlbflush_cacop_check_plv() {
+    let cases = [
+        ("tlbclr", TLBCLR_INSN),
+        ("tlbflush", TLBFLUSH_INSN),
+        ("cacop", cop_r_si12(CACOP_OP, 0, 0, 0)),
+    ];
+
+    for (name, insn) in cases {
+        let mut cpu = LoongArchCpu::new();
+        cpu.csr_write(CSR_CRMD, CRMD_DA | CRMD_PLV_MASK);
+        cpu.csr_write(CSR_EENTRY, 0x100);
+
+        let _ = run_priv_la(&mut cpu, &[insn]);
+
+        assert_eq!(cpu.pc(), 0x100, "{name} did not enter exception vector");
+        assert_eq!(cpu.csr_read(CSR_ERA), 0, "{name} saved wrong ERA");
+        assert_eq!(
+            (cpu.csr_read(CSR_ESTAT) >> 16) & 0x3F,
+            u64::from(ECODE_IPE),
+            "{name} did not raise privilege exception"
+        );
+    }
 }
 
 #[test]

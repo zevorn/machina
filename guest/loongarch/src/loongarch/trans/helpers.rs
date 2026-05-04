@@ -2639,6 +2639,24 @@ pub unsafe extern "C" fn loongarch_helper_tlbfill(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_tlbclr(env: *mut u8) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.tlb_clear_by_index();
+    0
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_tlbflush(env: *mut u8) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.tlb_flush_by_index();
+    0
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
 pub unsafe extern "C" fn loongarch_helper_lddir(
     env: *mut u8,
     base: u64,

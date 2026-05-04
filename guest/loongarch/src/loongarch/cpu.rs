@@ -1082,6 +1082,45 @@ impl LoongArchCpu {
         }
     }
 
+    pub fn tlb_clear_by_index(&mut self) {
+        use super::mmu::{STLB_SETS, STLB_SIZE, TLB_TOTAL_SIZE};
+
+        let idx = (self.tlbidx & 0xFFF) as usize;
+        let asid = (self.asid & 0x3FF) as u16;
+        if idx < STLB_SIZE {
+            let set = idx % STLB_SETS;
+            self.mmu.stlb[set].iter_mut().for_each(|e| {
+                if e.valid && !e.g && e.asid == asid {
+                    e.valid = false;
+                }
+            });
+        } else if idx < TLB_TOTAL_SIZE {
+            self.mmu.mtlb.iter_mut().for_each(|e| {
+                if e.valid && !e.g && e.asid == asid {
+                    e.valid = false;
+                }
+            });
+        }
+        self.invalidate_tlb_translations();
+    }
+
+    pub fn tlb_flush_by_index(&mut self) {
+        use super::mmu::{STLB_SETS, STLB_SIZE, TLB_TOTAL_SIZE};
+
+        let idx = (self.tlbidx & 0xFFF) as usize;
+        if idx < STLB_SIZE {
+            let set = idx % STLB_SETS;
+            self.mmu.stlb[set].iter_mut().for_each(|e| {
+                e.valid = false;
+            });
+        } else if idx < TLB_TOTAL_SIZE {
+            self.mmu.mtlb.iter_mut().for_each(|e| {
+                e.valid = false;
+            });
+        }
+        self.invalidate_tlb_translations();
+    }
+
     pub fn invtlb(&mut self, op: u32, asid: u16, va: u64) {
         let should_flush = matches!(op, 0..=6);
         match op {
