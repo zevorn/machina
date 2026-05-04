@@ -1,4 +1,5 @@
 pub mod gen_common;
+pub mod gen_float;
 pub mod helpers;
 
 use machina_accel::ir::tb::{EXCP_UNDEF, TB_EXIT_IDX0};
@@ -2728,6 +2729,1304 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         a: &insn_decode::ArgsR2,
     ) -> bool {
         self.trans_iocsrrd_b(ir, a)
+    }
+
+    // FP load/store
+    fn trans_fld_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Si12,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_get;
+        use machina_accel::ir::MemOp;
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let off = ir.new_const(Type::I64, a.si12 as u64);
+        let addr = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, addr, base, off);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_qemu_ld(Type::I64, d, addr, u32::from(MemOp::ul().bits()));
+        gen_float::fpr_set(self, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_fld_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Si12,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_get;
+        use machina_accel::ir::MemOp;
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let off = ir.new_const(Type::I64, a.si12 as u64);
+        let addr = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, addr, base, off);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_qemu_ld(Type::I64, d, addr, u32::from(MemOp::uq().bits()));
+        gen_float::fpr_set(self, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_fst_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Si12,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_get;
+        use machina_accel::ir::MemOp;
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let off = ir.new_const(Type::I64, a.si12 as u64);
+        let addr = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, addr, base, off);
+        let val = gen_float::fpr_get(self, ir, a.rd as u8);
+        ir.gen_qemu_st(Type::I64, val, addr, u32::from(MemOp::ul().bits()));
+        true
+    }
+
+    fn trans_fst_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Si12,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_get;
+        use machina_accel::ir::MemOp;
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let off = ir.new_const(Type::I64, a.si12 as u64);
+        let addr = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, addr, base, off);
+        let val = gen_float::fpr_get(self, ir, a.rd as u8);
+        ir.gen_qemu_st(Type::I64, val, addr, u32::from(MemOp::uq().bits()));
+        true
+    }
+
+    // FP arithmetic
+    fn trans_fadd_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr3,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_arith_s(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fadd_s,
+        );
+        true
+    }
+
+    fn trans_fadd_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr3,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_arith_s(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fadd_d,
+        );
+        true
+    }
+
+    fn trans_fsub_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr3,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_arith_s(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fsub_s,
+        );
+        true
+    }
+
+    fn trans_fsub_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr3,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_arith_s(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fsub_d,
+        );
+        true
+    }
+
+    fn trans_fmul_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr3,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_arith_s(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fmul_s,
+        );
+        true
+    }
+
+    fn trans_fmul_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr3,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_arith_s(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fmul_d,
+        );
+        true
+    }
+
+    fn trans_fdiv_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr3,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_arith_s(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fdiv_s,
+        );
+        true
+    }
+
+    fn trans_fdiv_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr3,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_arith_s(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fdiv_d,
+        );
+        true
+    }
+
+    fn trans_fsqrt_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_fsqrt_s,
+        );
+        true
+    }
+
+    fn trans_fsqrt_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_fsqrt_d,
+        );
+        true
+    }
+
+    // FP conversion
+    fn trans_fcvt_s_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_fcvt_s_d,
+        );
+        true
+    }
+
+    fn trans_fcvt_d_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_fcvt_d_s,
+        );
+        true
+    }
+
+    fn trans_ffint_s_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_ffint_s_w,
+        );
+        true
+    }
+
+    fn trans_ffint_d_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_ffint_d_w,
+        );
+        true
+    }
+
+    fn trans_ffint_s_l(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_ffint_s_l,
+        );
+        true
+    }
+
+    fn trans_ffint_d_l(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_ffint_d_l,
+        );
+        true
+    }
+
+    fn trans_ftintrz_w_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_ftintrz_w_s,
+        );
+        true
+    }
+
+    fn trans_ftintrz_w_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_ftintrz_w_d,
+        );
+        true
+    }
+
+    fn trans_ftintrz_l_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_ftintrz_l_s,
+        );
+        true
+    }
+
+    fn trans_ftintrz_l_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_unary(
+            self,
+            ir,
+            a.fd as u8,
+            a.fj as u8,
+            helpers::loongarch_helper_ftintrz_l_d,
+        );
+        true
+    }
+
+    // FP compare (subset: CEQ, CLT, CLE, CUN)
+    fn trans_fcmp_ceq_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_ceq_s,
+        );
+        true
+    }
+
+    fn trans_fcmp_ceq_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_ceq_d,
+        );
+        true
+    }
+
+    fn trans_fcmp_clt_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_clt_s,
+        );
+        true
+    }
+
+    fn trans_fcmp_clt_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_clt_d,
+        );
+        true
+    }
+
+    fn trans_fcmp_cle_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cle_s,
+        );
+        true
+    }
+
+    fn trans_fcmp_cle_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cle_d,
+        );
+        true
+    }
+
+    fn trans_fcmp_cun_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cun_s,
+        );
+        true
+    }
+
+    fn trans_fcmp_cun_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cun_d,
+        );
+        true
+    }
+
+    // FP move
+    fn trans_fmov_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let v = gen_float::fpr_get(self, ir, a.fj as u8);
+        gen_float::fpr_set(self, ir, a.fd as u8, v);
+        true
+    }
+
+    fn trans_fmov_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let v = gen_float::fpr_get(self, ir, a.fj as u8);
+        gen_float::fpr_set(self, ir, a.fd as u8, v);
+        true
+    }
+
+    fn trans_movgr2fr_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_get;
+        let v = gpr_get(&self.gpr, ir, a.fj as u8);
+        let trunc = ir.new_temp(Type::I64);
+        let mask = ir.new_const(Type::I64, 0xFFFF_FFFF);
+        ir.gen_and(Type::I64, trunc, v, mask);
+        gen_float::fpr_set(self, ir, a.fd as u8, trunc);
+        true
+    }
+
+    fn trans_movgr2fr_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_get;
+        let v = gpr_get(&self.gpr, ir, a.fj as u8);
+        gen_float::fpr_set(self, ir, a.fd as u8, v);
+        true
+    }
+
+    fn trans_movfr2gr_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_set;
+        let v = gen_float::fpr_get(self, ir, a.fj as u8);
+        let ext = ir.new_temp(Type::I64);
+        ir.gen_ext_i32_i64(ext, v);
+        gpr_set(&self.gpr, ir, a.fd as u8, ext);
+        true
+    }
+
+    fn trans_movfr2gr_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_set;
+        let v = gen_float::fpr_get(self, ir, a.fj as u8);
+        gpr_set(&self.gpr, ir, a.fd as u8, v);
+        true
+    }
+
+    fn trans_movgr2fcsr(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_get;
+        let env_tmp = self.env;
+        let val = gpr_get(&self.gpr, ir, a.fj as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_movgr2fcsr as *const () as u64,
+            &[env_tmp, val],
+        );
+        true
+    }
+
+    fn trans_movfcsr2gr(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use gen_common::gpr_set;
+        let env_tmp = self.env;
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_movfcsr2gr as *const () as u64,
+            &[env_tmp],
+        );
+        gpr_set(&self.gpr, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fabs_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let v = gen_float::fpr_get(self, ir, a.fj as u8);
+        let mask = ir.new_const(Type::I64, 0x7FFF_FFFF);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_and(Type::I64, d, v, mask);
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fabs_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let v = gen_float::fpr_get(self, ir, a.fj as u8);
+        let mask = ir.new_const(Type::I64, 0x7FFF_FFFF_FFFF_FFFF);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_and(Type::I64, d, v, mask);
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fneg_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let v = gen_float::fpr_get(self, ir, a.fj as u8);
+        let bit = ir.new_const(Type::I64, 0x8000_0000);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_xor(Type::I64, d, v, bit);
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fneg_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr2,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let v = gen_float::fpr_get(self, ir, a.fj as u8);
+        let bit = ir.new_const(Type::I64, 0x8000_0000_0000_0000);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_xor(Type::I64, d, v, bit);
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fmadd_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr4,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let fj = gen_float::fpr_get(self, ir, a.fj as u8);
+        let fk = gen_float::fpr_get(self, ir, a.fk as u8);
+        let fa = gen_float::fpr_get(self, ir, a.fa as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_fmadd_s as *const () as u64,
+            &[fj, fk, fa],
+        );
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fmadd_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr4,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let fj = gen_float::fpr_get(self, ir, a.fj as u8);
+        let fk = gen_float::fpr_get(self, ir, a.fk as u8);
+        let fa = gen_float::fpr_get(self, ir, a.fa as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_fmadd_d as *const () as u64,
+            &[fj, fk, fa],
+        );
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fmsub_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr4,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let fj = gen_float::fpr_get(self, ir, a.fj as u8);
+        let fk = gen_float::fpr_get(self, ir, a.fk as u8);
+        let fa = gen_float::fpr_get(self, ir, a.fa as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_fmsub_s as *const () as u64,
+            &[fj, fk, fa],
+        );
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fmsub_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr4,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let fj = gen_float::fpr_get(self, ir, a.fj as u8);
+        let fk = gen_float::fpr_get(self, ir, a.fk as u8);
+        let fa = gen_float::fpr_get(self, ir, a.fa as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_fmsub_d as *const () as u64,
+            &[fj, fk, fa],
+        );
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fnmadd_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr4,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let fj = gen_float::fpr_get(self, ir, a.fj as u8);
+        let fk = gen_float::fpr_get(self, ir, a.fk as u8);
+        let fa = gen_float::fpr_get(self, ir, a.fa as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_fnmadd_s as *const () as u64,
+            &[fj, fk, fa],
+        );
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fnmadd_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr4,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let fj = gen_float::fpr_get(self, ir, a.fj as u8);
+        let fk = gen_float::fpr_get(self, ir, a.fk as u8);
+        let fa = gen_float::fpr_get(self, ir, a.fa as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_fnmadd_d as *const () as u64,
+            &[fj, fk, fa],
+        );
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fnmsub_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr4,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let fj = gen_float::fpr_get(self, ir, a.fj as u8);
+        let fk = gen_float::fpr_get(self, ir, a.fk as u8);
+        let fa = gen_float::fpr_get(self, ir, a.fa as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_fnmsub_s as *const () as u64,
+            &[fj, fk, fa],
+        );
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fnmsub_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFr4,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let fj = gen_float::fpr_get(self, ir, a.fj as u8);
+        let fk = gen_float::fpr_get(self, ir, a.fk as u8);
+        let fa = gen_float::fpr_get(self, ir, a.fa as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_fnmsub_d as *const () as u64,
+            &[fj, fk, fa],
+        );
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_fsel(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFsel,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        gen_float::check_fpe(self, ir);
+        let fj = gen_float::fpr_get(self, ir, a.fj as u8);
+        let fk = gen_float::fpr_get(self, ir, a.fk as u8);
+        let ca = gen_float::fcc_get(self, ir, a.ca as u8);
+        let zero = ir.new_const(Type::I64, 0);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_movcond(Type::I64, d, ca, zero, fk, fj, Cond::Ne);
+        gen_float::fpr_set(self, ir, a.fd as u8, d);
+        true
+    }
+
+    fn trans_bceqz(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFbranch,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use machina_accel::ir::tb::TB_EXIT_IDX1;
+        use machina_accel::ir::Cond;
+        let ca = gen_float::fcc_get(self, ir, a.cj as u8);
+        let zero = ir.new_const(Type::I64, 0);
+        let pc = self.base.pc_next - 4;
+        let target = pc.wrapping_add((a.offs21 << 2) as u64);
+        let label_taken = ir.new_label();
+        ir.gen_brcond(Type::I64, ca, zero, Cond::Eq, label_taken);
+        let c_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, c_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_set_label(label_taken);
+        let c_target = ir.new_const(Type::I64, target);
+        ir.gen_mov(Type::I64, self.pc, c_target);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_bcnez(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFbranch,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        use machina_accel::ir::tb::TB_EXIT_IDX1;
+        use machina_accel::ir::Cond;
+        let ca = gen_float::fcc_get(self, ir, a.cj as u8);
+        let zero = ir.new_const(Type::I64, 0);
+        let pc = self.base.pc_next - 4;
+        let target = pc.wrapping_add((a.offs21 << 2) as u64);
+        let label_taken = ir.new_label();
+        ir.gen_brcond(Type::I64, ca, zero, Cond::Ne, label_taken);
+        let c_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, c_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_set_label(label_taken);
+        let c_target = ir.new_const(Type::I64, target);
+        ir.gen_mov(Type::I64, self.pc, c_target);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    // Remaining FCMP conditions delegate to existing helpers
+    fn trans_fcmp_caf_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let z = ir.new_const(Type::I64, 0);
+        gen_float::fcc_set(self, ir, a.cd as u8, z);
+        true
+    }
+    fn trans_fcmp_caf_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        let z = ir.new_const(Type::I64, 0);
+        gen_float::fcc_set(self, ir, a.cd as u8, z);
+        true
+    }
+    fn trans_fcmp_cueq_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cueq_s,
+        );
+        true
+    }
+    fn trans_fcmp_cueq_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cueq_d,
+        );
+        true
+    }
+    fn trans_fcmp_cult_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cult_s,
+        );
+        true
+    }
+    fn trans_fcmp_cult_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cult_d,
+        );
+        true
+    }
+    fn trans_fcmp_cule_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cule_s,
+        );
+        true
+    }
+    fn trans_fcmp_cule_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cule_d,
+        );
+        true
+    }
+    fn trans_fcmp_cne_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cne_s,
+        );
+        true
+    }
+    fn trans_fcmp_cne_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cne_d,
+        );
+        true
+    }
+    fn trans_fcmp_cor_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cor_s,
+        );
+        true
+    }
+    fn trans_fcmp_cor_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cor_d,
+        );
+        true
+    }
+    fn trans_fcmp_cune_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cune_s,
+        );
+        true
+    }
+    fn trans_fcmp_cune_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        gen_float::check_fpe(self, ir);
+        gen_float::gen_fp_cmp(
+            self,
+            ir,
+            a.cd as u8,
+            a.fj as u8,
+            a.fk as u8,
+            helpers::loongarch_helper_fcmp_cune_d,
+        );
+        true
+    }
+    // Signaling variants (same behavior for now, NaN signaling deferred to softfloat)
+    fn trans_fcmp_saf_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_caf_s(ir, a)
+    }
+    fn trans_fcmp_saf_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_caf_d(ir, a)
+    }
+    fn trans_fcmp_seq_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_ceq_s(ir, a)
+    }
+    fn trans_fcmp_seq_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_ceq_d(ir, a)
+    }
+    fn trans_fcmp_slt_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_clt_s(ir, a)
+    }
+    fn trans_fcmp_slt_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_clt_d(ir, a)
+    }
+    fn trans_fcmp_sle_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cle_s(ir, a)
+    }
+    fn trans_fcmp_sle_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cle_d(ir, a)
+    }
+    fn trans_fcmp_sun_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cun_s(ir, a)
+    }
+    fn trans_fcmp_sun_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cun_d(ir, a)
+    }
+    fn trans_fcmp_sueq_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cueq_s(ir, a)
+    }
+    fn trans_fcmp_sueq_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cueq_d(ir, a)
+    }
+    fn trans_fcmp_sult_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cult_s(ir, a)
+    }
+    fn trans_fcmp_sult_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cult_d(ir, a)
+    }
+    fn trans_fcmp_sule_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cule_s(ir, a)
+    }
+    fn trans_fcmp_sule_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cule_d(ir, a)
+    }
+    fn trans_fcmp_sne_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cne_s(ir, a)
+    }
+    fn trans_fcmp_sne_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cne_d(ir, a)
+    }
+    fn trans_fcmp_sor_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cor_s(ir, a)
+    }
+    fn trans_fcmp_sor_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cor_d(ir, a)
+    }
+    fn trans_fcmp_sune_s(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cune_s(ir, a)
+    }
+    fn trans_fcmp_sune_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsFcmp,
+    ) -> bool {
+        self.trans_fcmp_cune_d(ir, a)
     }
 }
 

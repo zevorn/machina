@@ -241,6 +241,23 @@ impl LoongArchCpu {
     }
 
     #[must_use]
+    pub fn pending_interrupt(&self) -> bool {
+        use super::csr::CRMD_IE;
+        if self.crmd & CRMD_IE == 0 {
+            return false;
+        }
+        (self.estat & self.ecfg & 0x1FFF) != 0
+    }
+
+    pub fn read_fcsr(&self) -> u32 {
+        self.fcsr0
+    }
+
+    pub fn write_fcsr(&mut self, val: u32) {
+        self.fcsr0 = val & 0x1F1F_031F;
+    }
+
+    #[must_use]
     pub fn mmu(&self) -> &LoongArchMmu {
         &self.mmu
     }
