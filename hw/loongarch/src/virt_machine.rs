@@ -375,6 +375,8 @@ impl Machine for LoongArchVirtMachine {
                 Box::new(blk),
                 cascade.virtio_irq_line(0),
                 ram_block.as_ptr(),
+                // Linux programs virtio descriptors with low physical
+                // addresses from the memory@0 FDT node, not VIRT_RAM_BASE.
                 0,
                 opts.ram_size,
             );

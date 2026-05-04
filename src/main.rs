@@ -584,6 +584,9 @@ fn run_loongarch_machine_cycle(
         }
     };
     let cpu = unsafe {
+        // The guest-visible LoongArch RAM window starts at physical 0.
+        // VIRT_RAM_BASE is the high direct-map boot alias; DA/MMU
+        // translation canonicalizes it back to low physical RAM here.
         LoongArchFullSystemCpu::new_with_interrupts(
             cpu_state,
             machine.ram_block().as_ptr(),

@@ -14,9 +14,11 @@ use machina_guest_loongarch::loongarch::cpu::{
 use machina_guest_loongarch::loongarch::csr::{
     CRMD_DA, CRMD_IE, CSR_CRMD, CSR_ECFG, CSR_EENTRY,
 };
+use machina_guest_loongarch::loongarch::mmu::{AccessType, TlbLookupResult};
 use machina_hw_loongarch::interrupt::LOONGARCH_DEVICE_HWI;
 use machina_hw_loongarch::virt_machine::{
-    LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_IPI_BASE, VIRT_UART_BASE,
+    LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_IPI_BASE, VIRT_RAM_BASE,
+    VIRT_UART_BASE,
 };
 use machina_system::loongarch_cpu::{
     loongarch_mem_write, loongarch_soft_mmu_config, LoongArchFullSystemCpu,
@@ -176,6 +178,45 @@ fn task83_runtime_cpu_owns_jit_state_and_receives_async_uart_irq() {
     assert!(runtime_cpu.pending_interrupt());
     runtime_cpu.handle_interrupt();
     assert_eq!(runtime_cpu.cpu.pc(), 0x1000);
+}
+
+#[test]
+fn task88_runtime_cpu_uses_low_physical_ram_for_direct_map_alias() {
+    let opts = default_opts();
+    let mut machine = LoongArchVirtMachine::new();
+    machine.init(&opts).unwrap();
+    let ram_ptr = machine.ram_block().as_ptr() as usize;
+
+    let mut runtime_cpu = take_runtime_cpu(
+        &mut machine,
+        opts.ram_size,
+        Arc::new(AtomicBool::new(true)),
+    );
+    runtime_cpu.cpu.csr_write(CSR_CRMD, CRMD_DA);
+
+    assert_eq!(runtime_cpu.cpu.ram_base_val(), 0);
+    assert_eq!(runtime_cpu.cpu.ram_end_val(), opts.ram_size);
+
+    let va = VIRT_RAM_BASE + 0x1000;
+    match runtime_cpu
+        .cpu
+        .translate_address_and_cache(va, AccessType::Fetch)
+    {
+        TlbLookupResult::Hit { pa, .. } => assert_eq!(pa, 0x1000),
+        fault => {
+            panic!("direct-map alias should translate to low RAM: {fault:?}")
+        }
+    }
+
+    let addend = runtime_cpu
+        .cpu
+        .fast_tlb_lookup_addend(va, AccessType::Fetch)
+        .expect("direct-map RAM fetch should populate fast TLB");
+    assert_eq!(
+        addend.wrapping_add(va as usize),
+        ram_ptr + 0x1000,
+        "fast TLB must target the low physical RAM backing"
+    );
 }
 
 #[test]
