@@ -10,3 +10,4 @@ __pycache__/
 .superpowers/
 docs/superpowers/
 .codex
+tests/fixtures/loongarch_privacy_fail/target/

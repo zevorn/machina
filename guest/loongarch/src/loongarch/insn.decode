@@ -255,6 +255,12 @@ iocsrwr_h  0000011001001000000101 ..... .....  @r2
 iocsrwr_w  0000011001001000000110 ..... .....  @r2
 iocsrwr_d  0000011001001000000111 ..... .....  @r2
 
+# *** Floating-Point Load/Store (2RI12, using si12 offset) ***
+fld_s      0010101100 ............ ..... .....  @r2_si12
+fld_d      0010101110 ............ ..... .....  @r2_si12
+fst_s      0010101101 ............ ..... .....  @r2_si12
+fst_d      0010101111 ............ ..... .....  @r2_si12
+
 # *** Floating-Point Arithmetic (3R using fk,fj,fd) ***
 fadd_s     00000001000000001 ..... ..... .....  @fr3
 fadd_d     00000001000000010 ..... ..... .....  @fr3
@@ -291,17 +297,51 @@ fnmadd_d   000010001010 ..... ..... ..... .....  @fr4
 fnmsub_s   000010001101 ..... ..... ..... .....  @fr4
 fnmsub_d   000010001110 ..... ..... ..... .....  @fr4
 
-# *** Floating-Point Compare (result in cd) ***
-fcmp_ceq_s   000011000001 00100 ..... ..... 00 ...  &fcmp %fk %fj %cd
-fcmp_ceq_d   000011000010 00100 ..... ..... 00 ...  &fcmp %fk %fj %cd
-fcmp_clt_s   000011000001 00010 ..... ..... 00 ...  &fcmp %fk %fj %cd
-fcmp_clt_d   000011000010 00010 ..... ..... 00 ...  &fcmp %fk %fj %cd
-fcmp_cle_s   000011000001 00110 ..... ..... 00 ...  &fcmp %fk %fj %cd
-fcmp_cle_d   000011000010 00110 ..... ..... 00 ...  &fcmp %fk %fj %cd
+# *** Floating-Point Compare (result in cd, cond[4:0] at bits[19:15]) ***
+fcmp_caf_s   000011000001 00000 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_caf_d   000011000010 00000 ..... ..... 00 ...  &fcmp %fk %fj %cd
 fcmp_cun_s   000011000001 01000 ..... ..... 00 ...  &fcmp %fk %fj %cd
 fcmp_cun_d   000011000010 01000 ..... ..... 00 ...  &fcmp %fk %fj %cd
-fcmp_cune_s  000011000001 01100 ..... ..... 00 ...  &fcmp %fk %fj %cd
-fcmp_cune_d  000011000010 01100 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_ceq_s   000011000001 00100 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_ceq_d   000011000010 00100 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cueq_s  000011000001 01100 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cueq_d  000011000010 01100 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_clt_s   000011000001 00010 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_clt_d   000011000010 00010 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cult_s  000011000001 01010 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cult_d  000011000010 01010 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cle_s   000011000001 00110 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cle_d   000011000010 00110 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cule_s  000011000001 01110 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cule_d  000011000010 01110 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cne_s   000011000001 10000 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cne_d   000011000010 10000 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cor_s   000011000001 10100 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cor_d   000011000010 10100 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cune_s  000011000001 11000 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_cune_d  000011000010 11000 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_saf_s   000011000001 00001 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_saf_d   000011000010 00001 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sun_s   000011000001 01001 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sun_d   000011000010 01001 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_seq_s   000011000001 00101 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_seq_d   000011000010 00101 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sueq_s  000011000001 01101 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sueq_d  000011000010 01101 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_slt_s   000011000001 00011 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_slt_d   000011000010 00011 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sult_s  000011000001 01011 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sult_d  000011000010 01011 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sle_s   000011000001 00111 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sle_d   000011000010 00111 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sule_s  000011000001 01111 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sule_d  000011000010 01111 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sne_s   000011000001 10001 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sne_d   000011000010 10001 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sor_s   000011000001 10101 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sor_d   000011000010 10101 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sune_s  000011000001 11001 ..... ..... 00 ...  &fcmp %fk %fj %cd
+fcmp_sune_d  000011000010 11001 ..... ..... 00 ...  &fcmp %fk %fj %cd
 
 # *** Floating-Point Select ***
 fsel       00001101 0000 ..... ..... ..... .....  &fsel %fk %fj %fd ca=%ca

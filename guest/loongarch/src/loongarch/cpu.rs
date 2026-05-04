@@ -43,6 +43,8 @@ pub struct LoongArchCpu {
     pub(crate) prcfg2: u64,
     pub(crate) prcfg3: u64,
     pub(crate) llbctl: u64,
+    pub(crate) ll_res_addr: u64,
+    pub(crate) ll_res_val: u64,
     pub(crate) tlbrentry: u64,
     pub(crate) tlbrbadv: u64,
     pub(crate) tlbrera: u64,
@@ -84,6 +86,8 @@ pub const ERA_OFFSET: usize = offset_of!(LoongArchCpu, era);
 pub const BADV_OFFSET: usize = offset_of!(LoongArchCpu, badv);
 pub const EENTRY_OFFSET: usize = offset_of!(LoongArchCpu, eentry);
 pub const LLBCTL_OFFSET: usize = offset_of!(LoongArchCpu, llbctl);
+pub const LL_RES_ADDR_OFFSET: usize = offset_of!(LoongArchCpu, ll_res_addr);
+pub const LL_RES_VAL_OFFSET: usize = offset_of!(LoongArchCpu, ll_res_val);
 
 #[must_use]
 pub const fn gpr_offset(i: usize) -> usize {
@@ -131,6 +135,8 @@ impl LoongArchCpu {
             prcfg2: 0,
             prcfg3: 0,
             llbctl: 0,
+            ll_res_addr: u64::MAX,
+            ll_res_val: 0,
             tlbrentry: 0,
             tlbrbadv: 0,
             tlbrera: 0,

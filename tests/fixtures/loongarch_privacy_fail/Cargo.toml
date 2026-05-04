@@ -1,0 +1,10 @@
+[package]
+name = "loongarch-privacy-fail"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+machina-guest-loongarch = { path = "../../../guest/loongarch" }
