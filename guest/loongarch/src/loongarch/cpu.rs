@@ -1,5 +1,6 @@
 use std::mem::offset_of;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use super::csr::{
     ASID_WRITE_MASK, CRMD_DA, CRMD_IE, CRMD_PG, CRMD_PLV_MASK, ESTAT_IS_MASK,
@@ -118,6 +119,8 @@ pub struct LoongArchCpu {
 pub struct LoongArchCpuInterruptState {
     hwi_pending: AtomicU32,
     ipi_pending: AtomicBool,
+    wait_lock: Mutex<()>,
+    wait_cv: Condvar,
 }
 
 impl Default for LoongArchCpuInterruptState {
@@ -125,6 +128,8 @@ impl Default for LoongArchCpuInterruptState {
         Self {
             hwi_pending: AtomicU32::new(0),
             ipi_pending: AtomicBool::new(false),
+            wait_lock: Mutex::new(()),
+            wait_cv: Condvar::new(),
         }
     }
 }
@@ -136,23 +141,42 @@ impl LoongArchCpuInterruptState {
         }
         let mask = 1_u32 << hwi;
         if pending {
-            self.hwi_pending
-                .fetch_or(mask, std::sync::atomic::Ordering::Release);
+            self.hwi_pending.fetch_or(mask, Ordering::Release);
         } else {
-            self.hwi_pending
-                .fetch_and(!mask, std::sync::atomic::Ordering::Release);
+            self.hwi_pending.fetch_and(!mask, Ordering::Release);
         }
+        self.wake_waiters();
     }
 
     pub fn set_ipi_interrupt_pending(&self, pending: bool) {
-        self.ipi_pending
-            .store(pending, std::sync::atomic::Ordering::Release);
+        self.ipi_pending.store(pending, Ordering::Release);
+        self.wake_waiters();
     }
 
     #[must_use]
     pub fn has_pending_irq(&self) -> bool {
-        self.hwi_pending.load(std::sync::atomic::Ordering::Acquire) != 0
-            || self.ipi_pending.load(std::sync::atomic::Ordering::Acquire)
+        self.hwi_pending.load(Ordering::Acquire) != 0
+            || self.ipi_pending.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn wait_for_irq_or_stop(&self, running: &AtomicBool) -> bool {
+        let mut guard = self.wait_lock.lock().unwrap();
+        loop {
+            if self.has_pending_irq() {
+                return true;
+            }
+            if !running.load(Ordering::Acquire) {
+                return false;
+            }
+            guard = self.wait_cv.wait(guard).unwrap();
+        }
+    }
+
+    pub fn wake_waiters(&self) {
+        let guard = self.wait_lock.lock().unwrap();
+        self.wait_cv.notify_all();
+        drop(guard);
     }
 
     #[must_use]
@@ -167,24 +191,22 @@ impl LoongArchCpuInterruptState {
     }
 
     pub fn apply_to_cpu(&self, cpu: &mut LoongArchCpu) {
-        let hwi = self.hwi_pending.load(std::sync::atomic::Ordering::Acquire);
+        let hwi = self.hwi_pending.load(Ordering::Acquire);
         for line in 0..8 {
             cpu.set_hwi_interrupt_pending(line, hwi & (1_u32 << line) != 0);
         }
-        cpu.set_ipi_interrupt_pending(
-            self.ipi_pending.load(std::sync::atomic::Ordering::Acquire),
-        );
+        cpu.set_ipi_interrupt_pending(self.ipi_pending.load(Ordering::Acquire));
     }
 
     fn pending_estat_bits(&self) -> u64 {
         let mut bits = 0;
-        let hwi = self.hwi_pending.load(std::sync::atomic::Ordering::Acquire);
+        let hwi = self.hwi_pending.load(Ordering::Acquire);
         for line in 0..8 {
             if hwi & (1_u32 << line) != 0 {
                 bits |= 1_u64 << (2 + line);
             }
         }
-        if self.ipi_pending.load(std::sync::atomic::Ordering::Acquire) {
+        if self.ipi_pending.load(Ordering::Acquire) {
             bits |= 1_u64 << 12;
         }
         bits

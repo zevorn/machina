@@ -123,6 +123,35 @@ impl LoongArchFullSystemCpu {
             .as_ref()
             .is_some_and(|interrupts| interrupts.has_pending_irq())
     }
+
+    pub fn wake_waiters(&self) {
+        if let Some(interrupts) = &self.interrupts {
+            interrupts.wake_waiters();
+        }
+    }
+
+    fn handle_wfi(&mut self) -> ArchExitAction {
+        self.cpu.set_halted_flag(true);
+        if !self.cpu.pending_interrupt() {
+            let tcfg = self.cpu.csr_read(CSR_TCFG);
+            let tval = self.cpu.tval();
+            if tcfg & 1 != 0 && tval != 0 {
+                self.cpu.timer_tick(tval);
+            }
+        }
+        if !self.cpu.pending_interrupt() {
+            if !self.wait_for_interrupt() {
+                self.cpu.set_halted_flag(false);
+                return ArchExitAction::Halted;
+            }
+            self.apply_async_interrupts();
+        }
+        self.cpu.set_halted_flag(false);
+        if self.cpu.pending_interrupt() {
+            loongarch_handle_interrupt(&mut self.cpu);
+        }
+        ArchExitAction::Continue
+    }
 }
 
 impl GuestCpu for LoongArchFullSystemCpu {
@@ -179,7 +208,11 @@ impl GuestCpu for LoongArchFullSystemCpu {
 
     fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
         self.apply_async_interrupts();
-        loongarch_handle_arch_exit(&mut self.cpu, code)
+        match code {
+            EXCP_LOONGARCH_DONE => ArchExitAction::Continue,
+            EXCP_LOONGARCH_WFI => self.handle_wfi(),
+            _ => ArchExitAction::Exit(code as usize),
+        }
     }
 
     fn check_mem_fault(&mut self) -> bool {
@@ -213,6 +246,12 @@ impl GuestCpu for LoongArchFullSystemCpu {
 
     fn should_exit(&self) -> bool {
         !self.stop_flag.load(Ordering::Relaxed)
+    }
+
+    fn wait_for_interrupt(&self) -> bool {
+        self.interrupts.as_ref().is_some_and(|interrupts| {
+            interrupts.wait_for_irq_or_stop(&self.stop_flag)
+        })
     }
 
     fn take_tb_flush_pending(&mut self) -> bool {
@@ -342,33 +381,6 @@ fn loongarch_handle_exception(cpu: &mut LoongArchCpu) {
                 0,
             );
         cpu.set_pc(vec);
-    }
-}
-
-fn loongarch_handle_arch_exit(
-    cpu: &mut LoongArchCpu,
-    code: u64,
-) -> ArchExitAction {
-    match code {
-        EXCP_LOONGARCH_DONE => ArchExitAction::Continue,
-        EXCP_LOONGARCH_WFI => {
-            cpu.set_halted_flag(true);
-            if !cpu.pending_interrupt() {
-                let tcfg = cpu.csr_read(CSR_TCFG);
-                let tval = cpu.tval();
-                if tcfg & 1 != 0 && tval != 0 {
-                    cpu.timer_tick(tval);
-                }
-            }
-            if !cpu.pending_interrupt() {
-                cpu.set_halted_flag(false);
-                return ArchExitAction::Halted;
-            }
-            cpu.set_halted_flag(false);
-            loongarch_handle_interrupt(cpu);
-            ArchExitAction::Continue
-        }
-        _ => ArchExitAction::Exit(code as usize),
     }
 }
 

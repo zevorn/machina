@@ -1,6 +1,7 @@
 use std::io::Write;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use machina_accel::exec::{ExecEnv, ExitReason};
 use machina_accel::GuestCpu;
@@ -13,7 +14,6 @@ use machina_guest_loongarch::loongarch::cpu::{
 use machina_guest_loongarch::loongarch::csr::{
     CRMD_DA, CRMD_IE, CSR_CRMD, CSR_ECFG, CSR_EENTRY,
 };
-use machina_hw_loongarch::boot::KERNEL_ENTRY_DEFAULT;
 use machina_hw_loongarch::interrupt::LOONGARCH_DEVICE_HWI;
 use machina_hw_loongarch::virt_machine::{
     LoongArchVirtMachine, VIRT_UART_BASE,
@@ -107,16 +107,33 @@ fn task45_loongarch_virt_cpu_runs_under_cpu_manager() {
 
     let mut manager = CpuManager::new();
     let stop_flag = manager.running_flag();
-    let cpu =
-        take_runtime_cpu(&mut machine, opts.ram_size, Arc::clone(&stop_flag));
+    let (cpu_state, interrupts) = machine.take_runtime_cpu_state().unwrap();
+    let wake_interrupts = Arc::clone(&interrupts);
+    let cpu = unsafe {
+        LoongArchFullSystemCpu::new_with_interrupts(
+            cpu_state,
+            machine.ram_block().as_ptr(),
+            0,
+            opts.ram_size,
+            machine.address_space() as *const _ as u64,
+            Arc::clone(&stop_flag),
+            interrupts,
+        )
+    };
     manager.add_loongarch_cpu(cpu);
 
-    let exit = unsafe { manager.run(&shared) };
-    assert_eq!(exit, ExitReason::Halted);
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let exit = unsafe { manager.run(&shared) };
+        tx.send(exit).unwrap();
+    });
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 
-    let cpu = manager.loongarch_cpu(0);
-    assert_eq!(cpu.cpu.pc(), KERNEL_ENTRY_DEFAULT + 4);
-    assert_ne!(cpu.cpu.address_space_ptr(), 0);
+    stop_flag.store(false, Ordering::SeqCst);
+    wake_interrupts.set_hwi_interrupt_pending(0, true);
+    let exit = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(exit, ExitReason::Halted);
+    handle.join().unwrap();
 }
 
 #[test]
@@ -159,4 +176,57 @@ fn task83_runtime_cpu_owns_jit_state_and_receives_async_uart_irq() {
     assert!(runtime_cpu.pending_interrupt());
     runtime_cpu.handle_interrupt();
     assert_eq!(runtime_cpu.cpu.pc(), 0x1000);
+}
+
+#[test]
+fn task84_loongarch_idle_waits_for_async_irq_instead_of_exiting_vm() {
+    let kernel = write_raw_kernel(&[code15_insn(IDLE_OP, 0)]);
+    let mut opts = default_opts();
+    opts.kernel = Some(kernel.path().to_path_buf());
+
+    let mut machine = LoongArchVirtMachine::new();
+    machine.init(&opts).unwrap();
+    machine.boot().unwrap();
+
+    let mut backend = X86_64CodeGen::new();
+    backend.set_guest_base_offset(GUEST_BASE_CPU_OFFSET);
+    backend.mmio = Some(loongarch_soft_mmu_config());
+    backend.neg_align_off = i32::try_from(NEG_ALIGN_CPU_OFFSET).unwrap();
+    let env = ExecEnv::new(backend);
+    let shared = env.shared.clone();
+
+    let mut manager = CpuManager::new();
+    let stop_flag = manager.running_flag();
+    let (cpu_state, interrupts) = machine.take_runtime_cpu_state().unwrap();
+    let wake_interrupts = Arc::clone(&interrupts);
+    let cpu = unsafe {
+        LoongArchFullSystemCpu::new_with_interrupts(
+            cpu_state,
+            machine.ram_block().as_ptr(),
+            0,
+            opts.ram_size,
+            machine.address_space() as *const _ as u64,
+            Arc::clone(&stop_flag),
+            interrupts,
+        )
+    };
+    manager.add_loongarch_cpu(cpu);
+
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let exit = unsafe { manager.run(&shared) };
+        tx.send(exit).unwrap();
+    });
+
+    assert!(
+        rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "LoongArch idle returned from CpuManager instead of waiting"
+    );
+    stop_flag.store(false, Ordering::SeqCst);
+    wake_interrupts.set_hwi_interrupt_pending(0, true);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        ExitReason::Halted
+    );
+    handle.join().unwrap();
 }

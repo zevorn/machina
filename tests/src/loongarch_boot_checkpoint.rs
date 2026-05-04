@@ -1,8 +1,9 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -342,6 +343,7 @@ fn task47_long_kernel_tb_does_not_overflow_spill_area_for_cp3() {
     let mut manager = CpuManager::new();
     let stop_flag = manager.running_flag();
     let (cpu_state, interrupts) = machine.take_runtime_cpu_state().unwrap();
+    let wake_interrupts = Arc::clone(&interrupts);
     let cpu = unsafe {
         LoongArchFullSystemCpu::new_with_interrupts(
             cpu_state,
@@ -355,12 +357,23 @@ fn task47_long_kernel_tb_does_not_overflow_spill_area_for_cp3() {
     };
     manager.add_loongarch_cpu(cpu);
 
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            manager.run(&shared)
-        }));
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                manager.run(&shared)
+            }));
+        tx.send(result).unwrap();
+    });
 
-    assert_eq!(result.unwrap(), ExitReason::Halted);
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    stop_flag.store(false, Ordering::SeqCst);
+    wake_interrupts.set_hwi_interrupt_pending(0, true);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap(),
+        ExitReason::Halted
+    );
+    handle.join().unwrap();
 }
 
 #[test]

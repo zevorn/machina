@@ -196,6 +196,35 @@ fn ensure_machina_built() {
     assert!(status.success(), "cargo build machina-emu failed");
 }
 
+#[test]
+fn task84_loongarch_rejects_unsupported_gdb_options() {
+    ensure_machina_built();
+
+    for args in [
+        ["-M", "loongarch64-virt", "-S"].as_slice(),
+        ["-M", "loongarch64-virt", "-gdb", "tcp::0"].as_slice(),
+    ] {
+        let output = Command::new(bin_path("machina"))
+            .args(args)
+            .current_dir(project_root())
+            .output()
+            .expect("machina process failed to start");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            !output.status.success(),
+            "loongarch64-virt GDB option must be rejected; args={args:?}\n{combined}"
+        );
+        assert!(
+            combined.contains("loongarch64-virt does not support -S or -gdb"),
+            "missing LoongArch GDB rejection message; args={args:?}\n{combined}"
+        );
+    }
+}
+
 fn sbi_smoke_bin() -> PathBuf {
     project_root().join("tests/firmware/sbi_smoke.bin")
 }

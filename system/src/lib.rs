@@ -106,6 +106,11 @@ impl CpuManager {
         if let Some(ref wk) = self.wfi_waker {
             wk.stop();
         }
+        for cpu in &self.cpus {
+            if let ManagedCpu::LoongArch(cpu) = cpu {
+                cpu.wake_waiters();
+            }
+        }
     }
 
     pub fn is_running(&self) -> bool {

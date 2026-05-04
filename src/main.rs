@@ -624,6 +624,13 @@ fn main() {
         machina_hw_core::chardev::restore_terminal();
         process::exit(1);
     }
+    if cli.machine == "loongarch64-virt"
+        && (cli.start_paused || cli.gdb.is_some())
+    {
+        eprintln!("machina: loongarch64-virt does not support -S or -gdb");
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
+    }
 
     // Reject -device virtio-net-device without -netdev.
     #[cfg(unix)]
