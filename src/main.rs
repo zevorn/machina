@@ -631,6 +631,11 @@ fn main() {
         machina_hw_core::chardev::restore_terminal();
         process::exit(1);
     }
+    if cli.machine == "loongarch64-virt" && cli.monitor.is_some() {
+        eprintln!("machina: loongarch64-virt does not support -monitor");
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
+    }
 
     // Reject -device virtio-net-device without -netdev.
     #[cfg(unix)]
@@ -826,15 +831,15 @@ fn main() {
     // Outer loop: supports machine reset via SiFive Test.
     loop {
         eprintln!("machina: entering execution loop");
-        let ms = if cli.monitor.is_some() || cli.nographic {
-            Some(Arc::clone(&monitor_state))
-        } else {
-            None
-        };
-        let gs = gdb_state.as_ref().map(Arc::clone);
         let reason = if cli.machine == "loongarch64-virt" {
             run_loongarch_machine_cycle(&opts, ram_size)
         } else {
+            let ms = if cli.monitor.is_some() || cli.nographic {
+                Some(Arc::clone(&monitor_state))
+            } else {
+                None
+            };
+            let gs = gdb_state.as_ref().map(Arc::clone);
             run_machine_cycle(
                 &opts,
                 ram_size,

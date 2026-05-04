@@ -280,6 +280,12 @@ impl Machine for LoongArchVirtMachine {
         if opts.cpu_count != 1 {
             return Err("loongarch64-virt currently supports one CPU".into());
         }
+        if opts.netdev.is_some() {
+            return Err(
+                "loongarch64-virt does not support virtio-net-device/-netdev"
+                    .into(),
+            );
+        }
 
         self.ram_size = opts.ram_size;
         self.kernel_path = opts.kernel.clone();

@@ -225,6 +225,30 @@ fn task84_loongarch_rejects_unsupported_gdb_options() {
     }
 }
 
+#[test]
+fn task87_loongarch_rejects_unsupported_monitor_options() {
+    ensure_machina_built();
+
+    let output = Command::new(bin_path("machina"))
+        .args(["-M", "loongarch64-virt", "-monitor", "tcp:127.0.0.1:0"])
+        .current_dir(project_root())
+        .output()
+        .expect("machina process failed to start");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !output.status.success(),
+        "loongarch64-virt monitor option must be rejected\n{combined}"
+    );
+    assert!(
+        combined.contains("loongarch64-virt does not support -monitor"),
+        "missing LoongArch monitor rejection message\n{combined}"
+    );
+}
+
 fn sbi_smoke_bin() -> PathBuf {
     project_root().join("tests/firmware/sbi_smoke.bin")
 }

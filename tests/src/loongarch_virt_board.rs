@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
-use machina_core::machine::{Machine, MachineOpts};
+use machina_core::machine::{Machine, MachineOpts, NetdevOpts};
 use machina_guest_loongarch::loongarch::csr::{
     CRMD_DA, CRMD_IE, CSR_CRMD, CSR_ECFG,
 };
@@ -115,6 +115,28 @@ fn task42_virt_board_realizes_expected_mmio_map() {
     let cpu = cpu.lock().unwrap();
     assert_eq!(cpu.ram_base_val(), VIRT_RAM_BASE);
     assert_eq!(cpu.ram_end_val(), VIRT_RAM_BASE + opts.ram_size);
+}
+
+#[test]
+fn task87_virt_board_rejects_unsupported_virtio_net_options() {
+    let mut opts = default_opts();
+    opts.netdev = Some(NetdevOpts {
+        id: "net0".to_string(),
+        ifname: "tap0".to_string(),
+        mac: Some("52:54:00:12:34:56".to_string()),
+    });
+
+    let mut machine = LoongArchVirtMachine::new();
+    let err = machine
+        .init(&opts)
+        .expect_err("loongarch64-virt must reject unsupported virtio-net");
+    let msg = err.to_string();
+    assert!(
+        msg.contains(
+            "loongarch64-virt does not support virtio-net-device/-netdev"
+        ),
+        "missing virtio-net rejection message: {msg}"
+    );
 }
 
 #[test]
