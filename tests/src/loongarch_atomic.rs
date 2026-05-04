@@ -1,4 +1,5 @@
 use machina_accel::code_buffer::CodeBuffer;
+use machina_accel::ir::tb::EXCP_UNDEF;
 use machina_accel::ir::Context;
 use machina_accel::translate::translate_and_execute;
 use machina_accel::{HostCodeGen, X86_64CodeGen};
@@ -25,6 +26,7 @@ const OP_LL_D: u32 = 0b00100010;
 const OP_SC_D: u32 = 0b00100011;
 const OP_AMSWAP_D: u32 = 0b00111000011000001;
 const OP_AMADD_W: u32 = 0b00111000011000010;
+const OP_AMADD_D: u32 = 0b00111000011000011;
 const OP_AMSWAP_DB_D: u32 = 0b00111000011010011;
 const OP_AMADD_DB_W: u32 = 0b00111000011010100;
 const OP_AMMAX_WU: u32 = 0b00111000011001110;
@@ -315,4 +317,68 @@ fn task16_tlbr_ertn_invalidates_ll_sc_reservation() {
 
     assert_eq!(cpu.read_gpr(5), 0);
     assert_eq!(read_u32(&mem, 8), 0xBBBB_BBBB);
+}
+
+#[test]
+fn task81_atomic_wd_overlap_rejects_rd_rj() {
+    let mut mem = [0u8; 16];
+    mem[0..4].copy_from_slice(&10u32.to_le_bytes());
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_guest_base(mem.as_mut_ptr() as u64);
+    cpu.write_gpr(2, 0);
+    cpu.write_gpr(3, 5);
+
+    assert_eq!(
+        run_la(&mut cpu, &[r3(OP_AMADD_W, 3, 2, 2)]),
+        EXCP_UNDEF as usize
+    );
+    assert_eq!(read_u32(&mem, 0), 10);
+}
+
+#[test]
+fn task81_atomic_wd_overlap_rejects_rd_rk_for_db_alias() {
+    let mut mem = [0u8; 16];
+    mem[8..16].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_guest_base(mem.as_mut_ptr() as u64);
+    cpu.write_gpr(2, 8);
+    cpu.write_gpr(3, 0x8877_6655_4433_2211);
+
+    assert_eq!(
+        run_la(&mut cpu, &[r3(OP_AMSWAP_DB_D, 3, 2, 3)]),
+        EXCP_UNDEF as usize
+    );
+    assert_eq!(read_u64(&mem, 8), 0x1122_3344_5566_7788);
+}
+
+#[test]
+fn task81_atomic_rd_zero_overlap_is_legal_and_suppressed() {
+    let mut mem = [0u8; 16];
+    mem[0..4].copy_from_slice(&10u32.to_le_bytes());
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_guest_base(mem.as_mut_ptr() as u64);
+    cpu.write_gpr(2, 0);
+    cpu.write_gpr(3, 5);
+
+    assert_eq!(run_la(&mut cpu, &[r3(OP_AMADD_W, 3, 2, 0)]), 0);
+    assert_eq!(read_u32(&mem, 0), 15);
+    assert_eq!(cpu.read_gpr(0), 0);
+}
+
+#[test]
+fn task81_atomic_non_overlap_still_returns_old_value() {
+    let mut mem = [0u8; 16];
+    mem[8..16].copy_from_slice(&10u64.to_le_bytes());
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_guest_base(mem.as_mut_ptr() as u64);
+    cpu.write_gpr(2, 8);
+    cpu.write_gpr(3, 5);
+
+    assert_eq!(run_la(&mut cpu, &[r3(OP_AMADD_D, 3, 2, 4)]), 0);
+    assert_eq!(cpu.read_gpr(4), 10);
+    assert_eq!(read_u64(&mem, 8), 15);
 }

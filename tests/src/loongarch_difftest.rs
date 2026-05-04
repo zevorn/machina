@@ -55,6 +55,10 @@ const OP_ST_D: u32 = 0b0010100111;
 const OP_LD_BU: u32 = 0b0010101000;
 const OP_LD_HU: u32 = 0b0010101001;
 const OP_LD_WU: u32 = 0b0010101010;
+const OP_PRELD: u32 = 0b0010101011;
+const OP_LDGT_B: u32 = 0b00111000011110000;
+const OP_LDLE_B: u32 = 0b00111000011110100;
+const OP_STLE_B: u32 = 0b00111000011111100;
 const OP_AMSWAP_D: u32 = 0b00111000011000001;
 const OP_AMADD_W: u32 = 0b00111000011000010;
 const OP_AMMAX_WU: u32 = 0b00111000011001110;
@@ -543,6 +547,27 @@ fn loongarch_difftest_task6_task10_integer_matrix() {
                 "ld.d $r0, $r20, 8",
             ],
             compare: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16],
+        },
+        LoongArchDifftestCase {
+            name: "task81 preld and predicate memory success matrix",
+            init: vec![(2, u64::MAX), (3, 0), (21, 8), (23, 0x44)],
+            init_mem: vec![(0, 0x80), (8, 0x11)],
+            machina_insns: vec![
+                r2_si12(OP_PRELD, 0, MEMORY_BASE_REG as u32, 0),
+                r3(OP_LDLE_B, 2, MEMORY_BASE_REG as u32, 1),
+                r3(OP_LDGT_B, 3, 21, 4),
+                r3(OP_STLE_B, 2, MEMORY_BASE_REG as u32, 23),
+                r2_si12(OP_LD_BU, 0, MEMORY_BASE_REG as u32, 5),
+            ],
+            qemu_asm: &[
+                "preld 0, $r20, 0",
+                "ldle.b $r1, $r20, $r2",
+                "addi.d $r21, $r12, 8",
+                "ldgt.b $r4, $r21, $r3",
+                "stle.b $r23, $r20, $r2",
+                "ld.bu $r5, $r20, 0",
+            ],
+            compare: &[1, 4, 5],
         },
         LoongArchDifftestCase {
             name: "round19 atomic barrier matrix",

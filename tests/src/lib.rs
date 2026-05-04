@@ -61,6 +61,8 @@ mod loongarch_boot_checkpoint;
 #[cfg(test)]
 mod loongarch_branch;
 #[cfg(test)]
+mod loongarch_cpu_layout;
+#[cfg(test)]
 mod loongarch_decode;
 #[cfg(test)]
 mod loongarch_difftest;
@@ -84,6 +86,8 @@ mod loongarch_priv;
 mod loongarch_scheduler;
 #[cfg(test)]
 mod loongarch_system;
+#[cfg(test)]
+mod loongarch_translator;
 #[cfg(test)]
 mod loongarch_virt_board;
 #[cfg(test)]

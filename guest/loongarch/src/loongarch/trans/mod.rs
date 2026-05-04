@@ -126,6 +126,21 @@ fn gen_gstore_addr(
     ir.gen_qemu_st(Type::I64, value, addr, u32::from(memop.bits()));
 }
 
+fn gen_predicate_addr(
+    ctx: &mut LoongArchDisasContext,
+    ir: &mut Context,
+    rj: u8,
+    rk: u8,
+    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64) -> u64,
+) -> TempIdx {
+    gen_fp_predicate_assert(ctx, ir, rj, rk, helper);
+    gen_common::gpr_get(&ctx.gpr, ir, rj)
+}
+
+fn am_r3_has_forbidden_overlap(a: &insn_decode::ArgsR3) -> bool {
+    a.rd != 0 && (a.rd == a.rj || a.rd == a.rk)
+}
+
 fn gen_rdtime(
     ctx: &mut LoongArchDisasContext,
     ir: &mut Context,
@@ -2116,6 +2131,14 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         true
     }
 
+    fn trans_preld(
+        &mut self,
+        _ir: &mut Context,
+        _a: &insn_decode::ArgsHintRSi12,
+    ) -> bool {
+        true
+    }
+
     fn trans_ldptr_w(
         &mut self,
         ir: &mut Context,
@@ -2186,6 +2209,358 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let off = ir.new_const(Type::I64, (a.si14 << 2) as u64);
         let addr = ir.new_temp(Type::I64);
         ir.gen_add(Type::I64, addr, base, off);
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uq(),
+        );
+        true
+    }
+
+    fn trans_ldgt_b(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtgt_d,
+        );
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sb(),
+        );
+        true
+    }
+
+    fn trans_ldgt_h(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtgt_d,
+        );
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sw(),
+        );
+        true
+    }
+
+    fn trans_ldgt_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtgt_d,
+        );
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sl(),
+        );
+        true
+    }
+
+    fn trans_ldgt_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtgt_d,
+        );
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uq(),
+        );
+        true
+    }
+
+    fn trans_ldle_b(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtle_d,
+        );
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sb(),
+        );
+        true
+    }
+
+    fn trans_ldle_h(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtle_d,
+        );
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sw(),
+        );
+        true
+    }
+
+    fn trans_ldle_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtle_d,
+        );
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sl(),
+        );
+        true
+    }
+
+    fn trans_ldle_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtle_d,
+        );
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uq(),
+        );
+        true
+    }
+
+    fn trans_stgt_b(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtgt_d,
+        );
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::ub(),
+        );
+        true
+    }
+
+    fn trans_stgt_h(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtgt_d,
+        );
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uw(),
+        );
+        true
+    }
+
+    fn trans_stgt_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtgt_d,
+        );
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::ul(),
+        );
+        true
+    }
+
+    fn trans_stgt_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtgt_d,
+        );
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uq(),
+        );
+        true
+    }
+
+    fn trans_stle_b(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtle_d,
+        );
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::ub(),
+        );
+        true
+    }
+
+    fn trans_stle_h(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtle_d,
+        );
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uw(),
+        );
+        true
+    }
+
+    fn trans_stle_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtle_d,
+        );
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::ul(),
+        );
+        true
+    }
+
+    fn trans_stle_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_predicate_addr(
+            self,
+            ir,
+            a.rj as u8,
+            a.rk as u8,
+            helpers::loongarch_helper_asrtle_d,
+        );
         gen_gstore_addr(
             self,
             ir,
@@ -2590,6 +2965,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2609,6 +2987,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2628,6 +3009,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2645,6 +3029,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2662,6 +3049,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2681,6 +3071,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2700,6 +3093,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2719,6 +3115,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2738,6 +3137,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2757,6 +3159,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::MemOp;
@@ -2776,6 +3181,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::{Cond, MemOp};
@@ -2795,6 +3203,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::{Cond, MemOp};
@@ -2814,6 +3225,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::{Cond, MemOp};
@@ -2835,6 +3249,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::{Cond, MemOp};
@@ -2856,6 +3273,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::{Cond, MemOp};
@@ -2880,6 +3300,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::{Cond, MemOp};
@@ -2904,6 +3327,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::{Cond, MemOp};
@@ -2923,6 +3349,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR3,
     ) -> bool {
+        if am_r3_has_forbidden_overlap(a) {
+            return false;
+        }
         ir.contains_atomic = true;
         use gen_common::{gpr_get, gpr_set};
         use machina_accel::ir::{Cond, MemOp};
@@ -6257,854 +6686,4 @@ fn decode_insn(
     insn: u32,
 ) -> bool {
     insn_decode::decode(ctx, ir, insn)
-}
-
-#[cfg(test)]
-mod tests {
-    use machina_accel::code_buffer::CodeBuffer;
-    use machina_accel::ir::opcode::Opcode;
-    use machina_accel::ir::temp::{TempIdx, TempKind};
-    use machina_accel::translate::translate_and_execute;
-    use machina_accel::{HostCodeGen, X86_64CodeGen};
-
-    use super::super::cpu::LoongArchCpu;
-    use super::*;
-    use crate::translator_loop;
-
-    const ADDI_D_NOP: u32 = 0b0000001011 << 22;
-    const OP_ADD_W: u32 = 0b00000000000100000;
-    const OP_ADD_D: u32 = 0b00000000000100001;
-    const OP_SUB_W: u32 = 0b00000000000100010;
-    const OP_SUB_D: u32 = 0b00000000000100011;
-    const OP_SLT: u32 = 0b00000000000100100;
-    const OP_SLTU: u32 = 0b00000000000100101;
-    const OP_NOR: u32 = 0b00000000000101000;
-    const OP_AND: u32 = 0b00000000000101001;
-    const OP_OR: u32 = 0b00000000000101010;
-    const OP_XOR: u32 = 0b00000000000101011;
-    const OP_ORN: u32 = 0b00000000000101100;
-    const OP_ANDN: u32 = 0b00000000000101101;
-    const OP_DIV_W: u32 = 0b00000000001000000;
-    const OP_MOD_W: u32 = 0b00000000001000001;
-    const OP_DIV_WU: u32 = 0b00000000001000010;
-    const OP_MOD_WU: u32 = 0b00000000001000011;
-    const OP_DIV_D: u32 = 0b00000000001000100;
-    const OP_MOD_D: u32 = 0b00000000001000101;
-    const OP_DIV_DU: u32 = 0b00000000001000110;
-    const OP_MOD_DU: u32 = 0b00000000001000111;
-    const OP_MUL_W: u32 = 0b00000000000111000;
-    const OP_MULH_W: u32 = 0b00000000000111001;
-    const OP_MULH_WU: u32 = 0b00000000000111010;
-    const OP_MUL_D: u32 = 0b00000000000111011;
-    const OP_MULH_D: u32 = 0b00000000000111100;
-    const OP_MULH_DU: u32 = 0b00000000000111101;
-    const OP_MULW_D_W: u32 = 0b00000000000111110;
-    const OP_MULW_D_WU: u32 = 0b00000000000111111;
-    const OP_SLL_W: u32 = 0b00000000000101110;
-    const OP_SRL_W: u32 = 0b00000000000101111;
-    const OP_SRA_W: u32 = 0b00000000000110000;
-    const OP_SLL_D: u32 = 0b00000000000110001;
-    const OP_SRL_D: u32 = 0b00000000000110010;
-    const OP_SRA_D: u32 = 0b00000000000110011;
-    const OP_ROTR_W: u32 = 0b00000000000110110;
-    const OP_ROTR_D: u32 = 0b00000000000110111;
-    const OP_ALSL_W: u32 = 0b000000000000010;
-    const OP_ALSL_WU: u32 = 0b000000000000011;
-    const OP_ALSL_D: u32 = 0b000000000010110;
-    const OP_MASKEQZ: u32 = 0b00000000000100110;
-    const OP_MASKNEZ: u32 = 0b00000000000100111;
-    const OP_SLTI: u32 = 0b0000001000;
-    const OP_SLTUI: u32 = 0b0000001001;
-    const OP_ADDI_W: u32 = 0b0000001010;
-    const OP_ANDI: u32 = 0b0000001101;
-    const OP_ORI: u32 = 0b0000001110;
-    const OP_XORI: u32 = 0b0000001111;
-    const OP_ADDU16I_D: u32 = 0b000100;
-    const OP_CLO_W: u32 = 0b0000000000000000000100;
-    const OP_CLZ_W: u32 = 0b0000000000000000000101;
-    const OP_CTO_W: u32 = 0b0000000000000000000110;
-    const OP_CTZ_W: u32 = 0b0000000000000000000111;
-    const OP_CLO_D: u32 = 0b0000000000000000001000;
-    const OP_CLZ_D: u32 = 0b0000000000000000001001;
-    const OP_CTO_D: u32 = 0b0000000000000000001010;
-    const OP_CTZ_D: u32 = 0b0000000000000000001011;
-    const OP_REVB_2H: u32 = 0b0000000000000000001100;
-    const OP_REVB_4H: u32 = 0b0000000000000000001101;
-    const OP_REVB_2W: u32 = 0b0000000000000000001110;
-    const OP_REVB_D: u32 = 0b0000000000000000001111;
-    const OP_BITREV_W: u32 = 0b0000000000000000010100;
-    const OP_BITREV_D: u32 = 0b0000000000000000010101;
-    const OP_EXT_W_H: u32 = 0b0000000000000000010110;
-    const OP_EXT_W_B: u32 = 0b0000000000000000010111;
-    const OP_BSTR_W: u32 = 0b00000000011;
-    const OP_BSTRINS_D: u32 = 0b0000000010;
-    const OP_BSTRPICK_D: u32 = 0b0000000011;
-    const OP_LU12I_W: u32 = 0b0001010;
-    const OP_LU32I_D: u32 = 0b0001011;
-    const OP_PCALAU12I: u32 = 0b0001101;
-    const OP_PCADDU12I: u32 = 0b0001110;
-    const OP_PCADDU18I: u32 = 0b0001111;
-    const OP_LU52I_D: u32 = 0b0000001100;
-
-    fn code_ptr(code: &[u32]) -> *const u8 {
-        code.as_ptr().cast::<u8>()
-    }
-
-    fn r3(op: u32, rk: u32, rj: u32, rd: u32) -> u32 {
-        (op << 15) | (rk << 10) | (rj << 5) | rd
-    }
-
-    fn r3_sa2(op: u32, sa2: u32, rk: u32, rj: u32, rd: u32) -> u32 {
-        (op << 17) | (sa2 << 15) | (rk << 10) | (rj << 5) | rd
-    }
-
-    fn r2_si16(op: u32, si16: i16, rj: u32, rd: u32) -> u32 {
-        (op << 26) | ((si16 as u16 as u32) << 10) | (rj << 5) | rd
-    }
-
-    fn r1_si20(op: u32, si20: i32, rd: u32) -> u32 {
-        (op << 25) | ((si20 as u32 & 0x000F_FFFF) << 5) | rd
-    }
-
-    fn r2_si12(op: u32, si12: i16, rj: u32, rd: u32) -> u32 {
-        (op << 22) | ((si12 as u16 as u32 & 0x0FFF) << 10) | (rj << 5) | rd
-    }
-
-    fn r2_ui12(op: u32, ui12: u16, rj: u32, rd: u32) -> u32 {
-        (op << 22) | ((u32::from(ui12) & 0x0FFF) << 10) | (rj << 5) | rd
-    }
-
-    fn r2(op: u32, rj: u32, rd: u32) -> u32 {
-        (op << 10) | (rj << 5) | rd
-    }
-
-    fn sx32(v: u32) -> u64 {
-        i64::from(v as i32) as u64
-    }
-
-    fn bstr_w(pick: bool, ms: u32, ls: u32, rj: u32, rd: u32) -> u32 {
-        (OP_BSTR_W << 21)
-            | ((ms & 0x1F) << 16)
-            | (u32::from(pick) << 15)
-            | ((ls & 0x1F) << 10)
-            | (rj << 5)
-            | rd
-    }
-
-    fn bstr_d(op: u32, ms: u32, ls: u32, rj: u32, rd: u32) -> u32 {
-        (op << 22) | ((ms & 0x3F) << 16) | ((ls & 0x3F) << 10) | (rj << 5) | rd
-    }
-
-    fn run_la(cpu: &mut LoongArchCpu, insns: &[u32]) -> usize {
-        let mut backend = X86_64CodeGen::new();
-        let mut buf = CodeBuffer::new(4096).unwrap();
-        backend.emit_prologue(&mut buf);
-        backend.emit_epilogue(&mut buf);
-
-        let mut ir = Context::new();
-        backend.init_context(&mut ir);
-
-        let mut ctx = LoongArchDisasContext::new(
-            0,
-            code_ptr(insns),
-            LoongArchCfg::default(),
-        );
-        ctx.base.max_insns = insns.len() as u32;
-        translator_loop::<LoongArchTranslator>(&mut ctx, &mut ir);
-
-        unsafe {
-            translate_and_execute(&mut ir, &backend, &mut buf, cpu.env_ptr())
-        }
-    }
-
-    #[test]
-    fn translator_loop_registers_foundation_globals_before_locals() {
-        let code = [ADDI_D_NOP];
-        let mut ctx = LoongArchDisasContext::new(
-            0,
-            code_ptr(&code),
-            LoongArchCfg::default(),
-        );
-        ctx.base.max_insns = 1;
-        let mut ir = Context::new();
-
-        translator_loop::<LoongArchTranslator>(&mut ctx, &mut ir);
-
-        assert_eq!(ctx.base.pc_next, 4);
-        assert_eq!(ctx.base.num_insns, 1);
-        assert_eq!(ir.nb_globals(), LoongArchDisasContext::GLOBAL_COUNT);
-        assert!(ir.nb_temps() > ir.nb_globals());
-
-        assert_eq!(ctx.env, TempIdx(0));
-        assert_eq!(ir.temp(ctx.env).kind, TempKind::Fixed);
-        assert_eq!(ir.temp(ctx.env).name, Some("env"));
-        assert_eq!(ir.temp(ctx.env).reg, Some(5));
-
-        for i in 0..NUM_GPRS {
-            let tmp = ctx.gpr[i];
-            let temp = ir.temp(tmp);
-            assert_eq!(tmp, TempIdx((1 + i) as u32));
-            assert_eq!(temp.kind, TempKind::Global);
-            assert_eq!(temp.mem_base, Some(ctx.env));
-            assert_eq!(temp.mem_offset, i64::try_from(gpr_offset(i)).unwrap());
-            assert_eq!(temp.name, Some("gpr"));
-        }
-
-        assert_eq!(ctx.pc, TempIdx(33));
-        assert_eq!(
-            ir.temp(ctx.pc).mem_offset,
-            i64::try_from(PC_OFFSET).unwrap()
-        );
-        assert_eq!(ctx.llbctl, TempIdx(34));
-        assert_eq!(ctx.ll_res_addr, TempIdx(35));
-        assert_eq!(ctx.ll_res_val, TempIdx(36));
-
-        for temp in ir.globals() {
-            assert!(matches!(temp.kind, TempKind::Fixed | TempKind::Global));
-        }
-        for temp in &ir.temps()[ir.nb_globals() as usize..] {
-            assert!(!matches!(temp.kind, TempKind::Fixed | TempKind::Global));
-        }
-    }
-
-    #[test]
-    fn translator_bind_existing_globals_matches_initialized_global_order() {
-        let code = [ADDI_D_NOP];
-        let mut initialized = LoongArchDisasContext::new(
-            0,
-            code_ptr(&code),
-            LoongArchCfg::default(),
-        );
-        let mut ir = Context::new();
-        LoongArchTranslator::init_disas_context(&mut initialized, &mut ir);
-
-        let mut rebound = LoongArchDisasContext::new(
-            0,
-            code_ptr(&code),
-            LoongArchCfg::default(),
-        );
-        rebound.bind_existing_globals(&ir);
-
-        assert_eq!(rebound.env, initialized.env);
-        assert_eq!(rebound.gpr, initialized.gpr);
-        assert_eq!(rebound.pc, initialized.pc);
-        assert_eq!(rebound.llbctl, initialized.llbctl);
-        assert_eq!(rebound.ll_res_addr, initialized.ll_res_addr);
-        assert_eq!(rebound.ll_res_val, initialized.ll_res_val);
-    }
-
-    #[test]
-    fn translator_loop_stops_straight_line_tb_with_fallthrough_exit() {
-        let code = [ADDI_D_NOP];
-        let mut ctx = LoongArchDisasContext::new(
-            0,
-            code_ptr(&code),
-            LoongArchCfg::default(),
-        );
-        ctx.base.max_insns = 1;
-        let mut ir = Context::new();
-
-        translator_loop::<LoongArchTranslator>(&mut ctx, &mut ir);
-
-        assert_eq!(ctx.base.pc_next, 4);
-        assert_eq!(ctx.base.is_jmp, DisasJumpType::TooMany);
-        let ops = ir.ops();
-        assert!(ops.len() >= 2);
-        assert_eq!(ops[ops.len() - 2].opc, Opcode::GotoTb);
-        assert_eq!(ops[ops.len() - 1].opc, Opcode::ExitTb);
-    }
-
-    #[test]
-    fn translator_executes_round10_arithmetic_helpers() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 0xFFFF_FFFF;
-        cpu.gpr[3] = 2;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MULW_D_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], (-2i64) as u64);
-
-        cpu.gpr[2] = 0xFFFF_FFFF;
-        cpu.gpr[3] = 2;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MULW_D_WU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x1_FFFF_FFFE);
-
-        cpu.gpr[2] = 0x1_0000;
-        assert_eq!(run_la(&mut cpu, &[r2_si16(OP_ADDU16I_D, -2, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], (-0x1_0000i64) as u64);
-    }
-
-    #[test]
-    fn translator_executes_round10_alsl_variants() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 5;
-        cpu.gpr[3] = 7;
-        assert_eq!(run_la(&mut cpu, &[r3_sa2(OP_ALSL_D, 2, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 47);
-
-        cpu.gpr[2] = 0x4000_0000;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3_sa2(OP_ALSL_W, 0, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0xFFFF_FFFF_8000_0000);
-
-        cpu.gpr[2] = 0x4000_0000;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3_sa2(OP_ALSL_WU, 0, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x8000_0000);
-    }
-
-    #[test]
-    fn translator_executes_round10_mask_logic() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 0x55AA;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MASKEQZ, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-
-        cpu.gpr[3] = 1;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MASKEQZ, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x55AA);
-
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MASKNEZ, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MASKNEZ, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x55AA);
-    }
-
-    #[test]
-    fn translator_executes_round10_existing_edges() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = u64::MAX;
-        cpu.gpr[3] = 1;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_ADD_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-
-        cpu.gpr[2] = 123;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 123);
-
-        cpu.gpr[2] = 1;
-        cpu.gpr[3] = 65;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SLL_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 2);
-
-        cpu.gpr[0] = 0;
-        cpu.gpr[2] = 1;
-        cpu.gpr[3] = 2;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_ADD_D, 3, 2, 0)]), 0);
-        assert_eq!(cpu.gpr[0], 0);
-    }
-
-    #[test]
-    fn translator_executes_round11_divide_by_zero_edges() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 123;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 123);
-
-        cpu.gpr[2] = u64::MAX - 7;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_DU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], u64::MAX - 7);
-
-        cpu.gpr[2] = 123;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-
-        cpu.gpr[2] = u64::MAX - 7;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_DU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-    }
-
-    #[test]
-    fn translator_executes_round11_signed_min_edges() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = i64::MIN as u64;
-        cpu.gpr[3] = (-1i64) as u64;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], i64::MIN as u64);
-
-        cpu.gpr[2] = i64::MIN as u64;
-        cpu.gpr[3] = (-1i64) as u64;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-
-        cpu.gpr[2] = i64::from(i32::MIN) as u64;
-        cpu.gpr[3] = (-1i64) as u64;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], i64::from(i32::MIN) as u64);
-
-        cpu.gpr[2] = i64::from(i32::MIN) as u64;
-        cpu.gpr[3] = (-1i64) as u64;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-    }
-
-    #[test]
-    fn translator_executes_round11_unsigned_word_zero_divisor_edges() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 0x8000_0000;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_WU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], i64::from(i32::MIN) as u64);
-
-        cpu.gpr[2] = 0x8000_0000;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_WU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-    }
-
-    #[test]
-    fn translator_executes_round12_lu12i_w_sign_cases() {
-        let mut cpu = LoongArchCpu::new();
-
-        assert_eq!(run_la(&mut cpu, &[r1_si20(OP_LU12I_W, 0x12345, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x1234_5000);
-
-        assert_eq!(run_la(&mut cpu, &[r1_si20(OP_LU12I_W, -1, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0xFFFF_FFFF_FFFF_F000);
-    }
-
-    #[test]
-    fn translator_executes_round12_lu32i_d_preserves_low_word() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[1] = 0x1122_3344_5566_7788;
-        assert_eq!(run_la(&mut cpu, &[r1_si20(OP_LU32I_D, 0x12345, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x0001_2345_5566_7788);
-
-        cpu.gpr[1] = 0x1122_3344_0123_4567;
-        assert_eq!(run_la(&mut cpu, &[r1_si20(OP_LU32I_D, -1, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0xFFFF_FFFF_0123_4567);
-    }
-
-    #[test]
-    fn translator_executes_round12_lu52i_d_deposits_top_bits() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 0xFEDA_BCDE_F012_3456;
-        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_LU52I_D, 0x123, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x123A_BCDE_F012_3456);
-
-        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_LU52I_D, -1, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0xFFFA_BCDE_F012_3456);
-    }
-
-    #[test]
-    fn translator_executes_round47_pc_relative_immediates() {
-        let mut cpu = LoongArchCpu::new();
-
-        assert_eq!(
-            run_la(
-                &mut cpu,
-                &[
-                    r1_si20(OP_PCALAU12I, 0x12345, 1),
-                    r1_si20(OP_PCADDU12I, -1, 2),
-                    r1_si20(OP_PCADDU18I, 2, 3),
-                ],
-            ),
-            0,
-        );
-        assert_eq!(cpu.gpr[1], 0x1234_5000);
-        assert_eq!(cpu.gpr[2], 0xFFFF_FFFF_FFFF_F004);
-        assert_eq!(cpu.gpr[3], 0x8_0008);
-    }
-
-    #[test]
-    fn translator_sc_helper_accepts_high_direct_mapped_reservation() {
-        let mut mem = [0u8; 16];
-        mem[0..8].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
-
-        let mut cpu = LoongArchCpu::new();
-        cpu.set_guest_base(mem.as_mut_ptr() as u64);
-        cpu.set_ram_base(0);
-        cpu.set_ram_end(mem.len() as u64);
-        cpu.csr_write(
-            crate::loongarch::csr::CSR_CRMD,
-            crate::loongarch::csr::CRMD_DA,
-        );
-        cpu.llbctl = 1;
-        cpu.ll_res_addr = 0x9000_0000_0000_0000;
-        cpu.ll_res_val = 0x1122_3344_5566_7788;
-
-        let status = unsafe {
-            helpers::loongarch_helper_sc_d(
-                cpu.env_ptr(),
-                0x9000_0000_0000_0000,
-                0x8877_6655_4433_2211,
-            )
-        };
-
-        assert_eq!(status, 1);
-        assert_eq!(
-            u64::from_le_bytes(mem[0..8].try_into().unwrap()),
-            0x8877_6655_4433_2211
-        );
-    }
-
-    #[test]
-    fn translator_executes_round12_immediate_load_composition() {
-        let mut cpu = LoongArchCpu::new();
-        let insns = [
-            r1_si20(OP_LU12I_W, -0x65433, 1),
-            r1_si20(OP_LU32I_D, 0x45678, 1),
-            r2_si12(OP_LU52I_D, 0x123, 1, 1),
-        ];
-
-        assert_eq!(run_la(&mut cpu, &insns), 0);
-        assert_eq!(cpu.gpr[1], 0x1234_5678_9ABC_D000);
-    }
-
-    #[test]
-    fn translator_executes_round12_immediate_load_r0_suppression() {
-        let mut cpu = LoongArchCpu::new();
-        cpu.gpr[2] = 0xFEDA_BCDE_F012_3456;
-        let insns = [
-            r1_si20(OP_LU12I_W, 0x12345, 0),
-            r1_si20(OP_LU32I_D, -1, 0),
-            r2_si12(OP_LU52I_D, 0x123, 2, 0),
-        ];
-
-        assert_eq!(run_la(&mut cpu, &insns), 0);
-        assert_eq!(cpu.gpr[0], 0);
-    }
-
-    #[test]
-    fn translator_executes_round13_ext_w_sign_cases() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 0x80;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_EXT_W_B, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], (-128i64) as u64);
-
-        cpu.gpr[2] = 0x7F;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_EXT_W_B, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 127);
-
-        cpu.gpr[2] = 0x8000;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_EXT_W_H, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], (-32768i64) as u64);
-    }
-
-    #[test]
-    fn translator_executes_round13_bstrpick_boundaries() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 0xFEDC_BA98_7654_3210;
-        assert_eq!(run_la(&mut cpu, &[bstr_d(OP_BSTRPICK_D, 63, 63, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 1);
-
-        assert_eq!(run_la(&mut cpu, &[bstr_d(OP_BSTRPICK_D, 63, 0, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0xFEDC_BA98_7654_3210);
-
-        cpu.gpr[2] = 0x8000_1234;
-        assert_eq!(run_la(&mut cpu, &[bstr_w(true, 31, 0, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], (-2147478988i64) as u64);
-    }
-
-    #[test]
-    fn translator_executes_round13_bstrins_boundaries() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[1] = 0xFFFF_0000_0000_0000;
-        cpu.gpr[2] = 0x123;
-        assert_eq!(run_la(&mut cpu, &[bstr_d(OP_BSTRINS_D, 11, 4, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0xFFFF_0000_0000_0230);
-
-        cpu.gpr[1] = 0;
-        cpu.gpr[2] = 0x8000_1234;
-        assert_eq!(run_la(&mut cpu, &[bstr_w(false, 31, 0, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], (-2147478988i64) as u64);
-
-        cpu.gpr[1] = 0x8000_0000;
-        cpu.gpr[2] = 0xA;
-        assert_eq!(run_la(&mut cpu, &[bstr_w(false, 3, 0, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0xFFFF_FFFF_8000_000A);
-    }
-
-    #[test]
-    fn translator_executes_round13_bitfield_invalid_width_exits_undef() {
-        use machina_accel::ir::tb::EXCP_UNDEF;
-
-        let mut cpu = LoongArchCpu::new();
-        cpu.gpr[2] = 0x1234;
-
-        assert_eq!(
-            run_la(&mut cpu, &[bstr_d(OP_BSTRPICK_D, 3, 4, 2, 1)]),
-            EXCP_UNDEF as usize
-        );
-        assert_eq!(cpu.gpr[1], 0);
-
-        assert_eq!(
-            run_la(&mut cpu, &[bstr_w(false, 3, 4, 2, 1)]),
-            EXCP_UNDEF as usize
-        );
-        assert_eq!(cpu.gpr[1], 0);
-    }
-
-    #[test]
-    fn translator_executes_round13_bitfield_r0_suppression() {
-        let mut cpu = LoongArchCpu::new();
-        cpu.gpr[1] = 0xFFFF_FFFF_FFFF_FFFF;
-        cpu.gpr[2] = 0xFEDC_BA98_7654_3210;
-        let insns = [
-            r2(OP_EXT_W_B, 2, 0),
-            r2(OP_EXT_W_H, 2, 0),
-            bstr_w(true, 31, 0, 2, 0),
-            bstr_w(false, 31, 0, 2, 0),
-            bstr_d(OP_BSTRPICK_D, 63, 0, 2, 0),
-            bstr_d(OP_BSTRINS_D, 63, 0, 2, 0),
-        ];
-
-        assert_eq!(run_la(&mut cpu, &insns), 0);
-        assert_eq!(cpu.gpr[0], 0);
-    }
-
-    #[test]
-    fn translator_executes_round14_arithmetic_overflow_and_mulh_matrix() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 0x7FFF_FFFF;
-        cpu.gpr[3] = 1;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_ADD_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], sx32(0x8000_0000));
-
-        cpu.gpr[2] = 0;
-        cpu.gpr[3] = 1;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SUB_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], u64::MAX);
-
-        cpu.gpr[2] = 0x8000_0000;
-        cpu.gpr[3] = 1;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SUB_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x7FFF_FFFF);
-
-        cpu.gpr[2] = 0;
-        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_ADDI_W, -1, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], u64::MAX);
-
-        cpu.gpr[2] = 0xFFFF_FFFF;
-        cpu.gpr[3] = 2;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MUL_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], (-2i64) as u64);
-
-        cpu.gpr[2] = (-2i64) as u64;
-        cpu.gpr[3] = 3;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MUL_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], (-6i64) as u64);
-
-        cpu.gpr[2] = (-2i64) as u64;
-        cpu.gpr[3] = 3;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MULH_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], u64::MAX);
-
-        cpu.gpr[2] = 0xFFFF_FFFF;
-        cpu.gpr[3] = 2;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MULH_WU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 1);
-
-        cpu.gpr[2] = (-2i64) as u64;
-        cpu.gpr[3] = 3;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MULH_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], u64::MAX);
-
-        cpu.gpr[2] = u64::MAX;
-        cpu.gpr[3] = 2;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MULH_DU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 1);
-    }
-
-    #[test]
-    fn translator_executes_round14_logic_and_compare_matrix() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 0b1100;
-        cpu.gpr[3] = 0b1010;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_AND, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0b1000);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_OR, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0b1110);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_XOR, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0b0110);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_NOR, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], !0b1110u64);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_ANDN, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0b0100);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_ORN, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], !0b0010u64);
-
-        cpu.gpr[2] = 0x0AF5;
-        assert_eq!(run_la(&mut cpu, &[r2_ui12(OP_ANDI, 0x0F0, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x0F0);
-        assert_eq!(run_la(&mut cpu, &[r2_ui12(OP_ORI, 0x00F, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x0AFF);
-        assert_eq!(run_la(&mut cpu, &[r2_ui12(OP_XORI, 0x0FF, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x0A0A);
-
-        cpu.gpr[2] = (-1i64) as u64;
-        cpu.gpr[3] = 1;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SLT, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 1);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SLTU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-
-        cpu.gpr[2] = (-2i64) as u64;
-        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_SLTI, -1, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 1);
-
-        cpu.gpr[2] = 0;
-        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_SLTUI, -1, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 1);
-    }
-
-    #[test]
-    fn translator_executes_round14_shift_rotate_count_mask_matrix() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 1;
-        cpu.gpr[3] = 33;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SLL_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 2);
-
-        cpu.gpr[2] = 0x8000_0000;
-        cpu.gpr[3] = 31;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SRL_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 1);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SRA_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], u64::MAX);
-
-        cpu.gpr[2] = 0x8000_0001;
-        cpu.gpr[3] = 33;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_ROTR_W, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], sx32(0xC000_0000));
-
-        cpu.gpr[2] = 1;
-        cpu.gpr[3] = 65;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SLL_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 2);
-
-        cpu.gpr[2] = 0x8000_0000_0000_0000;
-        cpu.gpr[3] = 63;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SRL_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 1);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_SRA_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], u64::MAX);
-
-        cpu.gpr[2] = 1;
-        cpu.gpr[3] = 65;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_ROTR_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x8000_0000_0000_0000);
-    }
-
-    #[test]
-    fn translator_executes_round14_divide_edge_matrix() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 321;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 321);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-
-        cpu.gpr[2] = i64::MIN as u64;
-        cpu.gpr[3] = (-1i64) as u64;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], i64::MIN as u64);
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_D, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-
-        cpu.gpr[2] = 0x8000_0000;
-        cpu.gpr[3] = 0;
-        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_WU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], sx32(0x8000_0000));
-        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_WU, 3, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0);
-    }
-
-    #[test]
-    fn translator_executes_round14_count_and_reversal_matrix() {
-        let mut cpu = LoongArchCpu::new();
-
-        cpu.gpr[2] = 0;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_CLZ_W, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 32);
-
-        cpu.gpr[2] = 0xFFFF_0000;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_CLO_W, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 16);
-
-        cpu.gpr[2] = 0x0000_8000;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_CTZ_W, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 15);
-
-        cpu.gpr[2] = 0x0000_00FF;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_CTO_W, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 8);
-
-        cpu.gpr[2] = 1;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_CLZ_D, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 63);
-
-        cpu.gpr[2] = 0xFFFF_FFFF_FFFF_FFFE;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_CLO_D, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 63);
-
-        cpu.gpr[2] = 0x1000;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_CTZ_D, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 12);
-
-        cpu.gpr[2] = 0x0FFF;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_CTO_D, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 12);
-
-        cpu.gpr[2] = 0x80FF_0001;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_REVB_2H, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], sx32(0xFF80_0100));
-
-        cpu.gpr[2] = 0x0123_4567_89AB_CDEF;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_REVB_4H, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x2301_6745_AB89_EFCD);
-        assert_eq!(run_la(&mut cpu, &[r2(OP_REVB_2W, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x6745_2301_EFCD_AB89);
-        assert_eq!(run_la(&mut cpu, &[r2(OP_REVB_D, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0xEFCD_AB89_6745_2301);
-
-        cpu.gpr[2] = 1;
-        assert_eq!(run_la(&mut cpu, &[r2(OP_BITREV_W, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], sx32(0x8000_0000));
-        assert_eq!(run_la(&mut cpu, &[r2(OP_BITREV_D, 2, 1)]), 0);
-        assert_eq!(cpu.gpr[1], 0x8000_0000_0000_0000);
-    }
-
-    #[test]
-    fn translator_executes_round14_alu_r0_suppression_matrix() {
-        let mut cpu = LoongArchCpu::new();
-        cpu.gpr[2] = 0xFFFF_FFFF_FFFF_FFFF;
-        cpu.gpr[3] = 0x1234_5678_9ABC_DEF0;
-        let insns = [
-            r3(OP_ADD_W, 3, 2, 0),
-            r3(OP_SUB_D, 3, 2, 0),
-            r3(OP_XOR, 3, 2, 0),
-            r3(OP_SLTU, 3, 2, 0),
-            r3(OP_ROTR_D, 3, 2, 0),
-            r2(OP_CLZ_D, 2, 0),
-            r2(OP_REVB_D, 2, 0),
-            r2(OP_BITREV_D, 2, 0),
-        ];
-
-        assert_eq!(run_la(&mut cpu, &insns), 0);
-        assert_eq!(cpu.gpr[0], 0);
-    }
 }

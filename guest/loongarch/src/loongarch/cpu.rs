@@ -139,6 +139,28 @@ pub const MEM_FAULT_CAUSE_OFFSET: usize =
     offset_of!(LoongArchCpu, mem_fault_cause);
 pub const FAULT_PC_OFFSET: usize = offset_of!(LoongArchCpu, fault_pc);
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoongArchCpuLayoutOffsets {
+    pub gpr: usize,
+    pub pc: usize,
+    pub guest_base: usize,
+    pub fpr: usize,
+    pub fcsr0: usize,
+    pub fcc: usize,
+    pub crmd: usize,
+    pub estat: usize,
+    pub era: usize,
+    pub badv: usize,
+    pub eentry: usize,
+    pub llbctl: usize,
+    pub ll_res_addr: usize,
+    pub ll_res_val: usize,
+    pub ram_base: usize,
+    pub ram_end: usize,
+    pub neg_align: usize,
+}
+
 #[must_use]
 pub const fn gpr_offset(i: usize) -> usize {
     GPR_OFFSET + i * 8
@@ -242,6 +264,30 @@ impl LoongArchCpu {
             has_lasx: false,
             has_lbt: false,
         })
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn layout_offsets_for_tests() -> LoongArchCpuLayoutOffsets {
+        LoongArchCpuLayoutOffsets {
+            gpr: offset_of!(LoongArchCpu, gpr),
+            pc: offset_of!(LoongArchCpu, pc),
+            guest_base: offset_of!(LoongArchCpu, guest_base),
+            fpr: offset_of!(LoongArchCpu, fpr),
+            fcsr0: offset_of!(LoongArchCpu, fcsr0),
+            fcc: offset_of!(LoongArchCpu, fcc),
+            crmd: offset_of!(LoongArchCpu, crmd),
+            estat: offset_of!(LoongArchCpu, estat),
+            era: offset_of!(LoongArchCpu, era),
+            badv: offset_of!(LoongArchCpu, badv),
+            eentry: offset_of!(LoongArchCpu, eentry),
+            llbctl: offset_of!(LoongArchCpu, llbctl),
+            ll_res_addr: offset_of!(LoongArchCpu, ll_res_addr),
+            ll_res_val: offset_of!(LoongArchCpu, ll_res_val),
+            ram_base: offset_of!(LoongArchCpu, ram_base),
+            ram_end: offset_of!(LoongArchCpu, ram_end),
+            neg_align: offset_of!(LoongArchCpu, neg_align),
+        }
     }
 
     #[must_use]
@@ -1397,41 +1443,6 @@ impl LoongArchCpu {
         self.halted
             .store(false, std::sync::atomic::Ordering::Release);
         self.set_exit_request();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn jit_global_offsets_match_cpu_layout() {
-        assert_eq!(GPR_OFFSET, offset_of!(LoongArchCpu, gpr));
-        assert_eq!(PC_OFFSET, offset_of!(LoongArchCpu, pc));
-        assert_eq!(GUEST_BASE_OFFSET, offset_of!(LoongArchCpu, guest_base));
-        assert_eq!(FPR_OFFSET, offset_of!(LoongArchCpu, fpr));
-        assert_eq!(FCSR0_OFFSET, offset_of!(LoongArchCpu, fcsr0));
-        assert_eq!(FCC_OFFSET, offset_of!(LoongArchCpu, fcc));
-        assert_eq!(CRMD_OFFSET, offset_of!(LoongArchCpu, crmd));
-        assert_eq!(ESTAT_OFFSET, offset_of!(LoongArchCpu, estat));
-        assert_eq!(ERA_OFFSET, offset_of!(LoongArchCpu, era));
-        assert_eq!(BADV_OFFSET, offset_of!(LoongArchCpu, badv));
-        assert_eq!(EENTRY_OFFSET, offset_of!(LoongArchCpu, eentry));
-        assert_eq!(LLBCTL_OFFSET, offset_of!(LoongArchCpu, llbctl));
-        assert_eq!(LL_RES_ADDR_OFFSET, offset_of!(LoongArchCpu, ll_res_addr));
-        assert_eq!(LL_RES_VAL_OFFSET, offset_of!(LoongArchCpu, ll_res_val));
-        assert_eq!(RAM_BASE_OFFSET, offset_of!(LoongArchCpu, ram_base));
-        assert_eq!(RAM_END_OFFSET, offset_of!(LoongArchCpu, ram_end));
-        assert_eq!(GUEST_BASE_CPU_OFFSET, offset_of!(LoongArchCpu, guest_base));
-        assert_eq!(NEG_ALIGN_CPU_OFFSET, offset_of!(LoongArchCpu, neg_align));
-    }
-
-    #[test]
-    fn register_array_offsets_are_contiguous() {
-        assert_eq!(gpr_offset(0), GPR_OFFSET);
-        assert_eq!(gpr_offset(NUM_GPRS - 1), GPR_OFFSET + 31 * 8);
-        assert_eq!(fpr_offset(0), FPR_OFFSET);
-        assert_eq!(fpr_offset(NUM_FPRS - 1), FPR_OFFSET + 31 * 8);
     }
 }
 
