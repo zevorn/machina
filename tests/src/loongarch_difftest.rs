@@ -185,6 +185,61 @@ fn build_qemu_asm(test: &LoongArchDifftestCase) -> String {
     asm
 }
 
+fn check_loongarch_difftest_toolchain() -> Result<(), String> {
+    let qemu = Command::new("qemu-loongarch64")
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("qemu-loongarch64 is unavailable: {e}"))?;
+    if !qemu.status.success() {
+        return Err(format!(
+            "qemu-loongarch64 --version failed:\n{}",
+            String::from_utf8_lossy(&qemu.stderr)
+        ));
+    }
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir();
+    let tag = format!(
+        "machina_loongarch_toolchain_probe_{}_{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let s_path = dir.join(format!("{tag}.S"));
+    let obj_path = dir.join(format!("{tag}.o"));
+    let cleanup = || {
+        let _ = std::fs::remove_file(&s_path);
+        let _ = std::fs::remove_file(&obj_path);
+    };
+
+    let mut file = std::fs::File::create(&s_path)
+        .map_err(|e| format!("failed to create LoongArch probe source: {e}"))?;
+    file.write_all(
+        b".text\n.global _start\n_start:\n    add.d $r0, $r0, $r0\n",
+    )
+    .map_err(|e| format!("failed to write LoongArch probe source: {e}"))?;
+    drop(file);
+
+    let cc = Command::new("clang")
+        .args([
+            "--target=loongarch64-linux-gnu",
+            "-c",
+            "-o",
+            obj_path.to_str().unwrap(),
+            s_path.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| format!("failed to run clang for LoongArch probe: {e}"))?;
+    cleanup();
+    if !cc.status.success() {
+        return Err(format!(
+            "clang does not support the LoongArch assembler target:\n{}",
+            String::from_utf8_lossy(&cc.stderr)
+        ));
+    }
+
+    Ok(())
+}
+
 fn run_qemu(test: &LoongArchDifftestCase) -> [u64; NUM_GPRS] {
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -351,6 +406,11 @@ fn difftest_case(test: &LoongArchDifftestCase) {
 
 #[test]
 fn loongarch_difftest_task6_task10_integer_matrix() {
+    if let Err(reason) = check_loongarch_difftest_toolchain() {
+        eprintln!("skipping LoongArch QEMU difftest: {reason}");
+        return;
+    }
+
     let cases = vec![
         LoongArchDifftestCase {
             name: "round10 arithmetic helpers",
