@@ -25,14 +25,25 @@ const OP_LL_D: u32 = 0b00100010;
 const OP_SC_D: u32 = 0b00100011;
 const OP_AMSWAP_D: u32 = 0b00111000011000001;
 const OP_AMADD_W: u32 = 0b00111000011000010;
+const OP_AMSWAP_DB_D: u32 = 0b00111000011010011;
+const OP_AMADD_DB_W: u32 = 0b00111000011010100;
 const OP_AMMAX_WU: u32 = 0b00111000011001110;
 const OP_AMMIN_DU: u32 = 0b00111000011010001;
+const OP_RDTIMEL_W: u32 = 0b0000000000000000011000;
+const OP_RDTIMEH_W: u32 = 0b0000000000000000011001;
+const OP_RDTIME_D: u32 = 0b0000000000000000011010;
+const OP_REVH_2W: u32 = 0b0000000000000000010000;
+const OP_REVH_D: u32 = 0b0000000000000000010001;
 const OP_DBAR: u32 = 0b00111000011100100;
 const OP_IBAR: u32 = 0b00111000011100101;
 const ERTN_INSN: u32 = 0x0648_3800;
 
 fn r3(op: u32, rk: u32, rj: u32, rd: u32) -> u32 {
     (op << 15) | (rk << 10) | (rj << 5) | rd
+}
+
+fn r2(op: u32, rj: u32, rd: u32) -> u32 {
+    (op << 10) | (rj << 5) | rd
 }
 
 fn r2_si12(op: u32, si12: i16, rj: u32, rd: u32) -> u32 {
@@ -174,6 +185,61 @@ fn loongarch_atomic_rmw_variants_return_old_and_update_memory() {
     assert_eq!(cpu.read_gpr(20), 0x8000_0001);
     assert_eq!(cpu.read_gpr(16), u64::MAX.wrapping_sub(5));
     assert_eq!(cpu.read_gpr(21), 7);
+}
+
+#[test]
+fn task47_atomic_db_variants_return_old_and_update_memory() {
+    let mut mem = [0u8; 32];
+    mem[0..4].copy_from_slice(&10u32.to_le_bytes());
+    mem[8..16].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_guest_base(mem.as_mut_ptr() as u64);
+    cpu.write_gpr(2, 0);
+    cpu.write_gpr(3, 8);
+    cpu.write_gpr(11, 5);
+    cpu.write_gpr(13, 0x8877_6655_4433_2211);
+
+    let insns = [r3(OP_AMADD_DB_W, 11, 2, 10), r3(OP_AMSWAP_DB_D, 13, 3, 12)];
+
+    assert_eq!(run_la(&mut cpu, &insns), 0);
+    assert_eq!(cpu.read_gpr(10), 10);
+    assert_eq!(read_u32(&mem, 0), 15);
+    assert_eq!(cpu.read_gpr(12), 0x1122_3344_5566_7788);
+    assert_eq!(read_u64(&mem, 8), 0x8877_6655_4433_2211);
+}
+
+#[test]
+fn task47_rdtime_reads_monotonic_counter_and_tid() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.csr_write(machina_guest_loongarch::loongarch::csr::CSR_TID, 7);
+
+    let insns = [
+        r2(OP_RDTIME_D, 2, 1),
+        r2(OP_RDTIMEL_W, 4, 3),
+        r2(OP_RDTIMEH_W, 6, 5),
+    ];
+
+    assert_eq!(run_la(&mut cpu, &insns), 0);
+    assert_ne!(cpu.read_gpr(1), 0);
+    assert_ne!(cpu.read_gpr(3), 0);
+    assert_eq!(cpu.read_gpr(5), 0);
+    assert_eq!(cpu.read_gpr(2), 7);
+    assert_eq!(cpu.read_gpr(4), 7);
+    assert_eq!(cpu.read_gpr(6), 7);
+}
+
+#[test]
+fn task47_revh_variants_swap_halfword_order_for_fdt_parsing() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.write_gpr(2, 0x1122_3344_5566_7788);
+    cpu.write_gpr(4, 0x0000_0000_1122_3344);
+
+    let insns = [r2(OP_REVH_D, 2, 3), r2(OP_REVH_2W, 4, 5)];
+
+    assert_eq!(run_la(&mut cpu, &insns), 0);
+    assert_eq!(cpu.read_gpr(3), 0x7788_5566_3344_1122);
+    assert_eq!(cpu.read_gpr(5), 0x3344_1122);
 }
 
 #[test]

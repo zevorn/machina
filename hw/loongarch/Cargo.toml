@@ -17,6 +17,7 @@ machina-hw-char = { workspace = true }
 machina-memory = { workspace = true }
 machina-guest-loongarch = { workspace = true }
 machina-hw-virtio = { workspace = true }
+flate2 = { workspace = true }
 
 [lints]
 workspace = true

@@ -90,6 +90,82 @@ fn gen_fp_addr(
     addr
 }
 
+fn gen_index_addr(
+    ctx: &LoongArchDisasContext,
+    ir: &mut Context,
+    rj: u8,
+    rk: u8,
+) -> TempIdx {
+    let base = gen_common::gpr_get(&ctx.gpr, ir, rj);
+    let index = gen_common::gpr_get(&ctx.gpr, ir, rk);
+    let addr = ir.new_temp(Type::I64);
+    ir.gen_add(Type::I64, addr, base, index);
+    addr
+}
+
+fn gen_gload_addr(
+    ctx: &LoongArchDisasContext,
+    ir: &mut Context,
+    rd: u8,
+    addr: TempIdx,
+    memop: machina_accel::ir::MemOp,
+) {
+    let value = ir.new_temp(Type::I64);
+    ir.gen_qemu_ld(Type::I64, value, addr, u32::from(memop.bits()));
+    gen_common::gpr_set(&ctx.gpr, ir, rd, value);
+}
+
+fn gen_gstore_addr(
+    ctx: &LoongArchDisasContext,
+    ir: &mut Context,
+    rd: u8,
+    addr: TempIdx,
+    memop: machina_accel::ir::MemOp,
+) {
+    let value = gen_common::gpr_get(&ctx.gpr, ir, rd);
+    ir.gen_qemu_st(Type::I64, value, addr, u32::from(memop.bits()));
+}
+
+fn gen_rdtime(
+    ctx: &mut LoongArchDisasContext,
+    ir: &mut Context,
+    rd: u8,
+    rj: u8,
+    word: bool,
+    high: bool,
+) {
+    let time = ir.new_temp(Type::I64);
+    ir.gen_call(
+        time,
+        helpers::loongarch_helper_rdtime_d as *const () as u64,
+        &[ctx.env],
+    );
+    let value = if word {
+        let shifted = if high {
+            let shift = ir.new_const(Type::I64, 32);
+            let tmp = ir.new_temp(Type::I64);
+            ir.gen_shr(Type::I64, tmp, time, shift);
+            tmp
+        } else {
+            time
+        };
+        let ext = ir.new_temp(Type::I64);
+        ir.gen_ext_i32_i64(ext, shifted);
+        ext
+    } else {
+        time
+    };
+    gen_common::gpr_set(&ctx.gpr, ir, rd, value);
+
+    let tid = ir.new_temp(Type::I64);
+    ir.gen_call(
+        tid,
+        helpers::loongarch_helper_tid as *const () as u64,
+        &[ctx.env],
+    );
+    gen_common::gpr_set(&ctx.gpr, ir, rj, tid);
+}
+
 fn gen_fp_predicate_assert(
     ctx: &mut LoongArchDisasContext,
     ir: &mut Context,
@@ -475,6 +551,19 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         true
     }
 
+    fn trans_pcalau12i(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR1Si20,
+    ) -> bool {
+        use gen_common::gpr_set;
+        let pc_val = self.base.pc_next - 4;
+        let result = pc_val.wrapping_add((a.si20 << 12) as u64) & !0xfff;
+        let d = ir.new_const(Type::I64, result);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
     fn trans_pcaddu12i(
         &mut self,
         ir: &mut Context,
@@ -483,6 +572,19 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         use gen_common::gpr_set;
         let pc_val = self.base.pc_next - 4;
         let result = pc_val.wrapping_add((a.si20 << 12) as u64);
+        let d = ir.new_const(Type::I64, result);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_pcaddu18i(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR1Si20,
+    ) -> bool {
+        use gen_common::gpr_set;
+        let pc_val = self.base.pc_next - 4;
+        let result = pc_val.wrapping_add((a.si20 << 18) as u64);
         let d = ir.new_const(Type::I64, result);
         gpr_set(&self.gpr, ir, a.rd as u8, d);
         true
@@ -1469,6 +1571,40 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         true
     }
 
+    fn trans_revh_2w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let s = gpr_get(&self.gpr, ir, a.rj as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_revh_2w as *const () as u64,
+            &[s],
+        );
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_revh_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let s = gpr_get(&self.gpr, ir, a.rj as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_revh_d as *const () as u64,
+            &[s],
+        );
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
     fn trans_bitrev_4b(
         &mut self,
         ir: &mut Context,
@@ -1793,6 +1929,270 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_add(Type::I64, addr, base, off);
         let val = gpr_get(&self.gpr, ir, a.rd as u8);
         ir.gen_qemu_st(Type::I64, val, addr, u32::from(MemOp::uq().bits()));
+        true
+    }
+
+    fn trans_ldx_b(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sb(),
+        );
+        true
+    }
+
+    fn trans_ldx_h(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sw(),
+        );
+        true
+    }
+
+    fn trans_ldx_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sl(),
+        );
+        true
+    }
+
+    fn trans_ldx_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uq(),
+        );
+        true
+    }
+
+    fn trans_stx_b(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::ub(),
+        );
+        true
+    }
+
+    fn trans_stx_h(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uw(),
+        );
+        true
+    }
+
+    fn trans_stx_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::ul(),
+        );
+        true
+    }
+
+    fn trans_stx_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uq(),
+        );
+        true
+    }
+
+    fn trans_ldx_bu(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::ub(),
+        );
+        true
+    }
+
+    fn trans_ldx_hu(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uw(),
+        );
+        true
+    }
+
+    fn trans_ldx_wu(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        let addr = gen_index_addr(self, ir, a.rj as u8, a.rk as u8);
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::ul(),
+        );
+        true
+    }
+
+    fn trans_preldx(
+        &mut self,
+        _ir: &mut Context,
+        _a: &insn_decode::ArgsHintR3,
+    ) -> bool {
+        true
+    }
+
+    fn trans_ldptr_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Si14,
+    ) -> bool {
+        use gen_common::gpr_get;
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let off = ir.new_const(Type::I64, (a.si14 << 2) as u64);
+        let addr = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, addr, base, off);
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::sl(),
+        );
+        true
+    }
+
+    fn trans_stptr_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Si14,
+    ) -> bool {
+        use gen_common::gpr_get;
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let off = ir.new_const(Type::I64, (a.si14 << 2) as u64);
+        let addr = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, addr, base, off);
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::ul(),
+        );
+        true
+    }
+
+    fn trans_ldptr_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Si14,
+    ) -> bool {
+        use gen_common::gpr_get;
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let off = ir.new_const(Type::I64, (a.si14 << 2) as u64);
+        let addr = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, addr, base, off);
+        gen_gload_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uq(),
+        );
+        true
+    }
+
+    fn trans_stptr_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Si14,
+    ) -> bool {
+        use gen_common::gpr_get;
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let off = ir.new_const(Type::I64, (a.si14 << 2) as u64);
+        let addr = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, addr, base, off);
+        gen_gstore_addr(
+            self,
+            ir,
+            a.rd as u8,
+            addr,
+            machina_accel::ir::MemOp::uq(),
+        );
         true
     }
 
@@ -2534,6 +2934,177 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_movcond(Type::I64, new, old, src, old, src, Cond::Leu);
         ir.gen_qemu_st(Type::I64, new, addr, u32::from(MemOp::uq().bits()));
         gpr_set(&self.gpr, ir, a.rd as u8, old);
+        true
+    }
+
+    fn trans_amswap_db_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amswap_w(ir, a)
+    }
+
+    fn trans_amswap_db_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amswap_d(ir, a)
+    }
+
+    fn trans_amadd_db_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amadd_w(ir, a)
+    }
+
+    fn trans_amadd_db_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amadd_d(ir, a)
+    }
+
+    fn trans_amand_db_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amand_w(ir, a)
+    }
+
+    fn trans_amand_db_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amand_d(ir, a)
+    }
+
+    fn trans_amor_db_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amor_w(ir, a)
+    }
+
+    fn trans_amor_db_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amor_d(ir, a)
+    }
+
+    fn trans_amxor_db_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amxor_w(ir, a)
+    }
+
+    fn trans_amxor_db_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_amxor_d(ir, a)
+    }
+
+    fn trans_ammax_db_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_ammax_w(ir, a)
+    }
+
+    fn trans_ammax_db_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_ammax_d(ir, a)
+    }
+
+    fn trans_ammin_db_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_ammin_w(ir, a)
+    }
+
+    fn trans_ammin_db_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_ammin_d(ir, a)
+    }
+
+    fn trans_ammax_db_wu(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_ammax_wu(ir, a)
+    }
+
+    fn trans_ammax_db_du(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_ammax_du(ir, a)
+    }
+
+    fn trans_ammin_db_wu(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_ammin_wu(ir, a)
+    }
+
+    fn trans_ammin_db_du(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        self.trans_ammin_du(ir, a)
+    }
+
+    fn trans_rdtimel_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        gen_rdtime(self, ir, a.rd as u8, a.rj as u8, true, false);
+        true
+    }
+
+    fn trans_rdtimeh_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        gen_rdtime(self, ir, a.rd as u8, a.rj as u8, true, true);
+        true
+    }
+
+    fn trans_rdtime_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        gen_rdtime(self, ir, a.rd as u8, a.rj as u8, false, false);
         true
     }
 
@@ -5770,6 +6341,9 @@ mod tests {
     const OP_BSTRPICK_D: u32 = 0b0000000011;
     const OP_LU12I_W: u32 = 0b0001010;
     const OP_LU32I_D: u32 = 0b0001011;
+    const OP_PCALAU12I: u32 = 0b0001101;
+    const OP_PCADDU12I: u32 = 0b0001110;
+    const OP_PCADDU18I: u32 = 0b0001111;
     const OP_LU52I_D: u32 = 0b0000001100;
 
     fn code_ptr(code: &[u32]) -> *const u8 {
@@ -6125,6 +6699,58 @@ mod tests {
 
         assert_eq!(run_la(&mut cpu, &[r2_si12(OP_LU52I_D, -1, 2, 1)]), 0);
         assert_eq!(cpu.gpr[1], 0xFFFA_BCDE_F012_3456);
+    }
+
+    #[test]
+    fn translator_executes_round47_pc_relative_immediates() {
+        let mut cpu = LoongArchCpu::new();
+
+        assert_eq!(
+            run_la(
+                &mut cpu,
+                &[
+                    r1_si20(OP_PCALAU12I, 0x12345, 1),
+                    r1_si20(OP_PCADDU12I, -1, 2),
+                    r1_si20(OP_PCADDU18I, 2, 3),
+                ],
+            ),
+            0,
+        );
+        assert_eq!(cpu.gpr[1], 0x1234_5000);
+        assert_eq!(cpu.gpr[2], 0xFFFF_FFFF_FFFF_F004);
+        assert_eq!(cpu.gpr[3], 0x8_0008);
+    }
+
+    #[test]
+    fn translator_sc_helper_accepts_high_direct_mapped_reservation() {
+        let mut mem = [0u8; 16];
+        mem[0..8].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+
+        let mut cpu = LoongArchCpu::new();
+        cpu.set_guest_base(mem.as_mut_ptr() as u64);
+        cpu.set_ram_base(0);
+        cpu.set_ram_end(mem.len() as u64);
+        cpu.csr_write(
+            crate::loongarch::csr::CSR_CRMD,
+            crate::loongarch::csr::CRMD_DA,
+        );
+        cpu.llbctl = 1;
+        cpu.ll_res_addr = 0x9000_0000_0000_0000;
+        cpu.ll_res_val = 0x1122_3344_5566_7788;
+
+        let status = unsafe {
+            helpers::loongarch_helper_sc_d(
+                cpu.env_ptr(),
+                0x9000_0000_0000_0000,
+                0x8877_6655_4433_2211,
+            )
+        };
+
+        assert_eq!(status, 1);
+        assert_eq!(
+            u64::from_le_bytes(mem[0..8].try_into().unwrap()),
+            0x8877_6655_4433_2211
+        );
     }
 
     #[test]

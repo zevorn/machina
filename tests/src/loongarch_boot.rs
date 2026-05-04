@@ -101,6 +101,14 @@ fn read_bytes(
         .collect()
 }
 
+fn boot_guest_addr(addr: u64) -> u64 {
+    if addr < VIRT_RAM_BASE {
+        VIRT_RAM_BASE + addr
+    } else {
+        addr
+    }
+}
+
 fn read_guest_u32(machine: &LoongArchVirtMachine, addr: u64) -> u32 {
     u32::from_le_bytes(read_bytes(machine, addr, 4).try_into().unwrap())
 }
@@ -199,6 +207,20 @@ fn assert_fdt_string(props: &[FdtProp], path: &str, name: &str, value: &str) {
     assert_eq!(fdt_prop(props, path, name), expected.as_slice());
 }
 
+fn assert_fdt_string_list(
+    props: &[FdtProp],
+    path: &str,
+    name: &str,
+    values: &[&str],
+) {
+    let mut expected = Vec::new();
+    for value in values {
+        expected.extend_from_slice(value.as_bytes());
+        expected.push(0);
+    }
+    assert_eq!(fdt_prop(props, path, name), expected.as_slice());
+}
+
 fn cells_for_pairs(pairs: &[(u64, u64)]) -> Vec<u8> {
     let mut out = Vec::new();
     for (base, size) in pairs {
@@ -219,6 +241,7 @@ fn config_table_ptr(
     system_table_addr: u64,
     guid: [u8; 16],
 ) -> u64 {
+    let system_table_addr = boot_guest_addr(system_table_addr);
     assert_eq!(
         read_guest_u64(machine, system_table_addr),
         EFI_SYSTEM_TABLE_SIGNATURE
@@ -230,7 +253,7 @@ fn config_table_ptr(
     let nr_tables = read_guest_u64(machine, system_table_addr + 104);
     let tables = read_guest_u64(machine, system_table_addr + 112);
     for index in 0..nr_tables {
-        let entry = tables + index * EFI_CONFIG_TABLE_SIZE;
+        let entry = boot_guest_addr(tables + index * EFI_CONFIG_TABLE_SIZE);
         if read_bytes(machine, entry, 16) == guid {
             return read_guest_u64(machine, entry + 16);
         }
@@ -302,7 +325,11 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
     let mut expected_cmdline = opts.append.clone().unwrap().into_bytes();
     expected_cmdline.push(0);
     assert_eq!(
-        read_bytes(&machine, cmdline_addr, expected_cmdline.len()),
+        read_bytes(
+            &machine,
+            boot_guest_addr(cmdline_addr),
+            expected_cmdline.len()
+        ),
         expected_cmdline
     );
 
@@ -311,29 +338,31 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
         system_table_addr,
         LINUX_EFI_BOOT_MEMMAP_GUID,
     );
+    let memmap_guest = boot_guest_addr(memmap_addr);
     assert_eq!(
-        read_guest_u64(&machine, memmap_addr),
+        read_guest_u64(&machine, memmap_guest),
         EFI_MEMORY_DESCRIPTOR_SIZE
     );
     assert_eq!(
-        read_guest_u64(&machine, memmap_addr + 8),
+        read_guest_u64(&machine, memmap_guest + 8),
         EFI_MEMORY_DESCRIPTOR_SIZE
     );
-    assert_eq!(read_guest_u32(&machine, memmap_addr + 16), 1);
+    assert_eq!(read_guest_u32(&machine, memmap_guest + 16), 1);
     assert_eq!(
-        read_guest_u32(&machine, memmap_addr + 40),
+        read_guest_u32(&machine, memmap_guest + 40),
         EFI_CONVENTIONAL_MEMORY
     );
-    assert_eq!(read_guest_u64(&machine, memmap_addr + 48), VIRT_RAM_BASE);
+    assert_eq!(read_guest_u64(&machine, memmap_guest + 48), 0);
     assert_eq!(
-        read_guest_u64(&machine, memmap_addr + 64),
+        read_guest_u64(&machine, memmap_guest + 64),
         opts.ram_size / 4096
     );
 
     let fdt_addr =
         config_table_ptr(&machine, system_table_addr, DEVICE_TREE_GUID);
-    let fdt_size = read_guest_be_u32(&machine, fdt_addr + 4) as usize;
-    let fdt = read_bytes(&machine, fdt_addr, fdt_size);
+    let fdt_guest = boot_guest_addr(fdt_addr);
+    let fdt_size = read_guest_be_u32(&machine, fdt_guest + 4) as usize;
+    let fdt = read_bytes(&machine, fdt_guest, fdt_size);
     let props = parse_fdt_props(&fdt);
 
     assert_fdt_string(&props, "/", "compatible", "machina,loongarch64-virt");
@@ -344,8 +373,8 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
         opts.append.as_ref().unwrap(),
     );
     assert_eq!(
-        fdt_prop(&props, &format!("/memory@{VIRT_RAM_BASE:x}"), "reg"),
-        cells_for_pairs(&[(VIRT_RAM_BASE, opts.ram_size)]).as_slice()
+        fdt_prop(&props, "/memory@0", "reg"),
+        cells_for_pairs(&[(0, opts.ram_size)]).as_slice()
     );
     assert_eq!(
         fdt_prop(&props, "/cpus", "#address-cells"),
@@ -376,13 +405,51 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
         fdt_prop(&props, &format!("/eiointc@{VIRT_EIOINTC_BASE:x}"), "reg"),
         cells_for_pairs(&[(VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE)]).as_slice()
     );
+    assert_fdt_string_list(
+        &props,
+        &format!("/eiointc@{VIRT_EIOINTC_BASE:x}"),
+        "compatible",
+        &["loongson,ls2k2000-eiointc", "loongson,htvec-1.0"],
+    );
+    assert_eq!(
+        fdt_prop(
+            &props,
+            &format!("/eiointc@{VIRT_EIOINTC_BASE:x}"),
+            "interrupt-parent"
+        ),
+        1u32.to_be_bytes().as_slice()
+    );
+    assert_eq!(
+        fdt_prop(
+            &props,
+            &format!("/eiointc@{VIRT_EIOINTC_BASE:x}"),
+            "interrupts"
+        ),
+        3u32.to_be_bytes().as_slice()
+    );
     assert_eq!(
         fdt_prop(&props, &format!("/platic@{VIRT_PCH_PIC_BASE:x}"), "reg"),
         cells_for_pairs(&[(VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE)]).as_slice()
     );
     assert_eq!(
+        fdt_prop(
+            &props,
+            &format!("/platic@{VIRT_PCH_PIC_BASE:x}"),
+            "interrupt-parent"
+        ),
+        2u32.to_be_bytes().as_slice()
+    );
+    assert_eq!(
         fdt_prop(&props, &format!("/serial@{VIRT_UART_BASE:x}"), "reg"),
         cells_for_pairs(&[(VIRT_UART_BASE, VIRT_UART_SIZE)]).as_slice()
+    );
+    assert_eq!(
+        fdt_prop(
+            &props,
+            &format!("/serial@{VIRT_UART_BASE:x}"),
+            "interrupt-parent"
+        ),
+        3u32.to_be_bytes().as_slice()
     );
     assert!(
         !props
@@ -390,6 +457,78 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
             .any(|prop| prop.path
                 == format!("/virtio_mmio@{VIRT_VIRTIO_BASE:x}")),
         "virtio node must not be emitted when no virtio device is present"
+    );
+}
+
+#[test]
+fn task47_direct_boot_exposes_physical_boot_data_addresses() {
+    let initrd_bytes = [0x33, 0x44, 0x55, 0x66];
+    let mut initrd = tempfile::NamedTempFile::new().unwrap();
+    initrd.write_all(&initrd_bytes).unwrap();
+
+    let mut opts = default_opts();
+    opts.append = Some("console=ttyS0 earlycon rdinit=/init".to_string());
+    opts.initrd = Some(initrd.path().to_path_buf());
+    let (machine, _kernel) = boot_minimal_elf(&mut opts);
+
+    let cpu = machine.cpu();
+    let cpu = cpu.lock().unwrap();
+    let cmdline_addr = cpu.read_gpr(5);
+    let system_table_addr = cpu.read_gpr(6);
+    drop(cpu);
+
+    assert!(
+        cmdline_addr < VIRT_RAM_BASE,
+        "a1 must expose a physical command-line address"
+    );
+    assert!(
+        system_table_addr < VIRT_RAM_BASE,
+        "a2 must expose a physical EFI system-table address"
+    );
+
+    let system_table_guest = boot_guest_addr(system_table_addr);
+    let memmap_addr = config_table_ptr(
+        &machine,
+        system_table_guest,
+        LINUX_EFI_BOOT_MEMMAP_GUID,
+    );
+    assert!(
+        memmap_addr < VIRT_RAM_BASE,
+        "EFI config entries must expose physical table addresses"
+    );
+    let memmap_guest = boot_guest_addr(memmap_addr);
+    assert_eq!(read_guest_u64(&machine, memmap_guest + 48), 0);
+
+    let fdt_addr =
+        config_table_ptr(&machine, system_table_guest, DEVICE_TREE_GUID);
+    assert!(fdt_addr < VIRT_RAM_BASE, "FDT pointer must be physical");
+    let fdt_guest = boot_guest_addr(fdt_addr);
+    let fdt_size = read_guest_be_u32(&machine, fdt_guest + 4) as usize;
+    let props = parse_fdt_props(&read_bytes(&machine, fdt_guest, fdt_size));
+    assert_eq!(
+        fdt_prop(&props, "/memory@0", "reg"),
+        cells_for_pairs(&[(0, opts.ram_size)]).as_slice()
+    );
+
+    let initrd_table_addr = config_table_ptr(
+        &machine,
+        system_table_guest,
+        LINUX_EFI_INITRD_MEDIA_GUID,
+    );
+    assert!(
+        initrd_table_addr < VIRT_RAM_BASE,
+        "initrd config entry must be physical"
+    );
+    let initrd_table_guest = boot_guest_addr(initrd_table_addr);
+    let initrd_start = read_guest_u64(&machine, initrd_table_guest);
+    assert!(initrd_start < VIRT_RAM_BASE, "initrd base must be physical");
+    assert_eq!(
+        read_bytes(&machine, boot_guest_addr(initrd_start), initrd_bytes.len()),
+        initrd_bytes
+    );
+    assert_eq!(
+        fdt_u64_prop(&props, "/chosen", "linux,initrd-start"),
+        initrd_start
     );
 }
 
@@ -412,18 +551,20 @@ fn task44_direct_boot_adds_initrd_and_optional_virtio_to_fdt() {
         system_table_addr,
         LINUX_EFI_INITRD_MEDIA_GUID,
     );
-    let initrd_start = read_guest_u64(&machine, initrd_table_addr);
-    let initrd_size = read_guest_u64(&machine, initrd_table_addr + 8);
+    let initrd_table_guest = boot_guest_addr(initrd_table_addr);
+    let initrd_start = read_guest_u64(&machine, initrd_table_guest);
+    let initrd_size = read_guest_u64(&machine, initrd_table_guest + 8);
     assert_eq!(initrd_size, initrd_bytes.len() as u64);
     assert_eq!(
-        read_bytes(&machine, initrd_start, initrd_bytes.len()),
+        read_bytes(&machine, boot_guest_addr(initrd_start), initrd_bytes.len()),
         initrd_bytes
     );
 
     let fdt_addr =
         config_table_ptr(&machine, system_table_addr, DEVICE_TREE_GUID);
-    let fdt_size = read_guest_be_u32(&machine, fdt_addr + 4) as usize;
-    let props = parse_fdt_props(&read_bytes(&machine, fdt_addr, fdt_size));
+    let fdt_guest = boot_guest_addr(fdt_addr);
+    let fdt_size = read_guest_be_u32(&machine, fdt_guest + 4) as usize;
+    let props = parse_fdt_props(&read_bytes(&machine, fdt_guest, fdt_size));
     assert_eq!(
         fdt_u64_prop(&props, "/chosen", "linux,initrd-start"),
         initrd_start
@@ -551,16 +692,19 @@ fn task43_direct_boot_loads_elf_and_sets_initial_cpu_state() {
     let system_table_addr = cpu.read_gpr(6);
     let cmdline_len = opts.append.as_ref().unwrap().len() as u64 + 1;
     assert!(
-        machine.address_space().is_mapped(GPA::new(cmdline_addr), 1)
-            && machine
-                .address_space()
-                .is_mapped(GPA::new(cmdline_addr + cmdline_len - 1), 1),
+        machine
+            .address_space()
+            .is_mapped(GPA::new(boot_guest_addr(cmdline_addr)), 1)
+            && machine.address_space().is_mapped(
+                GPA::new(boot_guest_addr(cmdline_addr + cmdline_len - 1)),
+                1
+            ),
         "a1 must point at the guest command line"
     );
     assert!(
         machine
             .address_space()
-            .is_mapped(GPA::new(system_table_addr), 8),
+            .is_mapped(GPA::new(boot_guest_addr(system_table_addr)), 8),
         "a2 must point at guest boot-system-table storage"
     );
     drop(cpu);
@@ -568,7 +712,11 @@ fn task43_direct_boot_loads_elf_and_sets_initial_cpu_state() {
     let mut expected_cmdline = opts.append.clone().unwrap().into_bytes();
     expected_cmdline.push(0);
     assert_eq!(
-        read_bytes(&machine, cmdline_addr, expected_cmdline.len()),
+        read_bytes(
+            &machine,
+            boot_guest_addr(cmdline_addr),
+            expected_cmdline.len()
+        ),
         expected_cmdline
     );
 }

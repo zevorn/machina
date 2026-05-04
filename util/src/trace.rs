@@ -60,6 +60,18 @@ pub fn trace_exception(cause: u64, pc: u64) {
     });
 }
 
+/// Record translation of a guest TB.
+pub fn trace_tb(pc: u64, flags: u32) {
+    if !trace_enabled() {
+        return;
+    }
+    TRACE_FILE.with(|f| {
+        if let Some(file) = f.borrow_mut().as_mut() {
+            let _ = writeln!(file, "TB pc=0x{pc:016x} flags=0x{flags:08x}");
+        }
+    });
+}
+
 /// Record an MMIO access.
 pub fn trace_mmio(addr: u64, size: u32, val: u64, is_write: bool) {
     if !trace_enabled() {

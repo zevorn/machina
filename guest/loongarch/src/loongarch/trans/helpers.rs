@@ -8,7 +8,12 @@
 use super::super::cpu::LoongArchCpu;
 use super::super::csr::{CRMD_DA, CRMD_PG, CRMD_PLV_MASK};
 use super::super::exception::{ECODE_BCE, ECODE_FPD, ECODE_INE, ECODE_IPE};
+use super::super::mmu::{AccessType, TlbLookupResult};
 use machina_softfloat::{ExcFlags, Float32, Float64, FloatEnv, RoundMode};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static RDTIME_COUNTER: AtomicU64 = AtomicU64::new(0);
+const RDTIME_STEP: u64 = 1_000_000;
 
 fn enter_exception(
     cpu: &mut LoongArchCpu,
@@ -23,6 +28,21 @@ fn clear_ll_sc_reservation(cpu: &mut LoongArchCpu) {
     cpu.llbctl = 0;
     cpu.ll_res_addr = u64::MAX;
     cpu.ll_res_val = 0;
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_rdtime_d(_env: *mut u8) -> u64 {
+    RDTIME_COUNTER.fetch_add(RDTIME_STEP, Ordering::Relaxed) + RDTIME_STEP
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_tid(env: *mut u8) -> u64 {
+    let cpu = &mut *(env.cast::<LoongArchCpu>());
+    cpu.csr_read(super::super::csr::CSR_TID)
 }
 
 #[no_mangle]
@@ -134,6 +154,21 @@ pub extern "C" fn loongarch_helper_revb_2w(a: u64) -> u64 {
     let lo = (a as u32).swap_bytes();
     let hi = ((a >> 32) as u32).swap_bytes();
     u64::from(hi) << 32 | u64::from(lo)
+}
+
+#[no_mangle]
+pub extern "C" fn loongarch_helper_revh_2w(a: u64) -> i64 {
+    let lo = a as u32;
+    let swapped = lo.rotate_right(16);
+    i64::from(swapped as i32)
+}
+
+#[no_mangle]
+pub extern "C" fn loongarch_helper_revh_d(a: u64) -> u64 {
+    ((a & 0x0000_0000_0000_FFFF) << 48)
+        | ((a & 0x0000_0000_FFFF_0000) << 16)
+        | ((a & 0x0000_FFFF_0000_0000) >> 16)
+        | ((a & 0xFFFF_0000_0000_0000) >> 48)
 }
 
 #[no_mangle]
@@ -2534,6 +2569,11 @@ pub unsafe extern "C" fn loongarch_helper_cpucfg(
         0x04 => 0x05F5_E100,
         0x05 => 0x0001_0001,
         0x06 => 0,
+        0x10 => 0x0000_2C3D,
+        0x11 => 0x0608_0003,
+        0x12 => 0x0608_0003,
+        0x13 => 0x0608_000F,
+        0x14 => 0x060E_000F,
         _ => 0,
     }
 }
@@ -2750,17 +2790,21 @@ pub unsafe extern "C" fn loongarch_helper_sc_w(
     if llbit == 0 || res_addr != addr {
         return 0;
     }
-    let end = match addr.checked_add(4) {
-        Some(e) if addr >= cpu.ram_base && e <= cpu.ram_end => e,
+    let pa = match cpu.translate_address(addr, AccessType::Store) {
+        TlbLookupResult::Hit { pa, .. } => pa,
+        _ => return 0,
+    };
+    let end = match pa.checked_add(4) {
+        Some(e) if pa >= cpu.ram_base && e <= cpu.ram_end => e,
         _ => return 0,
     };
     let _ = end;
-    let host_ptr = (cpu.guest_base as *const u8).add(addr as usize);
+    let host_ptr = (cpu.guest_base as *const u8).add(pa as usize);
     let current = (host_ptr as *const u32).read_unaligned();
     if i64::from(current as i32) != res_val as i64 {
         return 0;
     }
-    let host_wptr = (cpu.guest_base as *mut u8).add(addr as usize);
+    let host_wptr = (cpu.guest_base as *mut u8).add(pa as usize);
     (host_wptr as *mut u32).write_unaligned(val as u32);
     1
 }
@@ -2783,17 +2827,21 @@ pub unsafe extern "C" fn loongarch_helper_sc_d(
     if llbit == 0 || res_addr != addr {
         return 0;
     }
-    let end = match addr.checked_add(8) {
-        Some(e) if addr >= cpu.ram_base && e <= cpu.ram_end => e,
+    let pa = match cpu.translate_address(addr, AccessType::Store) {
+        TlbLookupResult::Hit { pa, .. } => pa,
+        _ => return 0,
+    };
+    let end = match pa.checked_add(8) {
+        Some(e) if pa >= cpu.ram_base && e <= cpu.ram_end => e,
         _ => return 0,
     };
     let _ = end;
-    let host_ptr = (cpu.guest_base as *const u8).add(addr as usize);
+    let host_ptr = (cpu.guest_base as *const u8).add(pa as usize);
     let current = (host_ptr as *const u64).read_unaligned();
     if current != res_val {
         return 0;
     }
-    let host_wptr = (cpu.guest_base as *mut u8).add(addr as usize);
+    let host_wptr = (cpu.guest_base as *mut u8).add(pa as usize);
     (host_wptr as *mut u64).write_unaligned(val);
     1
 }

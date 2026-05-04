@@ -26,6 +26,7 @@ machina-util = { workspace = true }
 libc = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+flate2 = { workspace = true }
 
 [lints]
 workspace = true

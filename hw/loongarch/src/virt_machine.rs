@@ -7,6 +7,7 @@ use machina_guest_loongarch::loongarch::cpu::LoongArchCpu;
 use machina_guest_loongarch::loongarch::csr::{CRMD_DA, CSR_CRMD};
 use machina_hw_char::uart::{Uart16550, Uart16550Mmio};
 use machina_hw_core::bus::{SysBus, SysBusError};
+use machina_hw_core::chardev::{CharFrontend, StdioChardev};
 use machina_hw_core::irq::{InterruptSource, IrqSink};
 use machina_hw_intc::eiointc::{Eiointc, EiointcMmio};
 use machina_hw_intc::ipi::{LoongArchIpi, LoongArchIpiMmio};
@@ -70,6 +71,7 @@ pub struct LoongArchVirtMachine {
     kernel_path: Option<PathBuf>,
     initrd_path: Option<PathBuf>,
     kernel_cmdline: Option<String>,
+    uart_chardev: Option<CharFrontend>,
 }
 
 impl LoongArchVirtMachine {
@@ -91,6 +93,7 @@ impl LoongArchVirtMachine {
             kernel_path: None,
             initrd_path: None,
             kernel_cmdline: None,
+            uart_chardev: None,
         }
     }
 
@@ -150,6 +153,19 @@ impl LoongArchVirtMachine {
         self.interrupt_cascade
             .as_ref()
             .expect("machine not initialized")
+    }
+
+    pub fn set_uart_chardev(
+        &mut self,
+        frontend: CharFrontend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.uart.is_some() {
+            return Err(
+                "loongarch64-virt UART chardev must be set before init".into(),
+            );
+        }
+        self.uart_chardev = Some(frontend);
+        Ok(())
     }
 
     #[must_use]
@@ -302,6 +318,13 @@ impl Machine for LoongArchVirtMachine {
             0,
             LOONGARCH_DEVICE_HWI,
         );
+        if let Some(frontend) = self.uart_chardev.take() {
+            uart.attach_chardev(frontend)?;
+        } else if opts.nographic {
+            uart.attach_chardev(CharFrontend::new(Box::new(
+                StdioChardev::new(),
+            )))?;
+        }
 
         let mut virtio_mmio = if let Some(drive_path) = &opts.drive {
             use machina_hw_virtio::block::VirtioBlk;

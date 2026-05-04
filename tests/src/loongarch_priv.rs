@@ -1168,6 +1168,21 @@ fn cpucfg_index4_and_5_report_la464_cache_and_timer() {
 }
 
 #[test]
+fn task48_cpucfg_reports_linux_cache_topology() {
+    let mut cpu = LoongArchCpu::new();
+    let mut cpucfg = |index| unsafe {
+        machina_guest_loongarch::loongarch::trans::helpers
+            ::loongarch_helper_cpucfg(cpu.env_ptr(), index)
+    };
+
+    assert_eq!(cpucfg(0x10), 0x0000_2c3d);
+    assert_eq!(cpucfg(0x11), 0x0608_0003);
+    assert_eq!(cpucfg(0x12), 0x0608_0003);
+    assert_eq!(cpucfg(0x13), 0x0608_000f);
+    assert_eq!(cpucfg(0x14), 0x060e_000f);
+}
+
+#[test]
 fn cpucfg_unknown_index_returns_zero() {
     let mut cpu = LoongArchCpu::new();
     let result = unsafe {

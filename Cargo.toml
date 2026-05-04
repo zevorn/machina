@@ -66,6 +66,7 @@ serde_json  = "1"
 tempfile    = "3"
 parking_lot = "0.12"
 sbi-spec    = { version = "0.0.8", features = ["legacy"] }
+flate2      = "1"
 
 [package]
 name = "machina-emu"

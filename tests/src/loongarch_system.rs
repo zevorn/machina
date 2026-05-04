@@ -39,6 +39,18 @@ fn gen_code_returns_nonzero_for_illegal_insn() {
 }
 
 #[test]
+fn task47_gen_code_clamps_large_tbs_to_backend_spill_budget() {
+    const MAX_SAFE_LOONGARCH_TB_INSNS: usize = 64;
+    let code = [0x0340_0000; 128];
+    let mut cpu = make_cpu(&code);
+    let mut ir = Context::new();
+
+    let size = cpu.gen_code(&mut ir, 0, 512);
+
+    assert_eq!(size, (MAX_SAFE_LOONGARCH_TB_INSNS * 4) as u32);
+}
+
+#[test]
 fn ir_globals_stable_across_translations() {
     let code: [u32; 2] = [0x0340_0000, 0x0340_0000];
     let mut cpu = make_cpu(&code);

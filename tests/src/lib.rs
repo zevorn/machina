@@ -57,6 +57,8 @@ mod loongarch_atomic;
 #[cfg(test)]
 mod loongarch_boot;
 #[cfg(test)]
+mod loongarch_boot_checkpoint;
+#[cfg(test)]
 mod loongarch_branch;
 #[cfg(test)]
 mod loongarch_decode;

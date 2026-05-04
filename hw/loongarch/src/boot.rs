@@ -1,5 +1,7 @@
+use std::io::Read;
 use std::path::Path;
 
+use flate2::read::GzDecoder;
 use machina_core::address::GPA;
 use machina_hw_core::fdt::FdtBuilder;
 use machina_hw_core::loader;
@@ -20,6 +22,8 @@ const LOW_PHYS_MASK: u64 = 0x0fff_ffff_ffff_ffff;
 const LINUX_IMAGE_HEADER_SIZE: usize = 64;
 const LINUX_IMAGE_MZ_MAGIC: u16 = 0x5a4d;
 const LINUX_IMAGE_PE_MAGIC: u32 = 0x8182_23cd;
+const EFI_ZBOOT_HEADER_SIZE: usize = 64;
+const EFI_ZBOOT_MAX_DECOMPRESSED_SIZE: u64 = 256 * 1024 * 1024;
 const BOOT_PARAM_WINDOW_SIZE: u64 = 0x2_0000;
 const BOOT_FDT_OFFSET: u64 = 0x2000;
 const BOOT_SYSTEM_TABLE_OFFSET: u64 = 0x1_0000;
@@ -139,6 +143,10 @@ fn ram_end(ram_size: u64) -> BootResult<u64> {
         .ok_or_else(|| "LoongArch RAM size overflows address space".into())
 }
 
+fn boot_phys_addr(guest_addr: u64) -> u64 {
+    guest_addr & LOW_PHYS_MASK
+}
+
 fn ensure_ram_range(
     addr: u64,
     len: u64,
@@ -222,6 +230,55 @@ fn parse_linux_image_header(
         kernel_size: read_u64(data, 16),
         load_offset: read_u64(data, 24),
     }))
+}
+
+fn unpack_efi_zboot_image(data: &[u8]) -> BootResult<Option<Vec<u8>>> {
+    if data.len() < EFI_ZBOOT_HEADER_SIZE {
+        return Ok(None);
+    }
+    let is_zboot = &data[0..2] == b"MZ"
+        && &data[4..8] == b"zimg"
+        && read_u32(data, 56) == LINUX_IMAGE_PE_MAGIC;
+    if !is_zboot {
+        return Ok(None);
+    }
+
+    let payload_offset = read_u32(data, 8) as usize;
+    let payload_size = read_u32(data, 12) as usize;
+    let payload_end = payload_offset
+        .checked_add(payload_size)
+        .ok_or("LoongArch EFI zboot compressed payload range overflows")?;
+    if payload_end > data.len() {
+        return Err(
+            "LoongArch EFI zboot compressed payload is out of bounds".into()
+        );
+    }
+
+    let compression =
+        data[24..56].split(|byte| *byte == 0).next().unwrap_or(&[]);
+    if compression != b"gzip" {
+        return Err(format!(
+            "LoongArch EFI zboot compression '{}' is unsupported",
+            String::from_utf8_lossy(compression)
+        )
+        .into());
+    }
+
+    let payload = &data[payload_offset..payload_end];
+    let mut decoder = GzDecoder::new(payload);
+    let mut image = Vec::new();
+    decoder
+        .by_ref()
+        .take(EFI_ZBOOT_MAX_DECOMPRESSED_SIZE + 1)
+        .read_to_end(&mut image)?;
+    if image.len() as u64 > EFI_ZBOOT_MAX_DECOMPRESSED_SIZE {
+        return Err(format!(
+            "LoongArch EFI zboot decompressed image exceeds {} bytes",
+            EFI_ZBOOT_MAX_DECOMPRESSED_SIZE
+        )
+        .into());
+    }
+    Ok(Some(image))
 }
 
 fn analyze_elf_kernel(
@@ -427,6 +484,15 @@ fn property_reg(fdt: &mut FdtBuilder, regions: &[(u64, u64)]) {
     fdt.property_bytes("reg", &make_reg_cells(regions));
 }
 
+fn property_string_list(fdt: &mut FdtBuilder, name: &str, values: &[&str]) {
+    let mut data = Vec::new();
+    for value in values {
+        data.extend_from_slice(value.as_bytes());
+        data.push(0);
+    }
+    fdt.property_bytes(name, &data);
+}
+
 fn build_fdt(
     cmdline: &str,
     ram_size: u64,
@@ -469,9 +535,9 @@ fn build_fdt(
     fdt.property_u32("#interrupt-cells", 1);
     fdt.end_node();
 
-    fdt.begin_node(&format!("memory@{VIRT_RAM_BASE:x}"));
+    fdt.begin_node("memory@0");
     fdt.property_string("device_type", "memory");
-    property_reg(&mut fdt, &[(VIRT_RAM_BASE, ram_size)]);
+    property_reg(&mut fdt, &[(0, ram_size)]);
     fdt.end_node();
 
     fdt.begin_node(&format!("ipi@{VIRT_IPI_BASE:x}"));
@@ -481,7 +547,11 @@ fn build_fdt(
 
     fdt.begin_node(&format!("eiointc@{VIRT_EIOINTC_BASE:x}"));
     fdt.property_u32("phandle", eiointc_phandle);
-    fdt.property_string("compatible", "loongson,ls2k2000-eiointc");
+    property_string_list(
+        &mut fdt,
+        "compatible",
+        &["loongson,ls2k2000-eiointc", "loongson,htvec-1.0"],
+    );
     property_reg(&mut fdt, &[(VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE)]);
     fdt.property_bytes("interrupt-controller", &[]);
     fdt.property_u32("#interrupt-cells", 1);
@@ -547,7 +617,7 @@ fn build_boot_memmap(ram_size: u64) -> Vec<u8> {
 
     let desc = EFI_BOOT_MEMMAP_SIZE;
     push_le_u32(&mut memmap, desc, EFI_CONVENTIONAL_MEMORY);
-    push_le_u64(&mut memmap, desc + 8, VIRT_RAM_BASE);
+    push_le_u64(&mut memmap, desc + 8, 0);
     push_le_u64(&mut memmap, desc + 24, ram_size / 4096);
     memmap
 }
@@ -633,12 +703,19 @@ fn write_boot_parameters(
     )?;
     reject_overlap(boot_window, kernel_ranges)?;
 
-    let cmdline_addr = base;
-    let fdt_addr = base + BOOT_FDT_OFFSET;
-    let system_table_addr = base + BOOT_SYSTEM_TABLE_OFFSET;
-    let config_table_addr = base + BOOT_CONFIG_TABLE_OFFSET;
-    let memmap_addr = base + BOOT_MEMMAP_OFFSET;
-    let initrd_table_addr = base + BOOT_INITRD_TABLE_OFFSET;
+    let cmdline_guest_addr = base;
+    let fdt_guest_addr = base + BOOT_FDT_OFFSET;
+    let system_table_guest_addr = base + BOOT_SYSTEM_TABLE_OFFSET;
+    let config_table_guest_addr = base + BOOT_CONFIG_TABLE_OFFSET;
+    let memmap_guest_addr = base + BOOT_MEMMAP_OFFSET;
+    let initrd_table_guest_addr = base + BOOT_INITRD_TABLE_OFFSET;
+
+    let cmdline_addr = boot_phys_addr(cmdline_guest_addr);
+    let fdt_addr = boot_phys_addr(fdt_guest_addr);
+    let system_table_addr = boot_phys_addr(system_table_guest_addr);
+    let config_table_addr = boot_phys_addr(config_table_guest_addr);
+    let memmap_addr = boot_phys_addr(memmap_guest_addr);
+    let initrd_table_addr = boot_phys_addr(initrd_table_guest_addr);
 
     let cmdline = config.cmdline.unwrap_or("");
     if cmdline.len() + 1 > COMMAND_LINE_SIZE {
@@ -653,7 +730,7 @@ fn write_boot_parameters(
         plan_initrd(config.initrd_path, ram_size, base, kernel_ranges)?;
     let initrd = initrd_plan
         .as_ref()
-        .map(|plan| (plan.range.start, plan.len));
+        .map(|plan| (boot_phys_addr(plan.range.start), plan.len));
     let fdt = build_fdt(cmdline, ram_size, initrd, config.has_virtio_mmio);
     let fdt_limit = BOOT_SYSTEM_TABLE_OFFSET - BOOT_FDT_OFFSET;
     if fdt.len() as u64 > fdt_limit {
@@ -685,7 +762,7 @@ fn write_boot_parameters(
         let initrd_table = build_initrd_table(initrd);
         load_binary_checked(
             &initrd_table,
-            initrd_table_addr,
+            initrd_table_guest_addr,
             ram_size,
             address_space,
             "EFI initrd table",
@@ -701,29 +778,29 @@ fn write_boot_parameters(
     cmdline_bytes.push(0);
     load_binary_checked(
         &cmdline_bytes,
-        cmdline_addr,
+        cmdline_guest_addr,
         ram_size,
         address_space,
         "kernel command line",
     )?;
-    load_binary_checked(&fdt, fdt_addr, ram_size, address_space, "FDT")?;
+    load_binary_checked(&fdt, fdt_guest_addr, ram_size, address_space, "FDT")?;
     load_binary_checked(
         &system_table,
-        system_table_addr,
+        system_table_guest_addr,
         ram_size,
         address_space,
         "boot system table",
     )?;
     load_binary_checked(
         &entries,
-        config_table_addr,
+        config_table_guest_addr,
         ram_size,
         address_space,
         "EFI config table",
     )?;
     load_binary_checked(
         &memmap,
-        memmap_addr,
+        memmap_guest_addr,
         ram_size,
         address_space,
         "EFI boot memmap",
@@ -738,7 +815,8 @@ pub fn load_direct_kernel(
     ram_size: u64,
     address_space: &AddressSpace,
 ) -> BootResult<DirectKernelBoot> {
-    let kernel = std::fs::read(kernel_path)?;
+    let kernel_file = std::fs::read(kernel_path)?;
+    let kernel = unpack_efi_zboot_image(&kernel_file)?.unwrap_or(kernel_file);
     let plan = if is_elf(&kernel) {
         analyze_elf_kernel(&kernel, VIRT_RAM_BASE, ram_size)?
     } else if let Some(header) = parse_linux_image_header(&kernel)? {

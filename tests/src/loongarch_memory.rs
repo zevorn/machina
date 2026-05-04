@@ -22,9 +22,32 @@ const OP_ST_B: u32 = 0b0010100100;
 const OP_ST_H: u32 = 0b0010100101;
 const OP_ST_W: u32 = 0b0010100110;
 const OP_ST_D: u32 = 0b0010100111;
+const OP_LDX_B: u32 = 0b00111000000000000;
+const OP_LDX_H: u32 = 0b00111000000001000;
+const OP_LDX_W: u32 = 0b00111000000010000;
+const OP_LDX_D: u32 = 0b00111000000011000;
+const OP_STX_B: u32 = 0b00111000000100000;
+const OP_STX_H: u32 = 0b00111000000101000;
+const OP_STX_W: u32 = 0b00111000000110000;
+const OP_STX_D: u32 = 0b00111000000111000;
+const OP_LDX_BU: u32 = 0b00111000001000000;
+const OP_LDX_HU: u32 = 0b00111000001001000;
+const OP_LDX_WU: u32 = 0b00111000001010000;
+const OP_LDPTR_W: u32 = 0b00100100;
+const OP_STPTR_W: u32 = 0b00100101;
+const OP_LDPTR_D: u32 = 0b00100110;
+const OP_STPTR_D: u32 = 0b00100111;
 
 fn r2_si12(op: u32, si12: i16, rj: u32, rd: u32) -> u32 {
     (op << 22) | ((si12 as u16 as u32 & 0x0FFF) << 10) | (rj << 5) | rd
+}
+
+fn r3(op: u32, rk: u32, rj: u32, rd: u32) -> u32 {
+    (op << 15) | (rk << 10) | (rj << 5) | rd
+}
+
+fn r2_si14(op: u32, si14: i16, rj: u32, rd: u32) -> u32 {
+    (op << 24) | ((si14 as u16 as u32 & 0x3FFF) << 10) | (rj << 5) | rd
 }
 
 fn run_la(cpu: &mut LoongArchCpu, insns: &[u32]) -> usize {
@@ -137,4 +160,81 @@ fn loongarch_aligned_stores_write_expected_widths() {
     assert_eq!(&mem[4..8], &0x4455_6677u32.to_le_bytes());
     assert_eq!(&mem[8..16], &0x8899_AABB_CCDD_EEFFu64.to_le_bytes());
     assert_eq!(&mem[16..], &[0xAA; 16]);
+}
+
+#[test]
+fn task47_indexed_integer_memory_paths_work_for_kernel_boot() {
+    let mut mem = [0xAAu8; 64];
+    mem[12] = 0x80;
+    mem[14..16].copy_from_slice(&0x8001u16.to_le_bytes());
+    mem[20..24].copy_from_slice(&0x8000_0002u32.to_le_bytes());
+    mem[28..36].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+    mem[40] = 0x80;
+    mem[42..44].copy_from_slice(&0x8001u16.to_le_bytes());
+    mem[48..52].copy_from_slice(&0x8000_0002u32.to_le_bytes());
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_guest_base(mem.as_mut_ptr() as u64);
+    cpu.write_gpr(10, 8);
+    cpu.write_gpr(11, 4);
+    cpu.write_gpr(12, 6);
+    cpu.write_gpr(13, 12);
+    cpu.write_gpr(14, 20);
+    cpu.write_gpr(20, 0x11);
+    cpu.write_gpr(21, 0x2233);
+    cpu.write_gpr(22, 0x4455_6677);
+    cpu.write_gpr(23, 0x8899_AABB_CCDD_EEFF);
+
+    let insns = [
+        r3(OP_LDX_B, 11, 10, 1),
+        r3(OP_LDX_H, 12, 10, 2),
+        r3(OP_LDX_W, 13, 10, 3),
+        r3(OP_LDX_D, 14, 10, 4),
+        r3(OP_LDX_BU, 11, 10, 5),
+        r3(OP_LDX_HU, 12, 10, 6),
+        r3(OP_LDX_WU, 13, 10, 7),
+        r3(OP_STX_B, 11, 10, 20),
+        r3(OP_STX_H, 12, 10, 21),
+        r3(OP_STX_W, 13, 10, 22),
+        r3(OP_STX_D, 14, 10, 23),
+    ];
+
+    assert_eq!(run_la(&mut cpu, &insns), 0);
+    assert_eq!(cpu.read_gpr(1), (-128i64) as u64);
+    assert_eq!(cpu.read_gpr(2), (-32767i64) as u64);
+    assert_eq!(cpu.read_gpr(3), i64::from(i32::MIN + 2) as u64);
+    assert_eq!(cpu.read_gpr(4), 0x1122_3344_5566_7788);
+    assert_eq!(cpu.read_gpr(5), 0x80);
+    assert_eq!(cpu.read_gpr(6), 0x8001);
+    assert_eq!(cpu.read_gpr(7), 0x8000_0002);
+    assert_eq!(mem[12], 0x11);
+    assert_eq!(&mem[14..16], &0x2233u16.to_le_bytes());
+    assert_eq!(&mem[20..24], &0x4455_6677u32.to_le_bytes());
+    assert_eq!(&mem[28..36], &0x8899_AABB_CCDD_EEFFu64.to_le_bytes());
+}
+
+#[test]
+fn task47_pointer_memory_paths_work_for_kernel_boot() {
+    let mut mem = [0xAAu8; 128];
+    mem[20..24].copy_from_slice(&0x8000_0002u32.to_le_bytes());
+    mem[32..40].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_guest_base(mem.as_mut_ptr() as u64);
+    cpu.write_gpr(10, 16);
+    cpu.write_gpr(20, 0x4455_6677);
+    cpu.write_gpr(21, 0x8899_AABB_CCDD_EEFF);
+
+    let insns = [
+        r2_si14(OP_LDPTR_W, 1, 10, 1),
+        r2_si14(OP_LDPTR_D, 4, 10, 2),
+        r2_si14(OP_STPTR_W, 2, 10, 20),
+        r2_si14(OP_STPTR_D, 8, 10, 21),
+    ];
+
+    assert_eq!(run_la(&mut cpu, &insns), 0);
+    assert_eq!(cpu.read_gpr(1), i64::from(i32::MIN + 2) as u64);
+    assert_eq!(cpu.read_gpr(2), 0x1122_3344_5566_7788);
+    assert_eq!(&mem[24..28], &0x4455_6677u32.to_le_bytes());
+    assert_eq!(&mem[48..56], &0x8899_AABB_CCDD_EEFFu64.to_le_bytes());
 }

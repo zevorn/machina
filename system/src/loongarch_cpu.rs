@@ -26,6 +26,8 @@ pub const LOONGARCH_TB_FLAG_FPE: u32 = 1 << 4;
 const TARGET_PAGE_SIZE: u64 = 0x1000;
 const TARGET_PAGE_MASK: u64 = !(TARGET_PAGE_SIZE - 1);
 const TARGET_PAGE_OFFSET_MASK: u64 = TARGET_PAGE_SIZE - 1;
+const LOONGARCH_MAX_TB_INSNS: u32 = 64;
+const RUNTIME_TIMER_TICK: u64 = LOONGARCH_MAX_TB_INSNS as u64;
 
 #[must_use]
 pub fn loongarch_soft_mmu_config() -> SoftMmuConfig {
@@ -99,6 +101,7 @@ impl GuestCpu for LoongArchFullSystemCpu {
 
     fn has_pending_irq(&self) -> bool {
         self.cpu.masked_interrupt_line().is_some()
+            || loongarch_timer_counting(&self.cpu)
     }
 
     fn is_halted(&self) -> bool {
@@ -126,6 +129,7 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn check_mem_fault(&mut self) -> bool {
+        self.cpu.timer_tick(RUNTIME_TIMER_TICK);
         self.cpu.take_translation_fault_pending()
     }
 
@@ -215,7 +219,8 @@ impl GuestCpu for SharedLoongArchFullSystemCpu {
     }
 
     fn has_pending_irq(&self) -> bool {
-        self.cpu.lock().unwrap().masked_interrupt_line().is_some()
+        let cpu = self.cpu.lock().unwrap();
+        cpu.masked_interrupt_line().is_some() || loongarch_timer_counting(&cpu)
     }
 
     fn is_halted(&self) -> bool {
@@ -243,7 +248,9 @@ impl GuestCpu for SharedLoongArchFullSystemCpu {
     }
 
     fn check_mem_fault(&mut self) -> bool {
-        self.cpu.lock().unwrap().take_translation_fault_pending()
+        let mut cpu = self.cpu.lock().unwrap();
+        cpu.timer_tick(RUNTIME_TIMER_TICK);
+        cpu.take_translation_fault_pending()
     }
 
     fn set_exit_request(&mut self) {
@@ -315,12 +322,17 @@ fn loongarch_tb_flags(cpu: &LoongArchCpu) -> u32 {
     plv | da | pg | fpe
 }
 
+fn loongarch_timer_counting(cpu: &LoongArchCpu) -> bool {
+    cpu.csr_read(CSR_TCFG) & 1 != 0 && cpu.tval() != 0
+}
+
 fn loongarch_gen_code(
     cpu: &mut LoongArchCpu,
     ir: &mut Context,
     pc: u64,
     max_insns: u32,
 ) -> u32 {
+    machina_util::trace::trace_tb(pc, loongarch_tb_flags(cpu));
     let phys_pc = match cpu.translate_address_or_exception(
         pc,
         mmu::AccessType::Fetch,
@@ -339,7 +351,7 @@ fn loongarch_gen_code(
         .wrapping_sub(pc as usize) as *const u8;
     let cfg = LoongArchCfg::default();
     let mut ctx = LoongArchDisasContext::new(pc, guest_base, cfg);
-    ctx.base.max_insns = max_insns;
+    ctx.base.max_insns = max_insns.min(LOONGARCH_MAX_TB_INSNS);
 
     if ir.nb_globals() == 0 {
         LoongArchTranslator::init_disas_context(&mut ctx, ir);
@@ -372,6 +384,7 @@ fn loongarch_handle_interrupt(cpu: &mut LoongArchCpu) {
     let Some(irq) = cpu.pending_interrupt_line() else {
         return;
     };
+    machina_util::trace::trace_exception(0, cpu.pc());
     let vec = unsafe {
         machina_guest_loongarch::loongarch::trans::helpers
             ::loongarch_helper_raise_exception(
@@ -385,6 +398,7 @@ fn loongarch_handle_interrupt(cpu: &mut LoongArchCpu) {
 
 fn loongarch_handle_exception(cpu: &mut LoongArchCpu) {
     // LoongArch EXCP_UNDEF -> raise INE (illegal instruction).
+    machina_util::trace::trace_exception(0x0D, cpu.pc());
     unsafe {
         let vec = machina_guest_loongarch::loongarch::trans::helpers
             ::loongarch_helper_raise_exception(
@@ -404,6 +418,13 @@ fn loongarch_handle_arch_exit(
         EXCP_LOONGARCH_DONE => ArchExitAction::Continue,
         EXCP_LOONGARCH_WFI => {
             cpu.set_halted_flag(true);
+            if !cpu.pending_interrupt() {
+                let tcfg = cpu.csr_read(CSR_TCFG);
+                let tval = cpu.tval();
+                if tcfg & 1 != 0 && tval != 0 {
+                    cpu.timer_tick(tval);
+                }
+            }
             if !cpu.pending_interrupt() {
                 cpu.set_halted_flag(false);
                 return ArchExitAction::Halted;
