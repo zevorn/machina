@@ -70,11 +70,11 @@ pub const ECFG_WRITE_MASK: u64 = 0x0000_0000_0007_FFFF;
 pub const ESTAT_WRITE_MASK: u64 = 0x3;
 pub const ERA_WRITE_MASK: u64 = u64::MAX;
 pub const BADV_WRITE_MASK: u64 = u64::MAX;
-pub const BADI_WRITE_MASK: u64 = u64::MAX;
+pub const BADI_WRITE_MASK: u64 = 0;
 pub const EENTRY_WRITE_MASK: u64 = !0x3F_u64;
 pub const TLBIDX_WRITE_MASK: u64 = 0xBF00_0FFF;
 pub const TLBEHI_WRITE_MASK: u64 = !0x1FFF_u64;
-pub const TLBELO_WRITE_MASK: u64 = 0x2000_FFFF_FFFF_FFFF;
+pub const TLBELO_WRITE_MASK: u64 = 0xE000_FFFF_FFFF_FFFF;
 pub const ASID_WRITE_MASK: u64 = 0x3FF;
 pub const PGDL_WRITE_MASK: u64 = !0xFFF_u64;
 pub const PGDH_WRITE_MASK: u64 = !0xFFF_u64;
@@ -97,13 +97,20 @@ pub const TLBRENTRY_WRITE_MASK: u64 = !0x3F_u64;
 pub const TLBRBADV_WRITE_MASK: u64 = u64::MAX;
 pub const TLBRERA_WRITE_MASK: u64 = u64::MAX;
 pub const TLBRSAVE_WRITE_MASK: u64 = u64::MAX;
-pub const TLBRELO_WRITE_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-pub const TLBREHI_WRITE_MASK: u64 = !0x3F_u64;
+pub const TLBRELO_WRITE_MASK: u64 = 0xE000_FFFF_FFFF_FFFF;
+pub const TLBREHI_WRITE_MASK: u64 = !0x1FC0_u64;
 pub const TLBRPRMD_WRITE_MASK: u64 = 0x7;
-pub const DMW_WRITE_MASK: u64 = 0xF000_0000_0E00_0039;
+pub const DMW_WRITE_MASK: u64 = 0xF000_0000_0E00_003F;
 pub const SAVE_WRITE_MASK: u64 = u64::MAX;
 
 impl LoongArchCpu {
+    fn write_dmw(&mut self, idx: usize, val: u64) {
+        if self.dmw[idx] != val {
+            self.dmw[idx] = val;
+            self.invalidate_tlb_translations();
+        }
+    }
+
     pub fn csr_read(&self, num: u32) -> u64 {
         match num {
             CSR_CRMD => self.crmd,
@@ -124,7 +131,11 @@ impl LoongArchCpu {
             CSR_PGDL => self.pgdl,
             CSR_PGDH => self.pgdh,
             CSR_PGD => {
-                let badv = self.badv;
+                let badv = if self.tlbrera & 1 != 0 {
+                    self.tlbrbadv
+                } else {
+                    self.badv
+                };
                 if badv & (1 << 63) != 0 {
                     self.pgdh
                 } else {
@@ -190,7 +201,7 @@ impl LoongArchCpu {
 
     fn csr_write_raw(&mut self, num: u32, val: u64) {
         match num {
-            CSR_CRMD => self.crmd = val,
+            CSR_CRMD => self.set_crmd(val),
             CSR_PRMD => self.prmd = val,
             CSR_EUEN => self.euen = val,
             CSR_ECFG => self.ecfg = val,
@@ -201,18 +212,25 @@ impl LoongArchCpu {
             }
             CSR_ERA => self.era = val,
             CSR_BADV => self.badv = val,
-            CSR_BADI => self.badi = val,
             CSR_EENTRY => self.eentry = val,
             CSR_TLBIDX => self.tlbidx = val,
             CSR_TLBEHI => self.tlbehi = val,
             CSR_TLBELO0 => self.tlbelo0 = val,
             CSR_TLBELO1 => self.tlbelo1 = val,
-            CSR_ASID => self.asid = val,
+            CSR_ASID => {
+                self.set_asid_low(val);
+            }
             CSR_PGDL => self.pgdl = val,
             CSR_PGDH => self.pgdh = val,
             CSR_PWCL => self.pwcl = val,
             CSR_PWCH => self.pwch = val,
-            CSR_STLBPS => self.stlbps = val,
+            CSR_STLBPS => {
+                let old = self.stlbps;
+                self.stlbps = val;
+                if old != val {
+                    self.invalidate_tlb_translations();
+                }
+            }
             CSR_TID => self.tid = val,
             CSR_TCFG => {
                 self.tcfg = val;
@@ -223,7 +241,7 @@ impl LoongArchCpu {
             CSR_CNTC => self.cntc = val,
             CSR_TICLR => {
                 if val & 1 != 0 {
-                    self.estat &= !(1 << 11);
+                    self.set_timer_interrupt_pending(false);
                 }
             }
             CSR_LLBCTL => {
@@ -239,10 +257,10 @@ impl LoongArchCpu {
             CSR_TLBRELO1 => self.tlbrelo1 = val,
             CSR_TLBREHI => self.tlbrehi = val,
             CSR_TLBRPRMD => self.tlbrprmd = val,
-            CSR_DMW0 => self.dmw[0] = val,
-            CSR_DMW1 => self.dmw[1] = val,
-            CSR_DMW2 => self.dmw[2] = val,
-            CSR_DMW3 => self.dmw[3] = val,
+            CSR_DMW0 => self.write_dmw(0, val),
+            CSR_DMW1 => self.write_dmw(1, val),
+            CSR_DMW2 => self.write_dmw(2, val),
+            CSR_DMW3 => self.write_dmw(3, val),
             n if (CSR_SAVE0..=CSR_SAVE_LAST).contains(&n) => {
                 self.save[(n - CSR_SAVE0) as usize] = val;
             }

@@ -215,6 +215,9 @@ where
                 if cpu.check_mem_fault() {
                     continue;
                 }
+                if flush_pending_tbs(shared, per_cpu, cpu, &mut next_tb_hint) {
+                    continue 'dispatch;
+                }
 
                 let pc = cpu.get_pc();
                 let flags = cpu.get_flags();
@@ -234,6 +237,9 @@ where
             v if v == TB_EXIT_NOCHAIN as usize => {
                 per_cpu.stats.nochain_exit += 1;
                 if cpu.check_mem_fault() {
+                    continue 'dispatch;
+                }
+                if flush_pending_tbs(shared, per_cpu, cpu, &mut next_tb_hint) {
                     continue 'dispatch;
                 }
 
@@ -382,13 +388,7 @@ where
                 if !cpu.handle_priv_csr() {
                     cpu.handle_exception(2, 0);
                 }
-                if cpu.take_tb_flush_pending() {
-                    shared
-                        .tb_store
-                        .invalidate_all(shared.code_buf(), &shared.backend);
-                    per_cpu.jump_cache.invalidate();
-                    next_tb_hint = None;
-                }
+                flush_pending_tbs(shared, per_cpu, cpu, &mut next_tb_hint);
             }
             v if v == EXCP_EBREAK as usize => {
                 per_cpu.stats.real_exit += 1;
@@ -450,6 +450,27 @@ where
             return ExitReason::Halted;
         }
     }
+}
+
+fn flush_pending_tbs<B, C>(
+    shared: &SharedState<B>,
+    per_cpu: &mut PerCpuState,
+    cpu: &mut C,
+    next_tb_hint: &mut Option<usize>,
+) -> bool
+where
+    B: HostCodeGen,
+    C: GuestCpu<IrContext = Context>,
+{
+    if !cpu.take_tb_flush_pending() {
+        return false;
+    }
+    shared
+        .tb_store
+        .invalidate_all(shared.code_buf(), &shared.backend);
+    per_cpu.jump_cache.invalidate();
+    *next_tb_hint = None;
+    true
 }
 
 /// Find a TB for the given (pc, flags), translating if needed.

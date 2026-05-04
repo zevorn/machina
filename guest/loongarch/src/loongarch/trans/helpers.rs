@@ -5,6 +5,25 @@
     clippy::missing_const_for_fn
 )]
 
+use super::super::cpu::LoongArchCpu;
+use super::super::csr::{CRMD_DA, CRMD_PG, CRMD_PLV_MASK};
+use super::super::exception::{ECODE_FPD, ECODE_INE, ECODE_IPE};
+
+fn enter_exception(
+    cpu: &mut LoongArchCpu,
+    ecode: u64,
+    esubcode: u64,
+    badv: Option<u64>,
+) -> u64 {
+    cpu.enter_exception(ecode, esubcode, badv)
+}
+
+fn clear_ll_sc_reservation(cpu: &mut LoongArchCpu) {
+    cpu.llbctl = 0;
+    cpu.ll_res_addr = u64::MAX;
+    cpu.ll_res_val = 0;
+}
+
 #[no_mangle]
 pub extern "C" fn loongarch_helper_div_d(a: i64, b: i64) -> i64 {
     let divisor = if b == 0 || (a == i64::MIN && b == -1) {
@@ -152,17 +171,12 @@ pub extern "C" fn loongarch_helper_bitrev_d(a: u64) -> u64 {
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
 pub unsafe extern "C" fn loongarch_helper_check_fpe(env: *mut u8) -> u64 {
-    use super::super::csr::*;
-    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    use super::super::csr::EUEN_FPE;
+    let cpu = &mut *(env.cast::<LoongArchCpu>());
     if cpu.euen & EUEN_FPE != 0 {
         return 0;
     }
-    let pc = cpu.pc;
-    cpu.era = pc;
-    cpu.prmd = cpu.crmd & 0x7;
-    cpu.crmd = cpu.crmd & !CRMD_PLV_MASK & !CRMD_IE;
-    cpu.estat = (cpu.estat & ESTAT_IS_MASK) | (0x0F << 16);
-    cpu.eentry
+    enter_exception(cpu, u64::from(ECODE_FPD), 0, None)
 }
 
 /// # Safety
@@ -615,6 +629,31 @@ pub unsafe extern "C" fn loongarch_helper_tlbfill(env: *mut u8) -> u64 {
     0
 }
 
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_lddir(
+    env: *mut u8,
+    base: u64,
+    level: u64,
+) -> u64 {
+    let cpu = &*(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.lddir(base, level)
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_ldpte(
+    env: *mut u8,
+    base: u64,
+    odd: u64,
+) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.ldpte(base, odd);
+    0
+}
+
 /// Returns 0 on success, nonzero (exception vector) for invalid opcode.
 ///
 /// # Safety
@@ -626,38 +665,26 @@ pub unsafe extern "C" fn loongarch_helper_invtlb(
     asid_val: u64,
     va: u64,
 ) -> u64 {
-    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    let cpu = &mut *(env.cast::<LoongArchCpu>());
     if op > 6 {
-        use super::super::csr::*;
-        cpu.era = cpu.pc;
-        cpu.prmd = cpu.crmd & 0x7;
-        cpu.crmd = cpu.crmd & !CRMD_PLV_MASK & !CRMD_IE;
-        cpu.estat = (cpu.estat & ESTAT_IS_MASK) | (0x0D << 16);
-        return cpu.eentry;
+        return enter_exception(cpu, u64::from(ECODE_INE), 0, None);
     }
     cpu.invtlb(op as u32, asid_val as u16, va);
     0
 }
 
-/// Returns 0 if PLV==0 (privileged access OK).
-/// Otherwise raises IPE exception and returns the exception vector.
+/// Returns 0 unless the current mode is user PLV3.
+/// PLV3 raises IPE and returns the exception vector.
 ///
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
 pub unsafe extern "C" fn loongarch_helper_check_plv(env: *mut u8) -> u64 {
-    use super::super::csr::*;
-    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
-    if cpu.crmd & CRMD_PLV_MASK == 0 {
+    let cpu = &mut *(env.cast::<LoongArchCpu>());
+    if cpu.crmd & CRMD_PLV_MASK != CRMD_PLV_MASK {
         return 0;
     }
-    // Raise IPE (Instruction Privilege Error)
-    let pc = cpu.pc;
-    cpu.era = pc;
-    cpu.prmd = cpu.crmd & 0x7;
-    cpu.crmd = cpu.crmd & !CRMD_PLV_MASK & !CRMD_IE;
-    cpu.estat = (cpu.estat & ESTAT_IS_MASK) | (0x0E << 16);
-    cpu.eentry
+    enter_exception(cpu, u64::from(ECODE_IPE), 0, None)
 }
 
 /// # Safety
@@ -668,51 +695,43 @@ pub unsafe extern "C" fn loongarch_helper_raise_exception(
     ecode: u64,
     esubcode: u64,
 ) -> u64 {
-    use super::super::csr::*;
-    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
-    let pc = cpu.pc;
+    let cpu = &mut *(env.cast::<LoongArchCpu>());
+    enter_exception(cpu, ecode, esubcode, None)
+}
 
-    if ecode == 0x3F {
-        // TLB refill: save to TLBR-specific CSRs
-        cpu.tlbrera = (pc & !0x3) | 1; // ISTLBR=1, PC in [63:2]
-        cpu.tlbrprmd = cpu.crmd & 0x7;
-        // Force DA mode, PLV0, IE=0 for TLB refill handler
-        cpu.crmd = (cpu.crmd & !CRMD_PLV_MASK & !CRMD_IE & !CRMD_PG) | CRMD_DA;
-    } else {
-        cpu.era = pc;
-        cpu.prmd = cpu.crmd & 0x7;
-        cpu.crmd = cpu.crmd & !CRMD_PLV_MASK & !CRMD_IE;
-    }
-
-    let estat_val = (cpu.estat & ESTAT_IS_MASK)
-        | ((ecode & 0x3F) << 16)
-        | ((esubcode & 0x1FF) << 22);
-    cpu.estat = estat_val;
-
-    if ecode == 0x3F {
-        cpu.tlbrentry
-    } else {
-        cpu.eentry
-    }
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_raise_exception_with_badv(
+    env: *mut u8,
+    ecode: u64,
+    esubcode: u64,
+    badv: u64,
+) -> u64 {
+    let cpu = &mut *(env.cast::<LoongArchCpu>());
+    enter_exception(cpu, ecode, esubcode, Some(badv))
 }
 
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
 pub unsafe extern "C" fn loongarch_helper_ertn(env: *mut u8) -> u64 {
-    use super::super::csr::*;
-    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
-    if cpu.tlbrera & 1 != 0 {
+    let cpu = &mut *(env.cast::<LoongArchCpu>());
+    let pc = if cpu.tlbrera & 1 != 0 {
         // Return from TLB refill: restore PLV/IE, clear DA, set PG
         let pplv_pie = cpu.tlbrprmd & 0x7;
-        cpu.crmd = (cpu.crmd & !0x7 & !CRMD_DA & !CRMD_PG) | pplv_pie | CRMD_PG;
+        cpu.set_crmd(
+            (cpu.crmd & !0x7 & !CRMD_DA & !CRMD_PG) | pplv_pie | CRMD_PG,
+        );
         let pc = cpu.tlbrera & !0x3;
         cpu.tlbrera &= !1; // Clear ISTLBR
         pc
     } else {
-        cpu.crmd = (cpu.crmd & !0x7) | (cpu.prmd & 0x7);
+        cpu.set_crmd((cpu.crmd & !0x7) | (cpu.prmd & 0x7));
         cpu.era
-    }
+    };
+    clear_ll_sc_reservation(cpu);
+    pc
 }
 
 /// # Safety

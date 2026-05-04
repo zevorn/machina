@@ -6,6 +6,7 @@ use machina_accel::ir::tb::{EXCP_ARCH_DONE, EXCP_UNDEF, TB_EXIT_IDX0};
 use machina_accel::ir::{Context, TempIdx, Type};
 
 use super::cpu::{gpr_offset, NUM_GPRS, PC_OFFSET};
+use super::exception::{ECODE_BRK, ECODE_SYS};
 use super::ext::LoongArchCfg;
 use super::insn_decode;
 use crate::{DisasContextBase, DisasJumpType, TranslatorOps};
@@ -2598,18 +2599,18 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
     fn trans_syscall(
         &mut self,
         ir: &mut Context,
-        a: &insn_decode::ArgsCode,
+        _a: &insn_decode::ArgsCode,
     ) -> bool {
         let env_tmp = self.env;
         let pc = ir.new_const(Type::I64, self.base.pc_next - 4);
         ir.gen_mov(Type::I64, self.pc, pc);
-        let ecode = ir.new_const(Type::I64, 0x0B);
-        let code = ir.new_const(Type::I64, a.code15 as u64);
+        let ecode = ir.new_const(Type::I64, u64::from(ECODE_SYS));
+        let esubcode = ir.new_const(Type::I64, 0);
         let d = ir.new_temp(Type::I64);
         ir.gen_call(
             d,
             helpers::loongarch_helper_raise_exception as *const () as u64,
-            &[env_tmp, ecode, code],
+            &[env_tmp, ecode, esubcode],
         );
         ir.gen_mov(Type::I64, self.pc, d);
         ir.gen_exit_tb(EXCP_ARCH_DONE);
@@ -2620,18 +2621,18 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
     fn trans_break_(
         &mut self,
         ir: &mut Context,
-        a: &insn_decode::ArgsCode,
+        _a: &insn_decode::ArgsCode,
     ) -> bool {
         let env_tmp = self.env;
         let pc = ir.new_const(Type::I64, self.base.pc_next - 4);
         ir.gen_mov(Type::I64, self.pc, pc);
-        let ecode = ir.new_const(Type::I64, 0x0C);
-        let code = ir.new_const(Type::I64, a.code15 as u64);
+        let ecode = ir.new_const(Type::I64, u64::from(ECODE_BRK));
+        let esubcode = ir.new_const(Type::I64, 0);
         let d = ir.new_temp(Type::I64);
         ir.gen_call(
             d,
             helpers::loongarch_helper_raise_exception as *const () as u64,
-            &[env_tmp, ecode, code],
+            &[env_tmp, ecode, esubcode],
         );
         ir.gen_mov(Type::I64, self.pc, d);
         ir.gen_exit_tb(EXCP_ARCH_DONE);
@@ -2763,6 +2764,11 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
             helpers::loongarch_helper_tlbrd as *const () as u64,
             &[env_tmp],
         );
+        let pc_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
 
@@ -2793,6 +2799,11 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
             helpers::loongarch_helper_tlbwr as *const () as u64,
             &[env_tmp],
         );
+        let pc_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
 
@@ -2822,6 +2833,78 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
             d,
             helpers::loongarch_helper_tlbfill as *const () as u64,
             &[env_tmp],
+        );
+        let pc_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_lddir(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Ui8,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
+        ir.gen_set_label(label_ok);
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let level = ir.new_const(Type::I64, a.ui8 as u64);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_lddir as *const () as u64,
+            &[env_tmp, base, level],
+        );
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_ldpte(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Ui8,
+    ) -> bool {
+        use gen_common::gpr_get;
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
+        ir.gen_set_label(label_ok);
+        let base = gpr_get(&self.gpr, ir, a.rj as u8);
+        let odd = ir.new_const(Type::I64, a.ui8 as u64);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_ldpte as *const () as u64,
+            &[env_tmp, base, odd],
         );
         true
     }
@@ -2863,6 +2946,11 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_mov(Type::I64, self.pc, d);
         ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_done);
+        let pc_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
 

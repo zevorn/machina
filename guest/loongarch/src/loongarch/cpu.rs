@@ -1,14 +1,32 @@
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 
+use super::csr::{
+    ASID_WRITE_MASK, CRMD_DA, CRMD_IE, CRMD_PG, CRMD_PLV_MASK, ESTAT_IS_MASK,
+};
+use super::exception::{
+    ECODE_PIF, ECODE_PIL, ECODE_PIS, ECODE_PME, ECODE_PNR, ECODE_PNX,
+    ECODE_PPI, ECODE_TLBR,
+};
 use super::ext::LoongArchCfg;
-use super::mmu::LoongArchMmu;
+use super::mmu::{
+    self, AccessType, LoongArchMmu, TlbLookupResult, FAST_TLB_MMIO_ADDEND,
+    FAST_TLB_PAGE_MASK,
+};
 
 pub const NUM_GPRS: usize = 32;
 pub const NUM_FPRS: usize = 32;
 pub const NUM_FCC: usize = 8;
 pub const NUM_DMW: usize = 4;
 pub const NUM_SAVE: usize = 8;
+const TIMER_INTERRUPT_BIT: u64 = 1 << 11;
+const ECFG_VS_SHIFT: u64 = 16;
+const ECFG_VS_MASK: u64 = 0x7;
+const TLBENTRY_HUGE: u64 = 1 << 6;
+const TLBENTRY_HGLOBAL: u64 = 1 << 12;
+const TLBENTRY_LEVEL_SHIFT: u64 = 13;
+const TLBENTRY_LEVEL_MASK: u64 = 0x3;
+const HW_PTE_MASK_LA64: u64 = 0xE000_FFFF_FFFF_F1FF;
 
 #[repr(C)]
 pub struct LoongArchCpu {
@@ -83,6 +101,9 @@ pub struct LoongArchCpu {
     pub(crate) code_pages_ptr: u64,
     pub(crate) code_pages_len: u64,
     pub(crate) tb_flush_pending: bool,
+    pub(crate) translation_fault_pending: bool,
+    pub(crate) mem_fault_cause: u64,
+    pub(crate) fault_pc: u64,
     pub(crate) cfg: LoongArchCfg,
 }
 
@@ -103,6 +124,12 @@ pub const LL_RES_VAL_OFFSET: usize = offset_of!(LoongArchCpu, ll_res_val);
 pub const RAM_BASE_OFFSET: usize = offset_of!(LoongArchCpu, ram_base);
 pub const RAM_END_OFFSET: usize = offset_of!(LoongArchCpu, ram_end);
 pub const GUEST_BASE_CPU_OFFSET: usize = offset_of!(LoongArchCpu, guest_base);
+pub const NEG_ALIGN_CPU_OFFSET: usize = offset_of!(LoongArchCpu, neg_align);
+pub const FAST_TLB_PTR_OFFSET: usize =
+    offset_of!(LoongArchCpu, mmu) + offset_of!(LoongArchMmu, fast_tlb);
+pub const MEM_FAULT_CAUSE_OFFSET: usize =
+    offset_of!(LoongArchCpu, mem_fault_cause);
+pub const FAULT_PC_OFFSET: usize = offset_of!(LoongArchCpu, fault_pc);
 
 #[must_use]
 pub const fn gpr_offset(i: usize) -> usize {
@@ -116,7 +143,7 @@ pub const fn fpr_offset(i: usize) -> usize {
 
 impl LoongArchCpu {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_cfg(LoongArchCfg {
             has_fpu: true,
             has_lsx: false,
@@ -126,7 +153,7 @@ impl LoongArchCpu {
     }
 
     #[must_use]
-    pub const fn with_cfg(cfg: LoongArchCfg) -> Self {
+    pub fn with_cfg(cfg: LoongArchCfg) -> Self {
         Self {
             gpr: [0; NUM_GPRS],
             pc: 0,
@@ -191,6 +218,9 @@ impl LoongArchCpu {
             code_pages_ptr: 0,
             code_pages_len: 0,
             tb_flush_pending: false,
+            translation_fault_pending: false,
+            mem_fault_cause: 0,
+            fault_pc: 0,
             cfg,
         }
     }
@@ -200,8 +230,20 @@ impl LoongArchCpu {
         self.crmd
     }
 
-    pub(crate) const fn set_crmd(&mut self, val: u64) {
+    pub(crate) fn set_crmd(&mut self, val: u64) {
+        let old = self.crmd;
         self.crmd = val;
+        if (old ^ val) & (CRMD_PLV_MASK | CRMD_DA | CRMD_PG) != 0 {
+            self.flush_fast_tlb();
+        }
+    }
+
+    pub(crate) fn set_asid_low(&mut self, val: u64) {
+        let old = self.asid;
+        self.asid = (self.asid & !ASID_WRITE_MASK) | (val & ASID_WRITE_MASK);
+        if (old ^ self.asid) & ASID_WRITE_MASK != 0 {
+            self.invalidate_tlb_translations();
+        }
     }
 
     #[must_use]
@@ -301,101 +343,411 @@ impl LoongArchCpu {
         &mut self.mmu
     }
 
+    #[must_use]
+    pub fn translate_address(
+        &self,
+        va: u64,
+        access: AccessType,
+    ) -> TlbLookupResult {
+        if let Some(pa) = mmu::direct_map_address(self, va) {
+            return TlbLookupResult::Hit { pa, mat: 0 };
+        }
+        if self.crmd & super::csr::CRMD_PG == 0 {
+            return TlbLookupResult::Miss;
+        }
+        self.mmu.tlb_lookup(
+            va,
+            (self.asid & 0x3FF) as u16,
+            self.stlbps as u8,
+            access,
+            (self.crmd & super::csr::CRMD_PLV_MASK) as u8,
+        )
+    }
+
+    pub fn translate_address_and_cache(
+        &mut self,
+        va: u64,
+        access: AccessType,
+    ) -> TlbLookupResult {
+        let result = self.translate_address(va, access);
+        if let TlbLookupResult::Hit { pa, .. } = result {
+            let addend = self.fast_tlb_addend(va, pa);
+            self.mmu.fill_fast_tlb(va, access, pa, addend);
+        }
+        result
+    }
+
+    pub fn translate_address_or_exception(
+        &mut self,
+        va: u64,
+        access: AccessType,
+        fault_pc: u64,
+    ) -> Result<u64, u64> {
+        match self.translate_address(va, access) {
+            TlbLookupResult::Hit { pa, .. } => Ok(pa),
+            fault => Err(self.enter_address_translation_exception(
+                va, access, fault, fault_pc,
+            )),
+        }
+    }
+
+    pub fn enter_address_translation_exception(
+        &mut self,
+        va: u64,
+        access: AccessType,
+        fault: TlbLookupResult,
+        fault_pc: u64,
+    ) -> u64 {
+        self.pc = fault_pc;
+        if fault == TlbLookupResult::Miss {
+            self.tlbrehi = (self.tlbrehi & 0x3F) | (va & !0x1FFF);
+        } else {
+            self.tlbehi = va & !0x1FFF;
+        }
+        let ecode = match fault {
+            TlbLookupResult::Miss => ECODE_TLBR,
+            TlbLookupResult::Invalid => match access {
+                AccessType::Load => ECODE_PIL,
+                AccessType::Store => ECODE_PIS,
+                AccessType::Fetch => ECODE_PIF,
+            },
+            TlbLookupResult::Dirty => ECODE_PME,
+            TlbLookupResult::PrivViolation => ECODE_PPI,
+            TlbLookupResult::ReadProtect => ECODE_PNR,
+            TlbLookupResult::ExecProtect => ECODE_PNX,
+            TlbLookupResult::Hit { .. } => unreachable!("hit is not a fault"),
+        };
+        self.enter_exception(u64::from(ecode), 0, Some(va))
+    }
+
+    pub(crate) fn enter_exception(
+        &mut self,
+        ecode: u64,
+        esubcode: u64,
+        badv: Option<u64>,
+    ) -> u64 {
+        let pc = self.pc;
+        if ecode == u64::from(ECODE_TLBR) {
+            self.tlbrera = (pc & !0x3) | 1;
+            self.tlbrprmd = self.crmd & 0x7;
+            if let Some(badv) = badv {
+                self.tlbrbadv = badv;
+            }
+            self.set_crmd(
+                (self.crmd & !CRMD_PLV_MASK & !CRMD_IE & !CRMD_PG) | CRMD_DA,
+            );
+            return self.tlbrentry;
+        }
+
+        self.era = pc;
+        self.prmd = self.crmd & 0x7;
+        if let Some(badv) = badv {
+            self.badv = badv;
+        }
+        self.set_crmd(self.crmd & !CRMD_PLV_MASK & !CRMD_IE);
+        self.estat = (self.estat & ESTAT_IS_MASK)
+            | ((ecode & 0x3F) << 16)
+            | ((esubcode & 0x1FF) << 22);
+        self.exception_vector(ecode)
+    }
+
+    fn exception_vector(&self, ecode: u64) -> u64 {
+        if ecode == u64::from(ECODE_TLBR) {
+            return self.tlbrentry;
+        }
+
+        let vs = (self.ecfg >> ECFG_VS_SHIFT) & ECFG_VS_MASK;
+        if vs == 0 {
+            self.eentry
+        } else {
+            self.eentry
+                .wrapping_add((ecode & 0x3F).wrapping_mul((1_u64 << vs) * 4))
+        }
+    }
+
+    #[must_use]
+    pub fn fast_tlb_lookup_addend(
+        &self,
+        va: u64,
+        access: AccessType,
+    ) -> Option<usize> {
+        self.mmu.fast_tlb_lookup_addend(va, access)
+    }
+
+    pub(crate) fn flush_fast_tlb(&mut self) {
+        self.mmu.flush_fast_tlb();
+    }
+
+    pub(crate) fn invalidate_tlb_translations(&mut self) {
+        self.flush_fast_tlb();
+        self.tb_flush_pending = true;
+        self.set_exit_request();
+    }
+
+    fn fast_tlb_addend(&self, va: u64, pa: u64) -> usize {
+        if pa >= self.ram_base && pa < self.ram_end {
+            self.guest_base
+                .wrapping_add(pa & FAST_TLB_PAGE_MASK)
+                .wrapping_sub(va & FAST_TLB_PAGE_MASK) as usize
+        } else {
+            FAST_TLB_MMIO_ADDEND
+        }
+    }
+
     pub fn tlb_search(&self) -> Option<usize> {
-        use super::mmu::{MTLB_SIZE, STLB_SETS, STLB_WAYS};
-        let vppn = self.tlbehi >> 13;
+        use super::mmu::{
+            mtlb_flat_index, stlb_flat_index, stlb_set_index, MTLB_SIZE,
+            STLB_WAYS,
+        };
+        let entryhi = if self.tlbrera & 1 != 0 {
+            self.tlbrehi
+        } else {
+            self.tlbehi
+        };
         let asid = (self.asid & 0x3FF) as u16;
         let ps = self.stlbps as u8;
         for i in 0..MTLB_SIZE {
             let e = &self.mmu.mtlb[i];
-            if !e.valid {
-                continue;
-            }
-            if (e.g || e.asid == asid) && e.vppn == vppn {
-                return Some(i);
+            if Self::tlb_entry_matches_va(e, entryhi, asid) {
+                return mtlb_flat_index(i);
             }
         }
-        if ps > 0 {
-            let vpn = self.tlbehi >> ps;
-            let set_idx = (vpn as usize) & (STLB_SETS - 1);
+        if let Some(set_idx) = stlb_set_index(entryhi, ps) {
             for w in 0..STLB_WAYS {
                 let e = &self.mmu.stlb[set_idx][w];
-                if !e.valid {
-                    continue;
-                }
-                if (e.g || e.asid == asid) && e.vppn == vppn {
-                    return Some(MTLB_SIZE + set_idx * STLB_WAYS + w);
+                if Self::tlb_entry_matches_va(e, entryhi, asid) {
+                    return stlb_flat_index(set_idx, w);
                 }
             }
         }
         None
     }
 
+    fn tlb_entry_matches_va(
+        entry: &super::mmu::TlbEntry,
+        va: u64,
+        asid: u16,
+    ) -> bool {
+        if !entry.valid || (!entry.g && entry.asid != asid) {
+            return false;
+        }
+        let ps = u32::from(entry.page_size);
+        if ps >= 63 {
+            return false;
+        }
+        let pair_mask = !((1_u64 << (ps + 1)) - 1);
+        (va & super::mmu::TARGET_VIRT_MASK & pair_mask)
+            == ((entry.vppn << 13) & super::mmu::TARGET_VIRT_MASK & pair_mask)
+    }
+
+    fn page_walk_dir_base_width(&self, level: u64) -> (u64, u64) {
+        match level {
+            1 => ((self.pwcl >> 10) & 0x1F, (self.pwcl >> 15) & 0x1F),
+            2 => ((self.pwcl >> 20) & 0x1F, (self.pwcl >> 25) & 0x1F),
+            3 => (self.pwch & 0x3F, (self.pwch >> 6) & 0x3F),
+            4 => ((self.pwch >> 12) & 0x3F, (self.pwch >> 18) & 0x3F),
+            _ => (self.pwcl & 0x1F, (self.pwcl >> 5) & 0x1F),
+        }
+    }
+
+    fn read_phys_u64(&self, pa: u64) -> u64 {
+        if self.guest_base == 0 {
+            return 0;
+        }
+        if pa < self.ram_base
+            || pa.checked_add(8).is_none_or(|end| end > self.ram_end)
+        {
+            return 0;
+        }
+        let ptr = (self.guest_base + pa) as *const u64;
+        // SAFETY: bounds were checked against the RAM window above.
+        unsafe { ptr.read_unaligned() }
+    }
+
+    fn sanitize_page_walk_pte(&self, pte: u64) -> u64 {
+        pte & HW_PTE_MASK_LA64
+    }
+
+    pub fn lddir(&self, base: u64, level: u64) -> u64 {
+        if level == 0 || level > 4 {
+            return base;
+        }
+
+        if base & TLBENTRY_HUGE != 0 {
+            if level == 4
+                || ((base >> TLBENTRY_LEVEL_SHIFT) & TLBENTRY_LEVEL_MASK) != 0
+            {
+                return base;
+            }
+            return base
+                | ((level & TLBENTRY_LEVEL_MASK) << TLBENTRY_LEVEL_SHIFT);
+        }
+
+        let badv = self.tlbrbadv;
+        let (dir_base, dir_width) = self.page_walk_dir_base_width(level);
+        if dir_width == 0 || dir_width >= 64 {
+            return 0;
+        }
+        let index = (badv >> dir_base) & ((1_u64 << dir_width) - 1);
+        let phys = (base & super::mmu::TARGET_VIRT_MASK) | (index << 3);
+        self.read_phys_u64(phys) & super::mmu::TARGET_VIRT_MASK
+    }
+
+    pub fn ldpte(&mut self, base: u64, odd: u64) {
+        let tmp;
+        let ps;
+        if base & TLBENTRY_HUGE != 0 {
+            let level = (base >> TLBENTRY_LEVEL_SHIFT) & TLBENTRY_LEVEL_MASK;
+            let (dir_base, dir_width) = self.page_walk_dir_base_width(level);
+            let mut huge = base & !TLBENTRY_HUGE;
+            huge &= !(TLBENTRY_LEVEL_MASK << TLBENTRY_LEVEL_SHIFT);
+            if huge & TLBENTRY_HGLOBAL != 0 {
+                huge &= !TLBENTRY_HGLOBAL;
+                huge |= 1 << 6;
+            }
+            ps = dir_base + dir_width - 1;
+            tmp = self.sanitize_page_walk_pte(if odd != 0 {
+                huge.wrapping_add(1_u64 << ps)
+            } else {
+                huge
+            });
+        } else {
+            let ptbase = self.pwcl & 0x1F;
+            let ptwidth = (self.pwcl >> 5) & 0x1F;
+            if ptwidth == 0 || ptwidth >= 64 {
+                return;
+            }
+            let badv = self.tlbrbadv;
+            let ptindex = ((badv >> ptbase) & ((1_u64 << ptwidth) - 1)) & !1;
+            let offset = if odd != 0 { ptindex + 1 } else { ptindex } << 3;
+            let phys = (base & super::mmu::TARGET_VIRT_MASK) | offset;
+            tmp = self.sanitize_page_walk_pte(self.read_phys_u64(phys));
+            ps = ptbase;
+        }
+
+        if odd != 0 {
+            self.tlbrelo1 = tmp;
+        } else {
+            self.tlbrelo0 = tmp;
+        }
+        self.tlbrehi = (self.tlbrehi & !0x3F) | (ps & 0x3F);
+    }
+
     pub fn tlb_read(&mut self, idx: usize) {
-        use super::mmu::{MTLB_SIZE, STLB_SETS, STLB_WAYS};
-        let max = MTLB_SIZE + STLB_SETS * STLB_WAYS;
-        if idx >= max {
-            self.tlbidx |= 1 << 31;
+        let Some(e) = self.mmu.entry(idx).copied() else {
+            self.read_invalid_tlb_entry();
             return;
-        }
-        let e = *self.get_tlb_entry(idx);
+        };
         if !e.valid {
-            self.tlbidx |= 1 << 31;
+            self.read_invalid_tlb_entry();
             return;
         }
-        self.tlbidx = (self.tlbidx & !(0x3F << 24 | 0xFFF))
+        self.tlbidx = (self.tlbidx & !(1 << 31 | 0x3F << 24 | 0xFFF))
             | ((u64::from(e.page_size)) << 24)
             | (idx as u64 & 0xFFF);
         self.tlbehi = e.vppn << 13;
-        self.tlbelo0 =
-            self.encode_tlbelo(e.ppn0, e.v0, e.d0, e.plv0, e.mat0, e.g, e.nr0);
-        self.tlbelo1 =
-            self.encode_tlbelo(e.ppn1, e.v1, e.d1, e.plv1, e.mat1, e.g, e.nr1);
-        self.asid = (self.asid & !0x3FF) | u64::from(e.asid);
+        self.tlbelo0 = self.encode_tlbelo(
+            e.ppn0, e.v0, e.d0, e.plv0, e.mat0, e.g, e.nr0, e.nx0, e.rplv0,
+        );
+        self.tlbelo1 = self.encode_tlbelo(
+            e.ppn1, e.v1, e.d1, e.plv1, e.mat1, e.g, e.nr1, e.nx1, e.rplv1,
+        );
+        self.set_asid_low(u64::from(e.asid));
+    }
+
+    fn read_invalid_tlb_entry(&mut self) {
+        self.tlbidx = (self.tlbidx & !(0x3F << 24)) | (1 << 31);
+        self.tlbehi = 0;
+        self.tlbelo0 = 0;
+        self.tlbelo1 = 0;
+        self.set_asid_low(0);
     }
 
     pub fn tlb_write(&mut self, idx: usize) {
-        use super::mmu::{TlbEntry, MTLB_SIZE, STLB_SETS, STLB_WAYS};
-        let ps = ((self.tlbidx >> 24) & 0x3F) as u8;
-        let entry = TlbEntry {
-            vppn: self.tlbehi >> 13,
+        if self.tlbidx & (1 << 31) != 0 {
+            if self.mmu.write_entry(idx, super::mmu::TlbEntry::default()) {
+                self.invalidate_tlb_translations();
+            }
+            return;
+        }
+        let (entryhi, elo0, elo1, ps) = self.tlb_entry_source_csrs();
+        let entry = self.tlb_entry_from_csrs(entryhi, elo0, elo1, ps);
+        if self.mmu.write_entry(idx, entry) {
+            self.invalidate_tlb_translations();
+        }
+    }
+
+    fn tlb_entry_source_csrs(&self) -> (u64, u64, u64, u8) {
+        if self.tlbrera & 1 != 0 {
+            (
+                self.tlbrehi,
+                self.tlbrelo0,
+                self.tlbrelo1,
+                (self.tlbrehi & 0x3F) as u8,
+            )
+        } else {
+            (
+                self.tlbehi,
+                self.tlbelo0,
+                self.tlbelo1,
+                ((self.tlbidx >> 24) & 0x3F) as u8,
+            )
+        }
+    }
+
+    fn tlb_entry_from_csrs(
+        &self,
+        entryhi: u64,
+        elo0: u64,
+        elo1: u64,
+        ps: u8,
+    ) -> super::mmu::TlbEntry {
+        super::mmu::TlbEntry {
+            vppn: entryhi >> 13,
             page_size: ps,
             asid: (self.asid & 0x3FF) as u16,
-            g: (self.tlbelo0 & self.tlbelo1 & (1 << 6)) != 0,
+            g: (elo0 & elo1 & (1 << 6)) != 0,
             valid: true,
-            ppn0: (self.tlbelo0 >> 12) & 0xF_FFFF_FFFF,
-            ppn1: (self.tlbelo1 >> 12) & 0xF_FFFF_FFFF,
-            plv0: ((self.tlbelo0 >> 2) & 0x3) as u8,
-            plv1: ((self.tlbelo1 >> 2) & 0x3) as u8,
-            mat0: ((self.tlbelo0 >> 4) & 0x3) as u8,
-            mat1: ((self.tlbelo1 >> 4) & 0x3) as u8,
-            d0: self.tlbelo0 & (1 << 1) != 0,
-            d1: self.tlbelo1 & (1 << 1) != 0,
-            v0: self.tlbelo0 & 1 != 0,
-            v1: self.tlbelo1 & 1 != 0,
-            nr0: self.tlbelo0 & (1 << 61) != 0,
-            nr1: self.tlbelo1 & (1 << 61) != 0,
-        };
-        if idx < MTLB_SIZE {
-            self.mmu.mtlb[idx] = entry;
-        } else {
-            let flat = idx - MTLB_SIZE;
-            let set = flat / STLB_WAYS;
-            let way = flat % STLB_WAYS;
-            if set < STLB_SETS && way < STLB_WAYS {
-                self.mmu.stlb[set][way] = entry;
-            }
+            ppn0: (elo0 >> 12) & 0xF_FFFF_FFFF,
+            ppn1: (elo1 >> 12) & 0xF_FFFF_FFFF,
+            plv0: ((elo0 >> 2) & 0x3) as u8,
+            plv1: ((elo1 >> 2) & 0x3) as u8,
+            mat0: ((elo0 >> 4) & 0x3) as u8,
+            mat1: ((elo1 >> 4) & 0x3) as u8,
+            d0: elo0 & (1 << 1) != 0,
+            d1: elo1 & (1 << 1) != 0,
+            v0: elo0 & 1 != 0,
+            v1: elo1 & 1 != 0,
+            nr0: elo0 & (1 << 61) != 0,
+            nr1: elo1 & (1 << 61) != 0,
+            nx0: elo0 & (1 << 62) != 0,
+            nx1: elo1 & (1 << 62) != 0,
+            rplv0: elo0 & (1 << 63) != 0,
+            rplv1: elo1 & (1 << 63) != 0,
         }
     }
 
     pub fn tlb_fill(&mut self) {
-        use super::mmu::MTLB_SIZE;
-        let idx = (self.tlbidx as usize) & (MTLB_SIZE - 1);
-        self.tlb_write(idx);
+        use super::mmu::{
+            mtlb_flat_index, stlb_flat_index, stlb_set_index, MTLB_SIZE,
+        };
+        let (entryhi, elo0, elo1, ps) = self.tlb_entry_source_csrs();
+        let entry = self.tlb_entry_from_csrs(entryhi, elo0, elo1, ps);
+        let idx = if ps == self.stlbps as u8 {
+            stlb_set_index(entryhi, ps).and_then(|set| stlb_flat_index(set, 0))
+        } else {
+            let raw_idx = (self.tlbidx as usize) & (MTLB_SIZE - 1);
+            mtlb_flat_index(raw_idx)
+        };
+        if let Some(idx) = idx {
+            if self.mmu.write_entry(idx, entry) {
+                self.invalidate_tlb_translations();
+            }
+        }
     }
 
     pub fn invtlb(&mut self, op: u32, asid: u16, va: u64) {
-        use super::mmu::STLB_SETS;
+        let should_flush = matches!(op, 0..=6);
         match op {
             0 | 1 => {
                 self.mmu.mtlb.iter_mut().for_each(|e| e.valid = false);
@@ -446,53 +798,37 @@ impl LoongArchCpu {
                 });
             }
             5 => {
-                let vppn = va >> 13;
                 self.mmu.mtlb.iter_mut().for_each(|e| {
-                    if !e.g && e.asid == asid && e.vppn == vppn {
+                    if !e.g && Self::tlb_entry_matches_va(e, va, asid) {
                         e.valid = false;
                     }
                 });
-                if self.stlbps > 0 {
-                    let vpn = va >> self.stlbps;
-                    let set = (vpn as usize) & (STLB_SETS - 1);
-                    self.mmu.stlb[set].iter_mut().for_each(|e| {
-                        if !e.g && e.asid == asid && e.vppn == vppn {
+                self.mmu.stlb.iter_mut().for_each(|s| {
+                    s.iter_mut().for_each(|e| {
+                        if !e.g && Self::tlb_entry_matches_va(e, va, asid) {
                             e.valid = false;
                         }
                     });
-                }
+                });
             }
             6 => {
-                let vppn = va >> 13;
                 self.mmu.mtlb.iter_mut().for_each(|e| {
-                    if (e.g || e.asid == asid) && e.vppn == vppn {
+                    if Self::tlb_entry_matches_va(e, va, asid) {
                         e.valid = false;
                     }
                 });
-                if self.stlbps > 0 {
-                    let vpn = va >> self.stlbps;
-                    let set = (vpn as usize) & (STLB_SETS - 1);
-                    self.mmu.stlb[set].iter_mut().for_each(|e| {
-                        if (e.g || e.asid == asid) && e.vppn == vppn {
+                self.mmu.stlb.iter_mut().for_each(|s| {
+                    s.iter_mut().for_each(|e| {
+                        if Self::tlb_entry_matches_va(e, va, asid) {
                             e.valid = false;
                         }
                     });
-                }
+                });
             }
             _ => {}
         }
-    }
-
-    fn get_tlb_entry(&self, idx: usize) -> &super::mmu::TlbEntry {
-        use super::mmu::{MTLB_SIZE, STLB_SETS, STLB_WAYS};
-        if idx < MTLB_SIZE {
-            &self.mmu.mtlb[idx]
-        } else {
-            let flat = idx - MTLB_SIZE;
-            let set = flat / STLB_WAYS;
-            let way = flat % STLB_WAYS;
-            assert!(set < STLB_SETS && way < STLB_WAYS);
-            &self.mmu.stlb[set][way]
+        if should_flush {
+            self.invalidate_tlb_translations();
         }
     }
 
@@ -506,6 +842,8 @@ impl LoongArchCpu {
         mat: u8,
         g: bool,
         nr: bool,
+        nx: bool,
+        rplv: bool,
     ) -> u64 {
         (u64::from(v))
             | (u64::from(d) << 1)
@@ -514,6 +852,8 @@ impl LoongArchCpu {
             | (u64::from(g) << 6)
             | (ppn << 12)
             | (u64::from(nr) << 61)
+            | (u64::from(nx) << 62)
+            | (u64::from(rplv) << 63)
     }
 
     pub fn env_ptr(&mut self) -> *mut u8 {
@@ -539,6 +879,26 @@ impl LoongArchCpu {
         p
     }
 
+    pub fn set_translation_fault_pending(&mut self) {
+        self.translation_fault_pending = true;
+        self.mem_fault_cause = 1;
+        self.fault_pc = self.pc;
+    }
+
+    pub fn set_memory_fault_pending(&mut self, fault_pc: u64) {
+        self.mem_fault_cause = 1;
+        self.fault_pc = fault_pc;
+    }
+
+    pub fn take_translation_fault_pending(&mut self) -> bool {
+        let pending =
+            self.translation_fault_pending || self.mem_fault_cause != 0;
+        self.translation_fault_pending = false;
+        self.mem_fault_cause = 0;
+        self.fault_pc = 0;
+        pending
+    }
+
     #[must_use]
     pub fn guest_base_val(&self) -> u64 {
         self.guest_base
@@ -548,12 +908,36 @@ impl LoongArchCpu {
         self.guest_base = val;
     }
 
+    #[must_use]
+    pub fn ram_base_val(&self) -> u64 {
+        self.ram_base
+    }
+
     pub fn set_ram_base(&mut self, val: u64) {
         self.ram_base = val;
     }
 
+    #[must_use]
+    pub fn ram_end_val(&self) -> u64 {
+        self.ram_end
+    }
+
     pub fn set_ram_end(&mut self, val: u64) {
         self.ram_end = val;
+    }
+
+    #[must_use]
+    pub fn address_space_ptr(&self) -> u64 {
+        self.as_ptr
+    }
+
+    pub fn set_address_space_ptr(&mut self, ptr: u64) {
+        self.as_ptr = ptr;
+    }
+
+    #[must_use]
+    pub fn fault_pc_val(&self) -> u64 {
+        self.fault_pc
     }
 
     pub fn set_exit_request(&mut self) {
@@ -771,6 +1155,20 @@ impl LoongArchCpu {
             self.estat &= !(1 << 12);
         }
     }
+
+    pub(crate) fn set_timer_interrupt_pending(&mut self, pending: bool) {
+        let was_pending = self.estat & TIMER_INTERRUPT_BIT != 0;
+        if pending {
+            self.estat |= TIMER_INTERRUPT_BIT;
+            if !was_pending {
+                self.halted
+                    .store(false, std::sync::atomic::Ordering::Release);
+                self.neg_align = -1;
+            }
+        } else {
+            self.estat &= !TIMER_INTERRUPT_BIT;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -796,6 +1194,7 @@ mod tests {
         assert_eq!(RAM_BASE_OFFSET, offset_of!(LoongArchCpu, ram_base));
         assert_eq!(RAM_END_OFFSET, offset_of!(LoongArchCpu, ram_end));
         assert_eq!(GUEST_BASE_CPU_OFFSET, offset_of!(LoongArchCpu, guest_base));
+        assert_eq!(NEG_ALIGN_CPU_OFFSET, offset_of!(LoongArchCpu, neg_align));
     }
 
     #[test]
@@ -816,14 +1215,14 @@ impl LoongArchCpu {
             return;
         }
         if self.tval <= cycles {
-            // Timer fired
-            self.estat |= 1 << 11;
+            self.set_timer_interrupt_pending(true);
             let periodic = self.tcfg & 2 != 0;
             if periodic {
                 let init_val = self.tcfg & !0x3;
                 self.tval = init_val;
             } else {
                 self.tval = 0;
+                self.tcfg &= !1;
             }
         } else {
             self.tval -= cycles;

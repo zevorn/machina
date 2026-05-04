@@ -1364,6 +1364,29 @@ impl X86_64CodeGen {
         }
     }
 
+    fn emit_cross_page_slow_check(
+        buf: &mut CodeBuffer,
+        size_bytes: u32,
+    ) -> Option<usize> {
+        if size_bytes <= 1 {
+            return None;
+        }
+
+        emit_load(buf, true, Reg::Rax, Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_arith_ri(buf, ArithOp::And, true, Reg::Rax, 0xFFF);
+        emit_arith_ri(
+            buf,
+            ArithOp::Cmp,
+            true,
+            Reg::Rax,
+            (0x1000 - size_bytes) as i32,
+        );
+        emit_opc(buf, OPC_JCC_long + (X86Cond::Ja as u32), 0, 0);
+        let ja_off = buf.offset();
+        buf.emit_u32(0);
+        Some(ja_off)
+    }
+
     /// Emit QemuLd with inline TLB check.
     ///
     /// ```text
@@ -1415,6 +1438,8 @@ impl X86_64CodeGen {
         emit_store(buf, true, Reg::Rax, Reg::Rsp, Self::TLB_SAVE_RAX);
         emit_store(buf, true, Reg::R10, Reg::Rsp, Self::TLB_SAVE_R10);
         emit_store(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
+
+        let cross_page_off = Self::emit_cross_page_slow_check(buf, size_bytes);
 
         // -- TLB inline check --
         // r11 = TLB index = ((vpn ^ (vpn >> 8)) & mask)
@@ -1510,6 +1535,9 @@ impl X86_64CodeGen {
         let slow = buf.offset();
         Self::patch_disp(buf, jne_off, slow);
         Self::patch_disp(buf, je_off, slow);
+        if let Some(off) = cross_page_off {
+            Self::patch_disp(buf, off, slow);
+        }
 
         Self::emit_save_caller_regs(buf);
         emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);
@@ -1591,6 +1619,8 @@ impl X86_64CodeGen {
         emit_store(buf, true, Reg::R10, Reg::Rsp, Self::TLB_SAVE_R10);
         emit_store(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
 
+        let cross_page_off = Self::emit_cross_page_slow_check(buf, size_bytes);
+
         // -- TLB inline check --
         // index = ((vpn ^ (vpn >> 8)) & mask)
         emit_mov_rr(buf, true, Reg::R11, addr);
@@ -1650,6 +1680,9 @@ impl X86_64CodeGen {
         let slow = buf.offset();
         Self::patch_disp(buf, jne_off, slow);
         Self::patch_disp(buf, je_off, slow);
+        if let Some(off) = cross_page_off {
+            Self::patch_disp(buf, off, slow);
+        }
 
         Self::emit_save_caller_regs(buf);
         emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);

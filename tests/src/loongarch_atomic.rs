@@ -5,6 +5,9 @@ use machina_accel::{HostCodeGen, X86_64CodeGen};
 use machina_guest_loongarch::loongarch::cpu::{
     LoongArchCpu, GUEST_BASE_CPU_OFFSET,
 };
+use machina_guest_loongarch::loongarch::csr::{
+    CRMD_DA, CSR_CRMD, CSR_ERA, CSR_PRMD, CSR_TLBRERA, CSR_TLBRPRMD,
+};
 use machina_guest_loongarch::loongarch::ext::LoongArchCfg;
 use machina_guest_loongarch::loongarch::trans::{
     LoongArchDisasContext, LoongArchTranslator,
@@ -26,6 +29,7 @@ const OP_AMMAX_WU: u32 = 0b00111000011001110;
 const OP_AMMIN_DU: u32 = 0b00111000011010001;
 const OP_DBAR: u32 = 0b00111000011100100;
 const OP_IBAR: u32 = 0b00111000011100101;
+const ERTN_INSN: u32 = 0x0648_3800;
 
 fn r3(op: u32, rk: u32, rj: u32, rd: u32) -> u32 {
     (op << 15) | (rk << 10) | (rj << 5) | rd
@@ -194,4 +198,55 @@ fn loongarch_barriers_preserve_registers_and_ibar_stops_tb() {
     assert_eq!(run_la(&mut cpu, &ibar_program), 0);
     assert_eq!(cpu.read_gpr(1), 1);
     assert_eq!(cpu.pc(), 8);
+}
+
+#[test]
+fn task16_normal_ertn_invalidates_ll_sc_reservation() {
+    let mut mem = [0u8; 64];
+    mem[8..12].copy_from_slice(&0xAAAA_AAAAu32.to_le_bytes());
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_guest_base(mem.as_mut_ptr() as u64);
+    cpu.set_ram_base(0);
+    cpu.set_ram_end(mem.len() as u64);
+    cpu.write_gpr(2, 0);
+
+    assert_eq!(run_la(&mut cpu, &[r2_si14(OP_LL_W, 2, 2, 5)]), 0);
+    assert_eq!(cpu.read_gpr(5), 0xFFFF_FFFF_AAAA_AAAA);
+    cpu.write_gpr(5, 0x1111_1111);
+    cpu.csr_write(CSR_CRMD, 0);
+    cpu.csr_write(CSR_PRMD, 0);
+    cpu.csr_write(CSR_ERA, 0);
+    cpu.csr_write(CSR_TLBRERA, 0);
+
+    let _ = run_la(&mut cpu, &[ERTN_INSN]);
+    assert_eq!(run_la(&mut cpu, &[r2_si14(OP_SC_W, 2, 2, 5)]), 0);
+
+    assert_eq!(cpu.read_gpr(5), 0);
+    assert_eq!(read_u32(&mem, 8), 0xAAAA_AAAA);
+}
+
+#[test]
+fn task16_tlbr_ertn_invalidates_ll_sc_reservation() {
+    let mut mem = [0u8; 64];
+    mem[8..12].copy_from_slice(&0xBBBB_BBBBu32.to_le_bytes());
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_guest_base(mem.as_mut_ptr() as u64);
+    cpu.set_ram_base(0);
+    cpu.set_ram_end(mem.len() as u64);
+    cpu.write_gpr(2, 0);
+
+    assert_eq!(run_la(&mut cpu, &[r2_si14(OP_LL_W, 2, 2, 5)]), 0);
+    assert_eq!(cpu.read_gpr(5), 0xFFFF_FFFF_BBBB_BBBB);
+    cpu.write_gpr(5, 0x2222_2222);
+    cpu.csr_write(CSR_CRMD, CRMD_DA);
+    cpu.csr_write(CSR_TLBRERA, 0x4000 | 1);
+    cpu.csr_write(CSR_TLBRPRMD, 0);
+
+    let _ = run_la(&mut cpu, &[ERTN_INSN]);
+    assert_eq!(run_la(&mut cpu, &[r2_si14(OP_SC_W, 2, 2, 5)]), 0);
+
+    assert_eq!(cpu.read_gpr(5), 0);
+    assert_eq!(read_u32(&mem, 8), 0xBBBB_BBBB);
 }
