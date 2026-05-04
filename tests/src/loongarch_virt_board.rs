@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts};
@@ -6,6 +7,7 @@ use machina_guest_loongarch::loongarch::csr::{
     CRMD_DA, CRMD_IE, CSR_CRMD, CSR_ECFG,
 };
 use machina_hw_core::bus::SysBusMapping;
+use machina_hw_core::chardev::{ByteCb, CharFrontend, Chardev};
 use machina_hw_loongarch::interrupt::LOONGARCH_DEVICE_HWI;
 use machina_hw_loongarch::virt_machine::{
     LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE, VIRT_IPI_BASE,
@@ -49,6 +51,26 @@ fn enable_device_hwi(machine: &LoongArchVirtMachine) {
     let mut cpu = cpu.lock().unwrap();
     cpu.csr_write(CSR_CRMD, CRMD_DA | CRMD_IE);
     cpu.csr_write(CSR_ECFG, 1 << (u32::from(LOONGARCH_DEVICE_HWI) + 2));
+}
+
+struct CapturingInputChardev {
+    input_cb: Arc<Mutex<Option<ByteCb>>>,
+}
+
+impl Chardev for CapturingInputChardev {
+    fn read(&mut self) -> Option<u8> {
+        None
+    }
+
+    fn write(&mut self, _data: u8) {}
+
+    fn can_read(&self) -> bool {
+        true
+    }
+
+    fn start_input(&mut self, cb: ByteCb) {
+        *self.input_cb.lock().unwrap() = Some(cb);
+    }
 }
 
 #[test]
@@ -129,6 +151,42 @@ fn task42_virt_board_installs_iocsr_and_uart_cascade() {
     assert_eq!(
         machine.address_space().read(GPA::new(VIRT_UART_BASE), 1),
         0x41
+    );
+    assert_eq!(machine.cpu().lock().unwrap().pending_interrupt_line(), None);
+}
+
+#[test]
+fn task82_virt_board_chardev_input_reaches_uart_rx_fifo() {
+    let input_cb = Arc::new(Mutex::new(None));
+    let frontend = CharFrontend::new(Box::new(CapturingInputChardev {
+        input_cb: Arc::clone(&input_cb),
+    }));
+
+    let mut machine = LoongArchVirtMachine::new();
+    machine.set_uart_chardev(frontend).unwrap();
+    machine.init(&default_opts()).expect("init loongarch virt");
+
+    enable_device_hwi(&machine);
+    machine
+        .address_space()
+        .write(GPA::new(VIRT_UART_BASE + 1), 1, 1);
+
+    let cb = input_cb
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("UART realize must start chardev input")
+        .clone();
+    cb.lock().unwrap()(0x5A);
+
+    let expected_line = Some(u32::from(LOONGARCH_DEVICE_HWI) + 2);
+    assert_eq!(
+        machine.cpu().lock().unwrap().pending_interrupt_line(),
+        expected_line
+    );
+    assert_eq!(
+        machine.address_space().read(GPA::new(VIRT_UART_BASE), 1),
+        0x5A
     );
     assert_eq!(machine.cpu().lock().unwrap().pending_interrupt_line(), None);
 }

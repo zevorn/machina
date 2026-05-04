@@ -2865,7 +2865,13 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         _a: &insn_decode::ArgsCode,
     ) -> bool {
+        let d = ir.new_temp(Type::I64);
         ir.gen_mb(0);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_ibar as *const () as u64,
+            &[self.env],
+        );
         self.base.is_jmp = DisasJumpType::TooMany;
         true
     }

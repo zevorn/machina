@@ -366,7 +366,10 @@ impl Machine for LoongArchVirtMachine {
             mmio.realize_onto(&mut sysbus, &mut address_space)?;
         }
 
-        let rx_cb: UartRxCallback = Arc::new(Mutex::new(|_byte: u8| {}));
+        let uart_for_rx = Arc::clone(&uart);
+        let rx_cb: UartRxCallback = Arc::new(Mutex::new(move |byte: u8| {
+            uart_for_rx.receive(byte);
+        }));
         uart.realize_onto(&mut sysbus, &mut address_space, rx_cb)?;
 
         self.cpu = Some(cpu);

@@ -30,6 +30,7 @@ const IDLE_OP: u32 = 0b00000110010010001;
 const IOCSRRD_W_OP: u32 = 0b0000011001001000000010;
 const OP_ADDI_D: u32 = 0b0000001011;
 const OP_LD_D: u32 = 0b0010100011;
+const OP_ST_W: u32 = 0b0010100110;
 const OP_ST_D: u32 = 0b0010100111;
 const OP_JIRL: u32 = 0b010011;
 const TLBSRCH_INSN: u32 = 0x0648_2800;
@@ -37,6 +38,7 @@ const TLBRD_INSN: u32 = 0x0648_2C00;
 const TLBWR_INSN: u32 = 0x0648_3000;
 const TLBFILL_INSN: u32 = 0x0648_3400;
 const INVTLB_OP: u32 = 0b00000110010010011;
+const IBAR_OP: u32 = 0b00111000011100101;
 const LDDIR_OP: u32 = 0b00000110010000;
 const LDPTE_OP: u32 = 0b00000110010001;
 const TIMER_INTERRUPT: u64 = 1_u64 << 11;
@@ -3524,6 +3526,44 @@ fn task25_exec_loop_tlb_maintenance_flushes_stale_fetch_tb() {
     assert_eq!(sys.cpu.csr_read(CSR_TLBRERA) & !0x3, target_va);
     assert_eq!(sys.cpu.csr_read(CSR_TLBRBADV), target_va);
     assert_eq!(sys.cpu.pc(), control_va + handler_off as u64 + 4);
+}
+
+#[test]
+fn task82_ibar_flushes_stale_translations_after_self_modifying_store() {
+    let target = 0x40usize;
+    let old_target_insn = r2_si12(OP_ADDI_D, 1, 0, 4);
+    let new_target_insn = r2_si12(OP_ADDI_D, 2, 0, 4);
+
+    let mut code = vec![code15_insn(IDLE_OP, 0); target / 4 + 2];
+    code[0] = r2_si12(OP_ST_W, 0, 12, 11);
+    code[1] = code15_insn(IBAR_OP, 0);
+    code[2] = r2_si16(OP_JIRL, 0, 10, 0);
+    code[target / 4] = old_target_insn;
+    code[target / 4 + 1] = code15_insn(IDLE_OP, 0);
+
+    let mut cpu = LoongArchCpu::new();
+    cpu.csr_write(CSR_CRMD, CRMD_DA);
+    cpu.set_pc(target as u64);
+
+    let mut sys = full_system_cpu_with_code(cpu, &code);
+    let mut env = loongarch_soft_mmu_env();
+
+    let warm = unsafe { cpu_exec_loop_env(&mut env, &mut sys) };
+    assert_eq!(warm, ExitReason::Halted);
+    assert_eq!(sys.cpu.read_gpr(4), 1);
+
+    sys.cpu.set_pc(0);
+    sys.cpu.set_halted_flag(false);
+    sys.cpu.write_gpr(4, 0);
+    sys.cpu.write_gpr(10, target as u64);
+    sys.cpu.write_gpr(11, u64::from(new_target_insn));
+    sys.cpu.write_gpr(12, target as u64);
+
+    let after_ibar = unsafe { cpu_exec_loop_env(&mut env, &mut sys) };
+
+    assert_eq!(after_ibar, ExitReason::Halted);
+    assert_eq!(code[target / 4], new_target_insn);
+    assert_eq!(sys.cpu.read_gpr(4), 2);
 }
 
 #[test]

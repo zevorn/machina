@@ -710,6 +710,10 @@ impl LoongArchCpu {
 
     pub(crate) fn invalidate_tlb_translations(&mut self) {
         self.flush_fast_tlb();
+        self.request_tb_flush();
+    }
+
+    pub(crate) fn request_tb_flush(&mut self) {
         self.tb_flush_pending = true;
         self.set_exit_request();
     }
