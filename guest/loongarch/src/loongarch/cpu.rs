@@ -5,8 +5,8 @@ use super::csr::{
     ASID_WRITE_MASK, CRMD_DA, CRMD_IE, CRMD_PG, CRMD_PLV_MASK, ESTAT_IS_MASK,
 };
 use super::exception::{
-    ECODE_PIF, ECODE_PIL, ECODE_PIS, ECODE_PME, ECODE_PNR, ECODE_PNX,
-    ECODE_PPI, ECODE_TLBR,
+    ECODE_FPE, ECODE_PIF, ECODE_PIL, ECODE_PIS, ECODE_PME, ECODE_PNR,
+    ECODE_PNX, ECODE_PPI, ECODE_TLBR,
 };
 use super::ext::LoongArchCfg;
 use super::mmu::{
@@ -27,6 +27,12 @@ const TLBENTRY_HGLOBAL: u64 = 1 << 12;
 const TLBENTRY_LEVEL_SHIFT: u64 = 13;
 const TLBENTRY_LEVEL_MASK: u64 = 0x3;
 const HW_PTE_MASK_LA64: u64 = 0xE000_FFFF_FFFF_F1FF;
+pub(crate) const FCSR_ENABLE_MASK: u32 = 0x0000_001F;
+pub(crate) const FCSR_RM_MASK: u32 = 0x0000_0300;
+pub(crate) const FCSR_FLAGS_MASK: u32 = 0x001F_0000;
+pub(crate) const FCSR_CAUSE_MASK: u32 = 0x1F00_0000;
+pub(crate) const FCSR_WRITE_MASK: u32 =
+    FCSR_ENABLE_MASK | FCSR_RM_MASK | FCSR_FLAGS_MASK | FCSR_CAUSE_MASK;
 
 #[repr(C)]
 pub struct LoongArchCpu {
@@ -139,6 +145,16 @@ pub const fn gpr_offset(i: usize) -> usize {
 #[must_use]
 pub const fn fpr_offset(i: usize) -> usize {
     FPR_OFFSET + i * 8
+}
+
+const fn fcsr_subregister_mask(idx: u32) -> u32 {
+    match idx {
+        0 => FCSR_WRITE_MASK,
+        1 => FCSR_ENABLE_MASK,
+        2 => FCSR_FLAGS_MASK | FCSR_CAUSE_MASK,
+        3 => FCSR_RM_MASK,
+        _ => 0,
+    }
 }
 
 impl LoongArchCpu {
@@ -313,6 +329,24 @@ impl LoongArchCpu {
     }
 
     #[must_use]
+    pub const fn read_fpr(&self, idx: usize) -> u64 {
+        self.fpr[idx]
+    }
+
+    pub const fn write_fpr(&mut self, idx: usize, val: u64) {
+        self.fpr[idx] = val;
+    }
+
+    #[must_use]
+    pub const fn read_fcc(&self, idx: usize) -> u8 {
+        self.fcc[idx]
+    }
+
+    pub const fn write_fcc(&mut self, idx: usize, val: u8) {
+        self.fcc[idx] = val & 1;
+    }
+
+    #[must_use]
     pub const fn dmw(&self, idx: usize) -> u64 {
         self.dmw[idx]
     }
@@ -331,7 +365,40 @@ impl LoongArchCpu {
     }
 
     pub fn write_fcsr(&mut self, val: u32) {
-        self.fcsr0 = val & 0x1F1F_031F;
+        self.fcsr0 = val & FCSR_WRITE_MASK;
+    }
+
+    #[must_use]
+    pub(crate) const fn fcsr_rounding_mode(&self) -> u32 {
+        (self.fcsr0 & FCSR_RM_MASK) >> 8
+    }
+
+    #[must_use]
+    pub(crate) const fn read_fcsr_subregister(&self, idx: u32) -> u32 {
+        self.fcsr0 & fcsr_subregister_mask(idx)
+    }
+
+    pub(crate) fn write_fcsr_subregister(&mut self, idx: u32, val: u32) {
+        let mask = fcsr_subregister_mask(idx);
+        self.fcsr0 = (self.fcsr0 & !mask) | (val & mask);
+    }
+
+    pub(crate) fn update_fcsr_exception(
+        &mut self,
+        flags: u32,
+        fault_pc: u64,
+    ) -> Option<u64> {
+        let flags = flags & FCSR_ENABLE_MASK;
+        self.fcsr0 = (self.fcsr0 & !FCSR_CAUSE_MASK) | (flags << 24);
+        if flags == 0 {
+            return None;
+        }
+        if self.fcsr0 & flags != 0 {
+            self.pc = fault_pc;
+            return Some(self.enter_exception(u64::from(ECODE_FPE), 0, None));
+        }
+        self.fcsr0 |= flags << 16;
+        None
     }
 
     #[must_use]

@@ -83,10 +83,17 @@ pub fn check_fpe(ctx: &mut LoongArchDisasContext, ir: &mut Context) -> bool {
     let zero = ir.new_const(Type::I64, 0);
     let label_ok = ir.new_label();
     ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
-    ir.gen_mov(Type::I64, ctx.pc, chk);
     ir.gen_exit_tb(EXCP_ARCH_DONE);
     ir.gen_set_label(label_ok);
     true
+}
+
+fn check_fp_trap(ir: &mut Context, trap: TempIdx) {
+    let zero = ir.new_const(Type::I64, 0);
+    let label_ok = ir.new_label();
+    ir.gen_brcond(Type::I64, trap, zero, Cond::Eq, label_ok);
+    ir.gen_exit_tb(EXCP_ARCH_DONE);
+    ir.gen_set_label(label_ok);
 }
 
 pub fn gen_fp_arith_s(
@@ -104,6 +111,27 @@ pub fn gen_fp_arith_s(
     fpr_set(ctx, ir, fd, d);
 }
 
+pub fn gen_fp_arith_fcsr(
+    ctx: &mut LoongArchDisasContext,
+    ir: &mut Context,
+    fd: u8,
+    fj: u8,
+    fk: u8,
+    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64, u64) -> u64,
+) {
+    let a = fpr_get(ctx, ir, fj);
+    let b = fpr_get(ctx, ir, fk);
+    let fd_tmp = ir.new_const(Type::I64, u64::from(fd));
+    let pc = ir.new_const(Type::I64, ctx.base.pc_next - 4);
+    let trap = ir.new_temp(Type::I64);
+    ir.gen_call(
+        trap,
+        helper as *const () as u64,
+        &[ctx.env, fd_tmp, a, b, pc],
+    );
+    check_fp_trap(ir, trap);
+}
+
 pub fn gen_fp_unary(
     ctx: &mut LoongArchDisasContext,
     ir: &mut Context,
@@ -115,6 +143,21 @@ pub fn gen_fp_unary(
     let d = ir.new_temp(Type::I64);
     ir.gen_call(d, helper as *const () as u64, &[a]);
     fpr_set(ctx, ir, fd, d);
+}
+
+pub fn gen_fp_unary_fcsr(
+    ctx: &mut LoongArchDisasContext,
+    ir: &mut Context,
+    fd: u8,
+    fj: u8,
+    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64) -> u64,
+) {
+    let a = fpr_get(ctx, ir, fj);
+    let fd_tmp = ir.new_const(Type::I64, u64::from(fd));
+    let pc = ir.new_const(Type::I64, ctx.base.pc_next - 4);
+    let trap = ir.new_temp(Type::I64);
+    ir.gen_call(trap, helper as *const () as u64, &[ctx.env, fd_tmp, a, pc]);
+    check_fp_trap(ir, trap);
 }
 
 pub fn gen_fp_cmp(
@@ -130,4 +173,48 @@ pub fn gen_fp_cmp(
     let d = ir.new_temp(Type::I64);
     ir.gen_call(d, helper as *const () as u64, &[a, b]);
     fcc_set(ctx, ir, cd, d);
+}
+
+pub fn gen_fp_cmp_fcsr(
+    ctx: &mut LoongArchDisasContext,
+    ir: &mut Context,
+    cd: u8,
+    fj: u8,
+    fk: u8,
+    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64, u64) -> u64,
+) {
+    let a = fpr_get(ctx, ir, fj);
+    let b = fpr_get(ctx, ir, fk);
+    let cd_tmp = ir.new_const(Type::I64, u64::from(cd));
+    let pc = ir.new_const(Type::I64, ctx.base.pc_next - 4);
+    let trap = ir.new_temp(Type::I64);
+    ir.gen_call(
+        trap,
+        helper as *const () as u64,
+        &[ctx.env, cd_tmp, a, b, pc],
+    );
+    check_fp_trap(ir, trap);
+}
+
+pub fn gen_fp_fused_fcsr(
+    ctx: &mut LoongArchDisasContext,
+    ir: &mut Context,
+    fd: u8,
+    fj: u8,
+    fk: u8,
+    fa: u8,
+    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64, u64, u64) -> u64,
+) {
+    let fj = fpr_get(ctx, ir, fj);
+    let fk = fpr_get(ctx, ir, fk);
+    let fa = fpr_get(ctx, ir, fa);
+    let fd_tmp = ir.new_const(Type::I64, u64::from(fd));
+    let pc = ir.new_const(Type::I64, ctx.base.pc_next - 4);
+    let trap = ir.new_temp(Type::I64);
+    ir.gen_call(
+        trap,
+        helper as *const () as u64,
+        &[ctx.env, fd_tmp, fj, fk, fa, pc],
+    );
+    check_fp_trap(ir, trap);
 }
