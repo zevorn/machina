@@ -53,6 +53,8 @@ mod integration;
 #[cfg(test)]
 mod loongarch_atomic;
 #[cfg(test)]
+mod loongarch_boot;
+#[cfg(test)]
 mod loongarch_branch;
 #[cfg(test)]
 mod loongarch_decode;
@@ -76,6 +78,8 @@ mod loongarch_memory_branch_atomic;
 mod loongarch_priv;
 #[cfg(test)]
 mod loongarch_system;
+#[cfg(test)]
+mod loongarch_virt_board;
 #[cfg(test)]
 mod memory_region;
 #[cfg(test)]

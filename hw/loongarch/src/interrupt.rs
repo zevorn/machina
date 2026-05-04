@@ -39,6 +39,11 @@ impl LoongArchInterruptCascade {
     }
 
     #[must_use]
+    pub fn from_devices(pch_pic: Arc<PchPic>, eiointc: Arc<Eiointc>) -> Self {
+        Self { pch_pic, eiointc }
+    }
+
+    #[must_use]
     pub fn pch_pic(&self) -> Arc<PchPic> {
         Arc::clone(&self.pch_pic)
     }
