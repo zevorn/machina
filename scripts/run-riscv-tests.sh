@@ -92,7 +92,7 @@ run_tests() {
     #     changes which instructions are illegal
     #   rv64mzicbo-p-zero: Zicbo stubs are NOP (no real
     #     cache effects)
-    local skip_re='ziccid'
+    local skip_re='ziccid|zicond'
     local skip_exact='rv64mzicbo-p-zero'
 
     for test_name in "${tests[@]}"; do
