@@ -505,7 +505,7 @@ fn build_fdt(
 
     let mut fdt = FdtBuilder::new();
     fdt.begin_node("");
-    fdt.property_string("compatible", "machina,loongarch64-virt");
+    fdt.property_string("compatible", "machina,loongarch64-ref");
     fdt.property_u32("#address-cells", 2);
     fdt.property_u32("#size-cells", 2);
 

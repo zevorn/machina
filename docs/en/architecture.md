@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-Machina is a RISC-V full-system emulator that reimplements QEMU's TCG (Tiny Code Generator) dynamic binary translation engine in Rust. It translates guest architecture instructions into host machine code at runtime, and provides complete device models, a memory subsystem, and interrupt controllers to support full-system emulation.
+Machina is a RISC-V and LoongArch64 full-system emulator that reimplements QEMU's TCG (Tiny Code Generator) dynamic binary translation engine in Rust. It translates guest architecture instructions into host machine code at runtime, and provides device models, a memory subsystem, and interrupt controllers to support full-system emulation.
 
 For the current MOM device-model architecture, see [Device Model Reference](reference.md#part-3-device-model-reference).
 
@@ -35,6 +35,7 @@ machina/
 +-- core/           # IR definition layer: CPU trait, address types, pure data structures
 +-- accel/          # Acceleration layer: IR optimization, register allocation, x86-64 codegen, execution engine
 +-- guest/riscv/    # RISC-V frontend: RV64GC + privileged ISA, Sv39 MMU
++-- guest/loongarch/# LoongArch64 frontend: LA64 integer/FPU/privileged/MMU
 +-- decode/         # Decoder generator: parses .decode files, generates Rust decoders
 +-- system/         # Full-system execution: CPU management, WFI wakeup, FullSystemCpu
 +-- memory/         # Memory subsystem: AddressSpace, MemoryRegion, MMIO dispatch
@@ -42,6 +43,7 @@ machina/
 +-- hw/intc/        # Interrupt controllers: PLIC, ACLINT
 +-- hw/char/        # Character devices: UART 16550A
 +-- hw/riscv/       # RISC-V machine definitions: riscv64-ref
++-- hw/loongarch/   # LoongArch64 machine definitions: loongarch64-ref
 +-- disas/          # Disassembler
 +-- monitor/        # Debug interface
 +-- util/           # Shared utilities
@@ -1002,7 +1004,55 @@ UART -----> PLIC source 10
 - Other extensions return `SBI_ERR_NOT_SUPPORTED (-2)`
 - `SbiResult { error, value }` corresponds to `a0`/`a1` return values
 
-### 8.5 Sv39 MMU Integration
+### 8.5 hw/loongarch -- LoongArch64 Machine Definitions
+
+#### loongarch64-ref Reference Machine
+
+`hw/loongarch/src/virt_machine.rs` defines the LoongArch64 reference
+platform used by the CLI machine name `loongarch64-ref`. The internal
+topology follows the QEMU LoongArch virt memory-map subset needed by
+Linux, but the public machine name follows Machina's reference-machine
+convention, matching `riscv64-ref`.
+
+**Memory and MMIO map**:
+
+```
++------------------+------------------+---------------------------+
+| Address Range    | Size             | Device                    |
++------------------+------------------+---------------------------+
+| 0x0100_0000      | 256 B            | IOCSR IPI MMIO alias      |
+| 0x0200_0000      | 64 KiB           | EIOINTC                   |
+| 0x1000_0000      | 1 KiB            | PCH-PIC                   |
+| 0x1000_8000      | 4 KiB            | VirtIO MMIO slot 0        |
+| 0x1fe0_01e0      | 8 B              | UART0 (16550A)            |
+| low PA RAM       | configurable     | DRAM, with MMIO holes out |
++------------------+------------------+---------------------------+
+```
+
+**Initialization flow** (`init()`):
+
+1. Allocate guest RAM and the board `AddressSpace`
+2. Create one LoongArch CPU and install the shared IOCSR bus
+3. Create UART, IPI, EIOINTC, PCH-PIC, and optional VirtIO block MMIO
+4. Wire UART/VirtIO interrupts through PCH-PIC and EIOINTC to CPU HWI
+5. Register MMIO regions through `sysbus`
+6. Attach a chardev frontend when `-nographic` is used
+
+**Boot flow** (`boot()`):
+
+- Loads ELF, LoongArch Linux Image/EFI-style, or raw kernel images
+- Starts in PLV0 direct-address mode with paging disabled
+- Generates an FDT plus EFI config tables for Linux boot data
+- Uses the direct-boot ABI `a0=efi_boot`, `a1=cmdline`,
+  `a2=system_table`
+- Places initrd data and excludes MMIO holes from guest-visible memory
+
+Current runtime limitations are explicit user-facing rejections:
+`loongarch64-ref` rejects `-S`, `-gdb`, `-monitor`, and
+`virtio-net-device`/`-netdev`; VirtIO block via `-drive file=...` is
+supported.
+
+### 8.6 Sv39 MMU Integration
 
 `guest/riscv/src/riscv/mmu.rs` implements the RISC-V Sv39 virtual memory management unit, integrated into the full-system emulation path.
 

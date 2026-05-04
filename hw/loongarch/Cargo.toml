@@ -2,7 +2,7 @@
 name = "machina-hw-loongarch"
 version.workspace = true
 edition.workspace = true
-description = "LoongArch virt machine with boot flow and device integration"
+description = "LoongArch reference machine with boot flow and device integration"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

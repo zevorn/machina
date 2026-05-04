@@ -479,7 +479,7 @@ fn task48_boot_harness_runs_configured_linux_checkpoint() {
         .arg(&timeout)
         .arg(machina_binary())
         .arg("-M")
-        .arg("loongarch64-virt")
+        .arg("loongarch64-ref")
         .arg("-m")
         .arg(ram_mb)
         .arg("-kernel")

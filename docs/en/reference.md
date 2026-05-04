@@ -1041,10 +1041,14 @@ This keeps the transport/proxy boundary explicit and leaves room for
 future backend relationships without conflating them with machine
 assembly.
 
-### 5. `RefMachine` Assembly Rule
+### 5. Reference Machine Assembly Rule
 
-`RefMachine` is the first machine that follows the MOM assembly rule
-for the migrated set.
+`RefMachine` is the RISC-V reference machine that follows the MOM
+assembly rule for the migrated set. The LoongArch64 reference machine
+is exposed to users as `loongarch64-ref` and follows the same
+machine-side principle: board-owned devices are realized through
+`sysbus`, and the realized mappings plus generated FDT/boot data are
+the guest-visible topology source of truth.
 
 - UART, PLIC, ACLINT, and virtio-mmio are created as MOM-managed
   devices
@@ -1052,6 +1056,9 @@ for the migrated set.
 - Their realized mappings are visible through `SysBus::mappings()`
 - FDT node names and `reg` cells for the migrated set are derived
   from the realized sysbus mappings
+- The LoongArch64 reference machine similarly owns UART, IPI, EIOINTC,
+  PCH-PIC, IOCSR dispatch, optional VirtIO block MMIO, and direct
+  Linux boot data.
 
 For the migrated device set, realized `sysbus` mappings are the
 machine-side topology source of truth.
@@ -1804,6 +1811,9 @@ for smoke/integration tests against the machina binary.
 | Module | Tests | Description |
 |--------|-------|-------------|
 | hw_ref_machine | 31 | RefMachine init, memory map, FDT, IRQ wiring, boot, UART, VirtIO, PLIC, multi-hart |
+| loongarch_virt_board | 8+ | `loongarch64-ref` board init, MMIO map, UART/VirtIO cascade, option rejection |
+| loongarch_boot | 20+ | LoongArch64 ELF/Image/raw loading, EFI/FDT boot data, initrd placement |
+| loongarch_boot_checkpoint | 15+ | LoongArch64 Linux boot checkpoints through shell prompt harness evidence |
 | hw_uart | 12 | UART 16550A register read/write, TX/RX, FIFO |
 | hw_aclint | 13 | ACLINT timer MMIO, IPI, mtime/mtimecmp |
 | hw_plic | 9 | PLIC priority, pending, enable, claim/complete |

@@ -37,7 +37,7 @@ fn usage() {
     eprintln!("Options:");
     eprintln!(
         "  -M machine    Machine type \
-         (default: riscv64-ref; supports loongarch64-virt)"
+         (default: riscv64-ref; supports loongarch64-ref)"
     );
     eprintln!("  -m size       RAM size in MiB (default: 128)");
     eprintln!("  -bios path    BIOS/firmware binary");
@@ -614,25 +614,25 @@ fn main() {
 
     if cli.machine == "?" {
         eprintln!("Available machines:");
-        eprintln!("  riscv64-ref    RISC-V reference machine");
-        eprintln!("  loongarch64-virt LoongArch virt machine");
+        eprintln!("  riscv64-ref      RISC-V reference machine");
+        eprintln!("  loongarch64-ref  LoongArch64 reference machine");
         machina_hw_core::chardev::restore_terminal();
         process::exit(0);
     }
-    if cli.machine != "riscv64-ref" && cli.machine != "loongarch64-virt" {
+    if cli.machine != "riscv64-ref" && cli.machine != "loongarch64-ref" {
         eprintln!("machina: unknown machine: {}", cli.machine);
         machina_hw_core::chardev::restore_terminal();
         process::exit(1);
     }
-    if cli.machine == "loongarch64-virt"
+    if cli.machine == "loongarch64-ref"
         && (cli.start_paused || cli.gdb.is_some())
     {
-        eprintln!("machina: loongarch64-virt does not support -S or -gdb");
+        eprintln!("machina: loongarch64-ref does not support -S or -gdb");
         machina_hw_core::chardev::restore_terminal();
         process::exit(1);
     }
-    if cli.machine == "loongarch64-virt" && cli.monitor.is_some() {
-        eprintln!("machina: loongarch64-virt does not support -monitor");
+    if cli.machine == "loongarch64-ref" && cli.monitor.is_some() {
+        eprintln!("machina: loongarch64-ref does not support -monitor");
         machina_hw_core::chardev::restore_terminal();
         process::exit(1);
     }
@@ -831,7 +831,7 @@ fn main() {
     // Outer loop: supports machine reset via SiFive Test.
     loop {
         eprintln!("machina: entering execution loop");
-        let reason = if cli.machine == "loongarch64-virt" {
+        let reason = if cli.machine == "loongarch64-ref" {
             run_loongarch_machine_cycle(&opts, ram_size)
         } else {
             let ms = if cli.monitor.is_some() || cli.nographic {

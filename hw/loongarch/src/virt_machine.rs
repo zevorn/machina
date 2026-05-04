@@ -80,7 +80,7 @@ impl LoongArchVirtMachine {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            name: "loongarch64-virt".to_string(),
+            name: "loongarch64-ref".to_string(),
             machine_state: MachineState::new_root("machine"),
             ram_size: 0,
             cpu: None,
@@ -189,7 +189,7 @@ impl LoongArchVirtMachine {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.uart.is_some() {
             return Err(
-                "loongarch64-virt UART chardev must be set before init".into(),
+                "loongarch64-ref UART chardev must be set before init".into()
             );
         }
         self.uart_chardev = Some(frontend);
@@ -278,11 +278,11 @@ impl Machine for LoongArchVirtMachine {
             return Err("ram_size must be greater than 0".into());
         }
         if opts.cpu_count != 1 {
-            return Err("loongarch64-virt currently supports one CPU".into());
+            return Err("loongarch64-ref currently supports one CPU".into());
         }
         if opts.netdev.is_some() {
             return Err(
-                "loongarch64-virt does not support virtio-net-device/-netdev"
+                "loongarch64-ref does not support virtio-net-device/-netdev"
                     .into(),
             );
         }
@@ -438,7 +438,7 @@ impl Machine for LoongArchVirtMachine {
         let kernel_path = self
             .kernel_path
             .as_ref()
-            .ok_or("loongarch64-virt boot requires a kernel image")?;
+            .ok_or("loongarch64-ref boot requires a kernel image")?;
         let boot_config = boot::DirectKernelBootConfig {
             cmdline: self.kernel_cmdline.as_deref(),
             initrd_path: self.initrd_path.as_deref(),

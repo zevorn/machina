@@ -272,7 +272,7 @@ fn boot_minimal_elf(
     opts.kernel = Some(kernel.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(opts).expect("init loongarch virt");
+    machine.init(opts).expect("init loongarch ref");
     machine.boot().expect("boot direct ELF");
     (machine, kernel)
 }
@@ -291,7 +291,7 @@ fn task43_direct_boot_loads_linux_image_header_at_load_offset() {
     opts.kernel = Some(kernel.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
     machine.boot().expect("boot LoongArch Linux Image");
 
     let load_addr = VIRT_RAM_BASE + load_offset;
@@ -365,7 +365,7 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
     let fdt = read_bytes(&machine, fdt_guest, fdt_size);
     let props = parse_fdt_props(&fdt);
 
-    assert_fdt_string(&props, "/", "compatible", "machina,loongarch64-virt");
+    assert_fdt_string(&props, "/", "compatible", "machina,loongarch64-ref");
     assert_fdt_string(
         &props,
         "/chosen",
@@ -590,7 +590,7 @@ fn task44_direct_boot_rejects_oversized_cmdline_boot_data() {
     opts.kernel = Some(kernel.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
     let err = machine.boot().expect_err("oversized cmdline must fail");
     assert!(
         err.to_string().contains("command line"),
@@ -610,7 +610,7 @@ fn task44_direct_boot_rejects_kernel_overlapping_boot_data_window() {
     opts.kernel = Some(kernel.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
     let err = machine
         .boot()
         .expect_err("kernel overlapping boot data must fail");
@@ -634,7 +634,7 @@ fn task44_direct_boot_rejects_initrd_overlapping_raw_kernel() {
     opts.initrd = Some(initrd.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
     let err = machine
         .boot()
         .expect_err("initrd overlapping raw kernel must fail");
@@ -660,7 +660,7 @@ fn task43_direct_boot_loads_elf_and_sets_initial_cpu_state() {
     opts.append = Some("console=ttyS0 rdinit=/init".to_string());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
     for offset in payload.len()..payload.len() + 8 {
         machine.address_space().write(
             GPA::new(segment_addr + offset as u64),
@@ -731,7 +731,7 @@ fn task43_direct_boot_loads_raw_image_at_default_entry() {
     opts.kernel = Some(kernel.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
     machine.boot().expect("boot raw image");
 
     assert_eq!(
@@ -761,7 +761,7 @@ fn task43_direct_boot_rejects_bad_linux_image_magic() {
     opts.kernel = Some(kernel.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
     let err = machine.boot().expect_err("bad Linux Image magic must fail");
     assert!(
         err.to_string().contains("LoongArch Linux Image"),
@@ -780,7 +780,7 @@ fn task43_direct_boot_rejects_out_of_ram_raw_image() {
     opts.kernel = Some(kernel.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
     let err = machine.boot().expect_err("out-of-RAM raw image must fail");
     assert!(
         err.to_string().contains("outside LoongArch RAM"),

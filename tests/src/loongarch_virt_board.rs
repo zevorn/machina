@@ -77,9 +77,9 @@ impl Chardev for CapturingInputChardev {
 fn task42_virt_board_realizes_expected_mmio_map() {
     let mut machine = LoongArchVirtMachine::new();
     let opts = default_opts();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
 
-    assert_eq!(machine.name(), "loongarch64-virt");
+    assert_eq!(machine.name(), "loongarch64-ref");
     assert_eq!(machine.cpu_count(), 1);
     assert_eq!(machine.ram_size(), opts.ram_size);
     assert_eq!(VIRT_PCH_PIC_SIZE, 0x400);
@@ -129,11 +129,11 @@ fn task87_virt_board_rejects_unsupported_virtio_net_options() {
     let mut machine = LoongArchVirtMachine::new();
     let err = machine
         .init(&opts)
-        .expect_err("loongarch64-virt must reject unsupported virtio-net");
+        .expect_err("loongarch64-ref must reject unsupported virtio-net");
     let msg = err.to_string();
     assert!(
         msg.contains(
-            "loongarch64-virt does not support virtio-net-device/-netdev"
+            "loongarch64-ref does not support virtio-net-device/-netdev"
         ),
         "missing virtio-net rejection message: {msg}"
     );
@@ -148,7 +148,7 @@ fn task88_virtio_dma_uses_guest_low_ram_base() {
     opts.drive = Some(image.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt with drive");
+    machine.init(&opts).expect("init loongarch ref with drive");
 
     let (_ram_ptr, ram_base, ram_size) = machine
         .virtio_mmio()
@@ -167,7 +167,7 @@ fn task88_virtio_dma_uses_guest_low_ram_base() {
 #[test]
 fn task42_virt_board_installs_iocsr_and_uart_cascade() {
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&default_opts()).expect("init loongarch virt");
+    machine.init(&default_opts()).expect("init loongarch ref");
 
     assert!(
         machine.iocsr_bus().write(0, 0x14c0, 4, 0x0202_0202),
@@ -211,7 +211,7 @@ fn task82_virt_board_chardev_input_reaches_uart_rx_fifo() {
 
     let mut machine = LoongArchVirtMachine::new();
     machine.set_uart_chardev(frontend).unwrap();
-    machine.init(&default_opts()).expect("init loongarch virt");
+    machine.init(&default_opts()).expect("init loongarch ref");
 
     enable_device_hwi(&machine);
     machine
@@ -247,7 +247,7 @@ fn task42_virt_board_realizes_optional_virtio_cascade() {
     opts.drive = Some(image.path().to_path_buf());
 
     let mut machine = LoongArchVirtMachine::new();
-    machine.init(&opts).expect("init loongarch virt");
+    machine.init(&opts).expect("init loongarch ref");
 
     assert_mapping(
         &machine.sysbus().mappings(),
