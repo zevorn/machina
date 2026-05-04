@@ -1,6 +1,8 @@
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 
+use super::mmu::LoongArchMmu;
+
 pub const NUM_GPRS: usize = 32;
 pub const NUM_FPRS: usize = 32;
 pub const NUM_FCC: usize = 8;
@@ -66,6 +68,8 @@ pub struct LoongArchCpu {
     pub(crate) interrupt_request: AtomicU32,
     pub(crate) halted: AtomicBool,
 
+    pub(crate) mmu: LoongArchMmu,
+
     pub(crate) as_ptr: u64,
     pub(crate) ram_base: u64,
     pub(crate) ram_end: u64,
@@ -88,6 +92,9 @@ pub const EENTRY_OFFSET: usize = offset_of!(LoongArchCpu, eentry);
 pub const LLBCTL_OFFSET: usize = offset_of!(LoongArchCpu, llbctl);
 pub const LL_RES_ADDR_OFFSET: usize = offset_of!(LoongArchCpu, ll_res_addr);
 pub const LL_RES_VAL_OFFSET: usize = offset_of!(LoongArchCpu, ll_res_val);
+pub const RAM_BASE_OFFSET: usize = offset_of!(LoongArchCpu, ram_base);
+pub const RAM_END_OFFSET: usize = offset_of!(LoongArchCpu, ram_end);
+pub const GUEST_BASE_CPU_OFFSET: usize = offset_of!(LoongArchCpu, guest_base);
 
 #[must_use]
 pub const fn gpr_offset(i: usize) -> usize {
@@ -131,9 +138,9 @@ impl LoongArchCpu {
             stlbps: 0,
             rvacfg: 0,
             cpuid: 0,
-            prcfg1: 0,
-            prcfg2: 0,
-            prcfg3: 0,
+            prcfg1: 0x72F8,
+            prcfg2: 0x3FFF_F000,
+            prcfg3: 0x0080_73F2,
             llbctl: 0,
             ll_res_addr: u64::MAX,
             ll_res_val: 0,
@@ -154,6 +161,7 @@ impl LoongArchCpu {
             save: [0; NUM_SAVE],
             interrupt_request: AtomicU32::new(0),
             halted: AtomicBool::new(false),
+            mmu: LoongArchMmu::new(),
             as_ptr: 0,
             ram_base: 0,
             ram_end: 0,
@@ -223,12 +231,278 @@ impl LoongArchCpu {
         self.pc
     }
 
-    pub(crate) const fn set_pc(&mut self, val: u64) {
+    pub const fn set_pc(&mut self, val: u64) {
         self.pc = val;
     }
 
-    pub(crate) const fn env_ptr(&mut self) -> *mut u8 {
+    #[must_use]
+    pub const fn dmw(&self, idx: usize) -> u64 {
+        self.dmw[idx]
+    }
+
+    #[must_use]
+    pub fn mmu(&self) -> &LoongArchMmu {
+        &self.mmu
+    }
+
+    pub fn mmu_mut(&mut self) -> &mut LoongArchMmu {
+        &mut self.mmu
+    }
+
+    pub fn tlb_search(&self) -> Option<usize> {
+        use super::mmu::{MTLB_SIZE, STLB_SETS, STLB_WAYS};
+        let vppn = self.tlbehi >> 13;
+        let asid = (self.asid & 0x3FF) as u16;
+        let ps = self.stlbps as u8;
+        for i in 0..MTLB_SIZE {
+            let e = &self.mmu.mtlb[i];
+            if !e.valid {
+                continue;
+            }
+            if (e.g || e.asid == asid) && e.vppn == vppn {
+                return Some(i);
+            }
+        }
+        if ps > 0 {
+            let vpn = self.tlbehi >> ps;
+            let set_idx = (vpn as usize) & (STLB_SETS - 1);
+            for w in 0..STLB_WAYS {
+                let e = &self.mmu.stlb[set_idx][w];
+                if !e.valid {
+                    continue;
+                }
+                if (e.g || e.asid == asid) && e.vppn == vppn {
+                    return Some(MTLB_SIZE + set_idx * STLB_WAYS + w);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn tlb_read(&mut self, idx: usize) {
+        use super::mmu::{MTLB_SIZE, STLB_SETS, STLB_WAYS};
+        let max = MTLB_SIZE + STLB_SETS * STLB_WAYS;
+        if idx >= max {
+            self.tlbidx |= 1 << 31;
+            return;
+        }
+        let e = *self.get_tlb_entry(idx);
+        if !e.valid {
+            self.tlbidx |= 1 << 31;
+            return;
+        }
+        self.tlbidx = (self.tlbidx & !(0x3F << 24 | 0xFFF))
+            | ((u64::from(e.page_size)) << 24)
+            | (idx as u64 & 0xFFF);
+        self.tlbehi = e.vppn << 13;
+        self.tlbelo0 =
+            self.encode_tlbelo(e.ppn0, e.v0, e.d0, e.plv0, e.mat0, e.g, e.nr0);
+        self.tlbelo1 =
+            self.encode_tlbelo(e.ppn1, e.v1, e.d1, e.plv1, e.mat1, e.g, e.nr1);
+        self.asid = (self.asid & !0x3FF) | u64::from(e.asid);
+    }
+
+    pub fn tlb_write(&mut self, idx: usize) {
+        use super::mmu::{TlbEntry, MTLB_SIZE, STLB_SETS, STLB_WAYS};
+        let ps = ((self.tlbidx >> 24) & 0x3F) as u8;
+        let entry = TlbEntry {
+            vppn: self.tlbehi >> 13,
+            page_size: ps,
+            asid: (self.asid & 0x3FF) as u16,
+            g: (self.tlbelo0 & self.tlbelo1 & (1 << 6)) != 0,
+            valid: true,
+            ppn0: (self.tlbelo0 >> 12) & 0xF_FFFF_FFFF,
+            ppn1: (self.tlbelo1 >> 12) & 0xF_FFFF_FFFF,
+            plv0: ((self.tlbelo0 >> 2) & 0x3) as u8,
+            plv1: ((self.tlbelo1 >> 2) & 0x3) as u8,
+            mat0: ((self.tlbelo0 >> 4) & 0x3) as u8,
+            mat1: ((self.tlbelo1 >> 4) & 0x3) as u8,
+            d0: self.tlbelo0 & (1 << 1) != 0,
+            d1: self.tlbelo1 & (1 << 1) != 0,
+            v0: self.tlbelo0 & 1 != 0,
+            v1: self.tlbelo1 & 1 != 0,
+            nr0: self.tlbelo0 & (1 << 61) != 0,
+            nr1: self.tlbelo1 & (1 << 61) != 0,
+        };
+        if idx < MTLB_SIZE {
+            self.mmu.mtlb[idx] = entry;
+        } else {
+            let flat = idx - MTLB_SIZE;
+            let set = flat / STLB_WAYS;
+            let way = flat % STLB_WAYS;
+            if set < STLB_SETS && way < STLB_WAYS {
+                self.mmu.stlb[set][way] = entry;
+            }
+        }
+    }
+
+    pub fn tlb_fill(&mut self) {
+        use super::mmu::MTLB_SIZE;
+        let idx = (self.tlbidx as usize) & (MTLB_SIZE - 1);
+        self.tlb_write(idx);
+    }
+
+    pub fn invtlb(&mut self, op: u32, asid: u16, va: u64) {
+        use super::mmu::STLB_SETS;
+        match op {
+            0 | 1 => {
+                self.mmu.mtlb.iter_mut().for_each(|e| e.valid = false);
+                self.mmu.stlb.iter_mut().for_each(|s| {
+                    s.iter_mut().for_each(|e| e.valid = false);
+                });
+            }
+            2 => {
+                self.mmu.mtlb.iter_mut().for_each(|e| {
+                    if e.g {
+                        e.valid = false;
+                    }
+                });
+                self.mmu.stlb.iter_mut().for_each(|s| {
+                    s.iter_mut().for_each(|e| {
+                        if e.g {
+                            e.valid = false;
+                        }
+                    });
+                });
+            }
+            3 => {
+                self.mmu.mtlb.iter_mut().for_each(|e| {
+                    if !e.g {
+                        e.valid = false;
+                    }
+                });
+                self.mmu.stlb.iter_mut().for_each(|s| {
+                    s.iter_mut().for_each(|e| {
+                        if !e.g {
+                            e.valid = false;
+                        }
+                    });
+                });
+            }
+            4 => {
+                self.mmu.mtlb.iter_mut().for_each(|e| {
+                    if !e.g && e.asid == asid {
+                        e.valid = false;
+                    }
+                });
+                self.mmu.stlb.iter_mut().for_each(|s| {
+                    s.iter_mut().for_each(|e| {
+                        if !e.g && e.asid == asid {
+                            e.valid = false;
+                        }
+                    });
+                });
+            }
+            5 => {
+                let vppn = va >> 13;
+                self.mmu.mtlb.iter_mut().for_each(|e| {
+                    if !e.g && e.asid == asid && e.vppn == vppn {
+                        e.valid = false;
+                    }
+                });
+                if self.stlbps > 0 {
+                    let vpn = va >> self.stlbps;
+                    let set = (vpn as usize) & (STLB_SETS - 1);
+                    self.mmu.stlb[set].iter_mut().for_each(|e| {
+                        if !e.g && e.asid == asid && e.vppn == vppn {
+                            e.valid = false;
+                        }
+                    });
+                }
+            }
+            6 => {
+                let vppn = va >> 13;
+                self.mmu.mtlb.iter_mut().for_each(|e| {
+                    if (e.g || e.asid == asid) && e.vppn == vppn {
+                        e.valid = false;
+                    }
+                });
+                if self.stlbps > 0 {
+                    let vpn = va >> self.stlbps;
+                    let set = (vpn as usize) & (STLB_SETS - 1);
+                    self.mmu.stlb[set].iter_mut().for_each(|e| {
+                        if (e.g || e.asid == asid) && e.vppn == vppn {
+                            e.valid = false;
+                        }
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn get_tlb_entry(&self, idx: usize) -> &super::mmu::TlbEntry {
+        use super::mmu::{MTLB_SIZE, STLB_SETS, STLB_WAYS};
+        if idx < MTLB_SIZE {
+            &self.mmu.mtlb[idx]
+        } else {
+            let flat = idx - MTLB_SIZE;
+            let set = flat / STLB_WAYS;
+            let way = flat % STLB_WAYS;
+            assert!(set < STLB_SETS && way < STLB_WAYS);
+            &self.mmu.stlb[set][way]
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_tlbelo(
+        &self,
+        ppn: u64,
+        v: bool,
+        d: bool,
+        plv: u8,
+        mat: u8,
+        g: bool,
+        nr: bool,
+    ) -> u64 {
+        (u64::from(v))
+            | (u64::from(d) << 1)
+            | (u64::from(plv) << 2)
+            | (u64::from(mat) << 4)
+            | (u64::from(g) << 6)
+            | (ppn << 12)
+            | (u64::from(nr) << 61)
+    }
+
+    pub fn env_ptr(&mut self) -> *mut u8 {
         std::ptr::from_mut(self).cast()
+    }
+
+    pub fn set_estat_hw(&mut self, val: u64) {
+        self.estat = val;
+    }
+
+    pub fn set_badv_raw(&mut self, val: u64) {
+        self.badv = val;
+    }
+
+    #[must_use]
+    pub fn tval(&self) -> u64 {
+        self.tval
+    }
+}
+
+impl LoongArchCpu {
+    pub fn timer_tick(&mut self, cycles: u64) {
+        if self.tcfg & 1 == 0 {
+            return;
+        }
+        if self.tval == 0 {
+            return;
+        }
+        if self.tval <= cycles {
+            // Timer fired
+            self.estat |= 1 << 11;
+            let periodic = self.tcfg & 2 != 0;
+            if periodic {
+                let init_val = self.tcfg & !0x3;
+                self.tval = init_val;
+            } else {
+                self.tval = 0;
+            }
+        } else {
+            self.tval -= cycles;
+        }
     }
 }
 

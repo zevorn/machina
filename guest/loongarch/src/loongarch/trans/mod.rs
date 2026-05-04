@@ -2243,6 +2243,492 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         gpr_set(&self.gpr, ir, a.rd as u8, old);
         true
     }
+
+    fn trans_csrrd(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsCsr,
+    ) -> bool {
+        use gen_common::gpr_set;
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let csr_num = ir.new_const(Type::I64, a.csr_num as u64);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_csrrd as *const () as u64,
+            &[env_tmp, csr_num],
+        );
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_csrwr(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsCsr,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let csr_num = ir.new_const(Type::I64, a.csr_num as u64);
+        let val = gpr_get(&self.gpr, ir, a.rd as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_csrwr as *const () as u64,
+            &[env_tmp, csr_num, val],
+        );
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        let pc_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_csrxchg(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsCsr,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        use machina_accel::ir::Cond;
+        if a.rj == 0 || a.rj == 1 {
+            return false;
+        }
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let csr_num = ir.new_const(Type::I64, a.csr_num as u64);
+        let val = gpr_get(&self.gpr, ir, a.rd as u8);
+        let mask = gpr_get(&self.gpr, ir, a.rj as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_csrxchg as *const () as u64,
+            &[env_tmp, csr_num, val, mask],
+        );
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        let pc_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc_next);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_cpucfg(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let env_tmp = self.env;
+        let idx = gpr_get(&self.gpr, ir, a.rj as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_cpucfg as *const () as u64,
+            &[env_tmp, idx],
+        );
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_syscall(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsCode,
+    ) -> bool {
+        let env_tmp = self.env;
+        let pc = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc);
+        let ecode = ir.new_const(Type::I64, 0x0B);
+        let code = ir.new_const(Type::I64, a.code15 as u64);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_raise_exception as *const () as u64,
+            &[env_tmp, ecode, code],
+        );
+        ir.gen_mov(Type::I64, self.pc, d);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_break_(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsCode,
+    ) -> bool {
+        let env_tmp = self.env;
+        let pc = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc);
+        let ecode = ir.new_const(Type::I64, 0x0C);
+        let code = ir.new_const(Type::I64, a.code15 as u64);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_raise_exception as *const () as u64,
+            &[env_tmp, ecode, code],
+        );
+        ir.gen_mov(Type::I64, self.pc, d);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_ertn(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsEmpty,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_ertn as *const () as u64,
+            &[env_tmp],
+        );
+        ir.gen_mov(Type::I64, self.pc, d);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_idle(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsCode,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_idle as *const () as u64,
+            &[env_tmp],
+        );
+        let pc_next = ir.new_const(Type::I64, self.base.pc_next);
+        ir.gen_mov(Type::I64, self.pc, pc_next);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_tlbsrch(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsEmpty,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_tlbsrch as *const () as u64,
+            &[env_tmp],
+        );
+        true
+    }
+
+    fn trans_tlbrd(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsEmpty,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_tlbrd as *const () as u64,
+            &[env_tmp],
+        );
+        true
+    }
+
+    fn trans_tlbwr(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsEmpty,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_tlbwr as *const () as u64,
+            &[env_tmp],
+        );
+        true
+    }
+
+    fn trans_tlbfill(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsEmpty,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_tlbfill as *const () as u64,
+            &[env_tmp],
+        );
+        true
+    }
+
+    fn trans_invtlb(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        use gen_common::gpr_get;
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        let op = ir.new_const(Type::I64, a.rd as u64);
+        let asid_val = gpr_get(&self.gpr, ir, a.rj as u8);
+        let va = gpr_get(&self.gpr, ir, a.rk as u8);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_call(
+            d,
+            helpers::loongarch_helper_invtlb as *const () as u64,
+            &[env_tmp, op, asid_val, va],
+        );
+        let zero2 = ir.new_const(Type::I64, 0);
+        let label_done = ir.new_label();
+        ir.gen_brcond(Type::I64, d, zero2, Cond::Eq, label_done);
+        ir.gen_mov(Type::I64, self.pc, d);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_done);
+        true
+    }
+
+    fn trans_iocsrrd_b(
+        &mut self,
+        ir: &mut Context,
+        _a: &insn_decode::ArgsR2,
+    ) -> bool {
+        use machina_accel::ir::Cond;
+        let env_tmp = self.env;
+        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
+        ir.gen_mov(Type::I64, self.pc, pc_val);
+        let chk = ir.new_temp(Type::I64);
+        ir.gen_call(
+            chk,
+            helpers::loongarch_helper_check_plv as *const () as u64,
+            &[env_tmp],
+        );
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+        ir.gen_mov(Type::I64, self.pc, chk);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_set_label(label_ok);
+        ir.gen_exit_tb(EXCP_UNDEF);
+        self.base.is_jmp = DisasJumpType::NoReturn;
+        true
+    }
+
+    fn trans_iocsrrd_h(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        self.trans_iocsrrd_b(ir, a)
+    }
+
+    fn trans_iocsrrd_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        self.trans_iocsrrd_b(ir, a)
+    }
+
+    fn trans_iocsrrd_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        self.trans_iocsrrd_b(ir, a)
+    }
+
+    fn trans_iocsrwr_b(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        self.trans_iocsrrd_b(ir, a)
+    }
+
+    fn trans_iocsrwr_h(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        self.trans_iocsrrd_b(ir, a)
+    }
+
+    fn trans_iocsrwr_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        self.trans_iocsrrd_b(ir, a)
+    }
+
+    fn trans_iocsrwr_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2,
+    ) -> bool {
+        self.trans_iocsrrd_b(ir, a)
+    }
 }
 
 fn decode_insn(

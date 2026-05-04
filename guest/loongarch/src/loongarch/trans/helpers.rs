@@ -156,6 +156,215 @@ pub extern "C" fn loongarch_helper_bitrev_d(a: u64) -> u64 {
 }
 
 /// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_cpucfg(
+    _env: *mut u8,
+    index: u64,
+) -> u64 {
+    match index as u32 {
+        0x00 => 0x0014_C010,
+        0x01 => 0x03F2_F2FE,
+        // QEMU la464 value with LSX/LASX masked (bits 6,7)
+        0x02 => 0x0060_C00F,
+        0x03 => 0,
+        0x04 => 0x05F5_E100,
+        0x05 => 0x0001_0001,
+        0x06 => 0,
+        _ => 0,
+    }
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_tlbsrch(env: *mut u8) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    if let Some(idx) = cpu.tlb_search() {
+        cpu.tlbidx = (cpu.tlbidx & !(0xFFF | (1 << 31))) | (idx as u64);
+    } else {
+        cpu.tlbidx |= 1 << 31;
+    }
+    0
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_tlbrd(env: *mut u8) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    let idx = (cpu.tlbidx & 0xFFF) as usize;
+    cpu.tlb_read(idx);
+    0
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_tlbwr(env: *mut u8) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    let idx = (cpu.tlbidx & 0xFFF) as usize;
+    cpu.tlb_write(idx);
+    0
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_tlbfill(env: *mut u8) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.tlb_fill();
+    0
+}
+
+/// Returns 0 on success, nonzero (exception vector) for invalid opcode.
+///
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_invtlb(
+    env: *mut u8,
+    op: u64,
+    asid_val: u64,
+    va: u64,
+) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    if op > 6 {
+        use super::super::csr::*;
+        cpu.era = cpu.pc;
+        cpu.prmd = cpu.crmd & 0x7;
+        cpu.crmd = cpu.crmd & !CRMD_PLV_MASK & !CRMD_IE;
+        cpu.estat = (cpu.estat & ESTAT_IS_MASK) | (0x0D << 16);
+        return cpu.eentry;
+    }
+    cpu.invtlb(op as u32, asid_val as u16, va);
+    0
+}
+
+/// Returns 0 if PLV==0 (privileged access OK).
+/// Otherwise raises IPE exception and returns the exception vector.
+///
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_check_plv(env: *mut u8) -> u64 {
+    use super::super::csr::*;
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    if cpu.crmd & CRMD_PLV_MASK == 0 {
+        return 0;
+    }
+    // Raise IPE (Instruction Privilege Error)
+    let pc = cpu.pc;
+    cpu.era = pc;
+    cpu.prmd = cpu.crmd & 0x7;
+    cpu.crmd = cpu.crmd & !CRMD_PLV_MASK & !CRMD_IE;
+    cpu.estat = (cpu.estat & ESTAT_IS_MASK) | (0x0E << 16);
+    cpu.eentry
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_raise_exception(
+    env: *mut u8,
+    ecode: u64,
+    esubcode: u64,
+) -> u64 {
+    use super::super::csr::*;
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    let pc = cpu.pc;
+
+    if ecode == 0x3F {
+        // TLB refill: save to TLBR-specific CSRs
+        cpu.tlbrera = (pc & !0x3) | 1; // ISTLBR=1, PC in [63:2]
+        cpu.tlbrprmd = cpu.crmd & 0x7;
+        // Force DA mode, PLV0, IE=0 for TLB refill handler
+        cpu.crmd = (cpu.crmd & !CRMD_PLV_MASK & !CRMD_IE & !CRMD_PG) | CRMD_DA;
+    } else {
+        cpu.era = pc;
+        cpu.prmd = cpu.crmd & 0x7;
+        cpu.crmd = cpu.crmd & !CRMD_PLV_MASK & !CRMD_IE;
+    }
+
+    let estat_val = (cpu.estat & ESTAT_IS_MASK)
+        | ((ecode & 0x3F) << 16)
+        | ((esubcode & 0x1FF) << 22);
+    cpu.estat = estat_val;
+
+    if ecode == 0x3F {
+        cpu.tlbrentry
+    } else {
+        cpu.eentry
+    }
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_ertn(env: *mut u8) -> u64 {
+    use super::super::csr::*;
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    if cpu.tlbrera & 1 != 0 {
+        // Return from TLB refill: restore PLV/IE, clear DA, set PG
+        let pplv_pie = cpu.tlbrprmd & 0x7;
+        cpu.crmd = (cpu.crmd & !0x7 & !CRMD_DA & !CRMD_PG) | pplv_pie | CRMD_PG;
+        let pc = cpu.tlbrera & !0x3;
+        cpu.tlbrera &= !1; // Clear ISTLBR
+        pc
+    } else {
+        cpu.crmd = (cpu.crmd & !0x7) | (cpu.prmd & 0x7);
+        cpu.era
+    }
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_idle(env: *mut u8) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.halted.store(true, std::sync::atomic::Ordering::Release);
+    0
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_csrrd(
+    env: *mut u8,
+    csr_num: u64,
+) -> u64 {
+    let cpu = &*(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.csr_read(csr_num as u32)
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_csrwr(
+    env: *mut u8,
+    csr_num: u64,
+    val: u64,
+) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    let old = cpu.csr_read(csr_num as u32);
+    cpu.csr_write(csr_num as u32, val);
+    old
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_csrxchg(
+    env: *mut u8,
+    csr_num: u64,
+    val: u64,
+    mask: u64,
+) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.csr_xchg(csr_num as u32, val, mask)
+}
+
+/// # Safety
 /// `env` must point to a valid `LoongArchCpu` with correct guest_base/ram fields.
 #[no_mangle]
 pub unsafe extern "C" fn loongarch_helper_sc_w(
