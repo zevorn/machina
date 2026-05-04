@@ -5,7 +5,10 @@ use machina_accel::ir::context::Context;
 use machina_accel::GuestCpu;
 use machina_guest_loongarch::loongarch::cpu::LoongArchCpu;
 use machina_guest_loongarch::loongarch::csr::*;
-use machina_system::loongarch_cpu::LoongArchFullSystemCpu;
+use machina_system::loongarch_cpu::{
+    LoongArchFullSystemCpu, LOONGARCH_TB_FLAG_DA, LOONGARCH_TB_FLAG_FPE,
+    LOONGARCH_TB_FLAG_PG, LOONGARCH_TB_FLAG_PLV_MASK,
+};
 
 fn make_cpu(code: &[u32]) -> LoongArchFullSystemCpu {
     let ptr = code.as_ptr().cast::<u8>();
@@ -117,4 +120,46 @@ fn syscall_helper_preserves_sys_ecode() {
     assert_eq!((cpu.cpu.csr_read(CSR_ESTAT) >> 16) & 0x3F, 0x0B);
     assert_eq!(cpu.get_pc(), 0x9000_0000);
     assert_eq!(cpu.cpu.csr_read(CSR_ERA), 0x200);
+}
+
+#[test]
+fn get_flags_encodes_direct_address_reset_state() {
+    let code: [u32; 1] = [0x0340_0000];
+    let cpu = make_cpu(&code);
+
+    assert_eq!(cpu.get_flags(), LOONGARCH_TB_FLAG_DA);
+}
+
+#[test]
+fn get_flags_encodes_plv_da_pg_and_fpe_bits() {
+    let code: [u32; 1] = [0x0340_0000];
+    let mut cpu = make_cpu(&code);
+
+    cpu.cpu.csr_write(CSR_CRMD, 3 | CRMD_DA | CRMD_PG | CRMD_IE);
+    cpu.cpu.csr_write(CSR_EUEN, EUEN_FPE);
+
+    assert_eq!(
+        cpu.get_flags(),
+        (3 & LOONGARCH_TB_FLAG_PLV_MASK)
+            | LOONGARCH_TB_FLAG_DA
+            | LOONGARCH_TB_FLAG_PG
+            | LOONGARCH_TB_FLAG_FPE
+    );
+}
+
+#[test]
+fn get_flags_tracks_addressing_and_fpu_changes_independently() {
+    let code: [u32; 1] = [0x0340_0000];
+    let mut cpu = make_cpu(&code);
+
+    cpu.cpu.csr_write(CSR_CRMD, 2 | CRMD_PG);
+    cpu.cpu.csr_write(CSR_EUEN, 0);
+    assert_eq!(cpu.get_flags(), 2 | LOONGARCH_TB_FLAG_PG);
+
+    cpu.cpu.csr_write(CSR_CRMD, 2 | CRMD_DA);
+    cpu.cpu.csr_write(CSR_EUEN, EUEN_FPE);
+    assert_eq!(
+        cpu.get_flags(),
+        2 | LOONGARCH_TB_FLAG_DA | LOONGARCH_TB_FLAG_FPE
+    );
 }

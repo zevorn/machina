@@ -567,14 +567,14 @@ pub unsafe extern "C" fn loongarch_helper_iocsrwr(
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
 pub unsafe extern "C" fn loongarch_helper_cpucfg(
-    _env: *mut u8,
+    env: *mut u8,
     index: u64,
 ) -> u64 {
+    let cpu = &*(env.cast::<super::super::cpu::LoongArchCpu>());
     match index as u32 {
         0x00 => 0x0014_C010,
         0x01 => 0x03F2_F2FE,
-        // QEMU la464 value with LSX/LASX masked (bits 6,7)
-        0x02 => 0x0060_C00F,
+        0x02 => cpu.cfg.cpucfg2(),
         0x03 => 0,
         0x04 => 0x05F5_E100,
         0x05 => 0x0001_0001,

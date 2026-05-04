@@ -1,6 +1,8 @@
 use machina_guest_loongarch::loongarch::insn_decode::{
-    self, ArgsEmpty, ArgsFr4, ArgsOffs26, ArgsR1Offs21, ArgsR1Si20, ArgsR2,
-    ArgsR2Si12, ArgsR2Si14, ArgsR2Si16, ArgsR2Ui6, ArgsR2Ui8, ArgsR3, Decode,
+    self, ArgsCf, ArgsCopRSi12, ArgsCsr, ArgsFbranch, ArgsFcmp, ArgsFr2,
+    ArgsFr3, ArgsFr4, ArgsFrr, ArgsFsel, ArgsHintR3, ArgsHintRSi12, ArgsOffs26,
+    ArgsR1Offs21, ArgsR1Si20, ArgsR2, ArgsR2Msbw, ArgsR2Si12, ArgsR2Si14,
+    ArgsR2Si16, ArgsR2Ui6, ArgsR2Ui8, ArgsR3, ArgsR3Sa2, ArgsR3Sa3, Decode,
 };
 
 struct FieldCapture {
@@ -16,7 +18,16 @@ struct FieldCapture {
     offs26: i64,
     ui6: i64,
     ui8: i64,
+    msb: i64,
+    lsb: i64,
+    sa: i64,
+    hint: i64,
+    cop: i64,
     fa: i64,
+    csr_num: i64,
+    cd: i64,
+    cj: i64,
+    ca: i64,
 }
 
 impl Default for FieldCapture {
@@ -34,7 +45,16 @@ impl Default for FieldCapture {
             offs26: 0,
             ui6: 0,
             ui8: 0,
+            msb: 0,
+            lsb: 0,
+            sa: 0,
+            hint: 0,
+            cop: 0,
             fa: 0,
+            csr_num: 0,
+            cd: -1,
+            cj: -1,
+            ca: -1,
         }
     }
 }
@@ -52,6 +72,13 @@ impl Decode<()> for FieldCapture {
         self.rd = a.rd;
         self.rj = a.rj;
         self.si12 = a.si12;
+        true
+    }
+    fn trans_addu16i_d(&mut self, _ir: &mut (), a: &ArgsR2Si16) -> bool {
+        self.name = "addu16i_d";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.si16 = a.si16;
         true
     }
     fn trans_lu12i_w(&mut self, _ir: &mut (), a: &ArgsR1Si20) -> bool {
@@ -107,10 +134,118 @@ impl Decode<()> for FieldCapture {
         self.ui8 = a.ui8;
         true
     }
+    fn trans_ldpte(&mut self, _ir: &mut (), a: &ArgsR2Ui8) -> bool {
+        self.name = "ldpte";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.ui8 = a.ui8;
+        true
+    }
+    fn trans_mulw_d_w(&mut self, _ir: &mut (), a: &ArgsR3) -> bool {
+        self.name = "mulw_d_w";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.rk = a.rk;
+        true
+    }
+    fn trans_alsl_w(&mut self, _ir: &mut (), a: &ArgsR3Sa2) -> bool {
+        self.name = "alsl_w";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.rk = a.rk;
+        self.sa = a.sa2;
+        true
+    }
+    fn trans_bytepick_d(&mut self, _ir: &mut (), a: &ArgsR3Sa3) -> bool {
+        self.name = "bytepick_d";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.rk = a.rk;
+        self.sa = a.sa3;
+        true
+    }
+    fn trans_ldx_w(&mut self, _ir: &mut (), a: &ArgsR3) -> bool {
+        self.name = "ldx_w";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.rk = a.rk;
+        true
+    }
+    fn trans_ldptr_d(&mut self, _ir: &mut (), a: &ArgsR2Si14) -> bool {
+        self.name = "ldptr_d";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.si14 = a.si14;
+        true
+    }
+    fn trans_preld(&mut self, _ir: &mut (), a: &ArgsHintRSi12) -> bool {
+        self.name = "preld";
+        self.hint = a.hint;
+        self.rj = a.rj;
+        self.si12 = a.si12;
+        true
+    }
+    fn trans_preldx(&mut self, _ir: &mut (), a: &ArgsHintR3) -> bool {
+        self.name = "preldx";
+        self.hint = a.hint;
+        self.rj = a.rj;
+        self.rk = a.rk;
+        true
+    }
+    fn trans_amcas_db_w(&mut self, _ir: &mut (), a: &ArgsR3) -> bool {
+        self.name = "amcas_db_w";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.rk = a.rk;
+        true
+    }
+    fn trans_llacq_d(&mut self, _ir: &mut (), a: &ArgsR2) -> bool {
+        self.name = "llacq_d";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        true
+    }
+    fn trans_rdtime_d(&mut self, _ir: &mut (), a: &ArgsR2) -> bool {
+        self.name = "rdtime_d";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        true
+    }
+    fn trans_tlbclr(
+        &mut self,
+        _ir: &mut (),
+        _a: &insn_decode::ArgsEmpty,
+    ) -> bool {
+        self.name = "tlbclr";
+        true
+    }
+    fn trans_cacop(&mut self, _ir: &mut (), a: &ArgsCopRSi12) -> bool {
+        self.name = "cacop";
+        self.cop = a.cop;
+        self.rj = a.rj;
+        self.si12 = a.si12;
+        true
+    }
     fn trans_clz_d(&mut self, _ir: &mut (), a: &ArgsR2) -> bool {
         self.name = "clz_d";
         self.rd = a.rd;
         self.rj = a.rj;
+        true
+    }
+    fn trans_bstrins_w(&mut self, _ir: &mut (), a: &ArgsR2Msbw) -> bool {
+        self.name = "bstrins_w";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.msb = a.msbw;
+        self.lsb = a.lsbw;
+        true
+    }
+    fn trans_bstrpick_w(&mut self, _ir: &mut (), a: &ArgsR2Msbw) -> bool {
+        self.name = "bstrpick_w";
+        self.rd = a.rd;
+        self.rj = a.rj;
+        self.msb = a.msbw;
+        self.lsb = a.lsbw;
         true
     }
     fn trans_ertn(
@@ -128,6 +263,90 @@ impl Decode<()> for FieldCapture {
         self.si12 = a.si12;
         true
     }
+    fn trans_csrrd(&mut self, _ir: &mut (), a: &ArgsCsr) -> bool {
+        self.name = "csrrd";
+        self.csr_num = a.csr_num;
+        self.rd = a.rd;
+        self.rj = a.rj;
+        true
+    }
+    fn trans_fcmp_ceq_s(&mut self, _ir: &mut (), a: &ArgsFcmp) -> bool {
+        self.name = "fcmp_ceq_s";
+        self.cd = a.cd;
+        self.rj = a.fj;
+        self.rk = a.fk;
+        true
+    }
+    fn trans_fsel(&mut self, _ir: &mut (), a: &ArgsFsel) -> bool {
+        self.name = "fsel";
+        self.rd = a.fd;
+        self.rj = a.fj;
+        self.rk = a.fk;
+        self.ca = a.ca;
+        true
+    }
+    fn trans_bceqz(&mut self, _ir: &mut (), a: &ArgsFbranch) -> bool {
+        self.name = "bceqz";
+        self.cj = a.cj;
+        self.offs21 = a.offs21;
+        true
+    }
+    fn trans_ftintrm_w_s(&mut self, _ir: &mut (), a: &ArgsFr2) -> bool {
+        self.name = "ftintrm_w_s";
+        self.rd = a.fd;
+        self.rj = a.fj;
+        true
+    }
+    fn trans_ftintrz_w_s(&mut self, _ir: &mut (), a: &ArgsFr2) -> bool {
+        self.name = "ftintrz_w_s";
+        self.rd = a.fd;
+        self.rj = a.fj;
+        true
+    }
+    fn trans_ftintrne_l_d(&mut self, _ir: &mut (), a: &ArgsFr2) -> bool {
+        self.name = "ftintrne_l_d";
+        self.rd = a.fd;
+        self.rj = a.fj;
+        true
+    }
+    fn trans_ftint_l_d(&mut self, _ir: &mut (), a: &ArgsFr2) -> bool {
+        self.name = "ftint_l_d";
+        self.rd = a.fd;
+        self.rj = a.fj;
+        true
+    }
+    fn trans_frint_d(&mut self, _ir: &mut (), a: &ArgsFr2) -> bool {
+        self.name = "frint_d";
+        self.rd = a.fd;
+        self.rj = a.fj;
+        true
+    }
+    fn trans_fmax_s(&mut self, _ir: &mut (), a: &ArgsFr3) -> bool {
+        self.name = "fmax_s";
+        self.rd = a.fd;
+        self.rj = a.fj;
+        self.rk = a.fk;
+        true
+    }
+    fn trans_fclass_d(&mut self, _ir: &mut (), a: &ArgsFr2) -> bool {
+        self.name = "fclass_d";
+        self.rd = a.fd;
+        self.rj = a.fj;
+        true
+    }
+    fn trans_fldx_d(&mut self, _ir: &mut (), a: &ArgsFrr) -> bool {
+        self.name = "fldx_d";
+        self.rd = a.fd;
+        self.rj = a.rj;
+        self.rk = a.rk;
+        true
+    }
+    fn trans_movfr2cf(&mut self, _ir: &mut (), a: &ArgsCf) -> bool {
+        self.name = "movfr2cf";
+        self.cd = a.cd;
+        self.rj = a.fj;
+        true
+    }
 }
 
 // --- Format coverage tests with field value assertions ---
@@ -141,6 +360,34 @@ fn test_2r_format_clz_d() {
     assert_eq!(c.name, "clz_d");
     assert_eq!(c.rd, 7);
     assert_eq!(c.rj, 13);
+}
+
+#[test]
+fn test_bstrins_w_format() {
+    let mut c = FieldCapture::default();
+    // BSTRINS.W rd=7, rj=13, msbw=23, lsbw=5.
+    let insn: u32 =
+        (0b00000000011 << 21) | (23 << 16) | (5 << 10) | (13 << 5) | 7;
+    assert!(insn_decode::decode(&mut c, &mut (), insn));
+    assert_eq!(c.name, "bstrins_w");
+    assert_eq!(c.rd, 7);
+    assert_eq!(c.rj, 13);
+    assert_eq!(c.msb, 23);
+    assert_eq!(c.lsb, 5);
+}
+
+#[test]
+fn test_bstrpick_w_format() {
+    let mut c = FieldCapture::default();
+    // BSTRPICK.W rd=8, rj=14, msbw=31, lsbw=0.
+    let insn: u32 =
+        (0b00000000011 << 21) | (31 << 16) | (1 << 15) | (14 << 5) | 8;
+    assert!(insn_decode::decode(&mut c, &mut (), insn));
+    assert_eq!(c.name, "bstrpick_w");
+    assert_eq!(c.rd, 8);
+    assert_eq!(c.rj, 14);
+    assert_eq!(c.msb, 31);
+    assert_eq!(c.lsb, 0);
 }
 
 #[test]
@@ -191,6 +438,182 @@ fn test_2ri8_format_lddir() {
     assert_eq!(c.rd, 1);
     assert_eq!(c.rj, 2);
     assert_eq!(c.ui8, 5);
+}
+
+#[test]
+fn test_2ri8_format_ldpte() {
+    let mut c = FieldCapture::default();
+    // LDPTE rj=2, level=5, low bits fixed to zero.
+    let insn: u32 = (0b00000110010001 << 18) | (5 << 10) | (2 << 5);
+    assert!(insn_decode::decode(&mut c, &mut (), insn));
+    assert_eq!(c.name, "ldpte");
+    assert_eq!(c.rd, 0);
+    assert_eq!(c.rj, 2);
+    assert_eq!(c.ui8, 5);
+}
+
+#[test]
+fn test_reference_integer_helper_formats() {
+    let mut mul = FieldCapture::default();
+    let mulw: u32 = (0b00000000000111110 << 15) | (3 << 10) | (2 << 5) | 1;
+    assert!(insn_decode::decode(&mut mul, &mut (), mulw));
+    assert_eq!(mul.name, "mulw_d_w");
+    assert_eq!(mul.rd, 1);
+    assert_eq!(mul.rj, 2);
+    assert_eq!(mul.rk, 3);
+
+    let mut alsl = FieldCapture::default();
+    let alsl_w: u32 =
+        (0b000000000000010 << 17) | (2 << 15) | (3 << 10) | (4 << 5) | 5;
+    assert!(insn_decode::decode(&mut alsl, &mut (), alsl_w));
+    assert_eq!(alsl.name, "alsl_w");
+    assert_eq!(alsl.rd, 5);
+    assert_eq!(alsl.rj, 4);
+    assert_eq!(alsl.rk, 3);
+    assert_eq!(alsl.sa, 2);
+
+    let mut bytepick = FieldCapture::default();
+    let bytepick_d: u32 =
+        (0b00000000000011 << 18) | (6 << 15) | (7 << 10) | (8 << 5) | 9;
+    assert!(insn_decode::decode(&mut bytepick, &mut (), bytepick_d));
+    assert_eq!(bytepick.name, "bytepick_d");
+    assert_eq!(bytepick.rd, 9);
+    assert_eq!(bytepick.rj, 8);
+    assert_eq!(bytepick.rk, 7);
+    assert_eq!(bytepick.sa, 6);
+}
+
+#[test]
+fn test_2ri16_format_addu16i_d() {
+    let mut c = FieldCapture::default();
+    let insn: u32 = (0b000100 << 26) | (0xFFFC << 10) | (6 << 5) | 5;
+    assert!(insn_decode::decode(&mut c, &mut (), insn));
+    assert_eq!(c.name, "addu16i_d");
+    assert_eq!(c.rd, 5);
+    assert_eq!(c.rj, 6);
+    assert_eq!(c.si16, -4);
+}
+
+#[test]
+fn test_reference_memory_formats() {
+    let mut indexed = FieldCapture::default();
+    let ldx_w: u32 = (0b00111000000010000 << 15) | (3 << 10) | (2 << 5) | 1;
+    assert!(insn_decode::decode(&mut indexed, &mut (), ldx_w));
+    assert_eq!(indexed.name, "ldx_w");
+    assert_eq!(indexed.rd, 1);
+    assert_eq!(indexed.rj, 2);
+    assert_eq!(indexed.rk, 3);
+
+    let mut ptr = FieldCapture::default();
+    let ldptr_d: u32 = (0b00100110 << 24) | (0x3F << 10) | (4 << 5) | 5;
+    assert!(insn_decode::decode(&mut ptr, &mut (), ldptr_d));
+    assert_eq!(ptr.name, "ldptr_d");
+    assert_eq!(ptr.rd, 5);
+    assert_eq!(ptr.rj, 4);
+    assert_eq!(ptr.si14, 0x3F);
+
+    let mut preld = FieldCapture::default();
+    let preld_insn: u32 = (0b0010101011 << 22) | (0x123 << 10) | (9 << 5) | 7;
+    assert!(insn_decode::decode(&mut preld, &mut (), preld_insn));
+    assert_eq!(preld.name, "preld");
+    assert_eq!(preld.hint, 7);
+    assert_eq!(preld.rj, 9);
+    assert_eq!(preld.si12, 0x123);
+
+    let mut preldx = FieldCapture::default();
+    let preldx_insn: u32 =
+        (0b00111000001011000 << 15) | (8 << 10) | (9 << 5) | 7;
+    assert!(insn_decode::decode(&mut preldx, &mut (), preldx_insn));
+    assert_eq!(preldx.name, "preldx");
+    assert_eq!(preldx.hint, 7);
+    assert_eq!(preldx.rj, 9);
+    assert_eq!(preldx.rk, 8);
+}
+
+#[test]
+fn test_reference_atomic_formats() {
+    let mut cas = FieldCapture::default();
+    let amcas_db_w: u32 =
+        (0b00111000010110110 << 15) | (3 << 10) | (2 << 5) | 1;
+    assert!(insn_decode::decode(&mut cas, &mut (), amcas_db_w));
+    assert_eq!(cas.name, "amcas_db_w");
+    assert_eq!(cas.rd, 1);
+    assert_eq!(cas.rj, 2);
+    assert_eq!(cas.rk, 3);
+
+    let mut acq = FieldCapture::default();
+    let llacq_d: u32 = (0b0011100001010111100010 << 10) | (4 << 5) | 5;
+    assert!(insn_decode::decode(&mut acq, &mut (), llacq_d));
+    assert_eq!(acq.name, "llacq_d");
+    assert_eq!(acq.rd, 5);
+    assert_eq!(acq.rj, 4);
+}
+
+#[test]
+fn test_reference_privileged_time_tlb_cache_formats() {
+    let mut rdtime = FieldCapture::default();
+    let rdtime_d: u32 = (0b0000000000000000011010 << 10) | (3 << 5) | 4;
+    assert!(insn_decode::decode(&mut rdtime, &mut (), rdtime_d));
+    assert_eq!(rdtime.name, "rdtime_d");
+    assert_eq!(rdtime.rd, 4);
+    assert_eq!(rdtime.rj, 3);
+
+    let mut tlbclr = FieldCapture::default();
+    let tlbclr_insn: u32 = 0b0000011001001000001000 << 10;
+    assert!(insn_decode::decode(&mut tlbclr, &mut (), tlbclr_insn));
+    assert_eq!(tlbclr.name, "tlbclr");
+
+    let mut cacop = FieldCapture::default();
+    let cacop_insn: u32 = (0b0000011000 << 22) | (0x321 << 10) | (6 << 5) | 5;
+    assert!(insn_decode::decode(&mut cacop, &mut (), cacop_insn));
+    assert_eq!(cacop.name, "cacop");
+    assert_eq!(cacop.cop, 5);
+    assert_eq!(cacop.rj, 6);
+    assert_eq!(cacop.si12, 0x321);
+}
+
+#[test]
+fn test_cacop_negative_offset_sign_extends() {
+    let mut c = FieldCapture::default();
+    let cacop_insn: u32 = (0b0000011000 << 22) | (0xfff << 10) | (6 << 5) | 5;
+    assert!(insn_decode::decode(&mut c, &mut (), cacop_insn));
+    assert_eq!(c.name, "cacop");
+    assert_eq!(c.cop, 5);
+    assert_eq!(c.rj, 6);
+    assert_eq!(c.si12, -1);
+}
+
+#[test]
+fn test_reference_fpu_formats() {
+    let mut fmax = FieldCapture::default();
+    let fmax_s: u32 = (0b00000001000010001 << 15) | (3 << 10) | (2 << 5) | 1;
+    assert!(insn_decode::decode(&mut fmax, &mut (), fmax_s));
+    assert_eq!(fmax.name, "fmax_s");
+    assert_eq!(fmax.rd, 1);
+    assert_eq!(fmax.rj, 2);
+    assert_eq!(fmax.rk, 3);
+
+    let mut fclass = FieldCapture::default();
+    let fclass_d: u32 = (0b0000000100010100001110 << 10) | (9 << 5) | 4;
+    assert!(insn_decode::decode(&mut fclass, &mut (), fclass_d));
+    assert_eq!(fclass.name, "fclass_d");
+    assert_eq!(fclass.rd, 4);
+    assert_eq!(fclass.rj, 9);
+
+    let mut fldx = FieldCapture::default();
+    let fldx_d: u32 = (0b00111000001101000 << 15) | (3 << 10) | (2 << 5) | 1;
+    assert!(insn_decode::decode(&mut fldx, &mut (), fldx_d));
+    assert_eq!(fldx.name, "fldx_d");
+    assert_eq!(fldx.rd, 1);
+    assert_eq!(fldx.rj, 2);
+    assert_eq!(fldx.rk, 3);
+
+    let mut movfr2cf = FieldCapture::default();
+    let movfr2cf_insn: u32 = (0b0000000100010100110100 << 10) | (11 << 5) | 6;
+    assert!(insn_decode::decode(&mut movfr2cf, &mut (), movfr2cf_insn));
+    assert_eq!(movfr2cf.name, "movfr2cf");
+    assert_eq!(movfr2cf.cd, 6);
+    assert_eq!(movfr2cf.rj, 11);
 }
 
 #[test]
@@ -341,6 +764,89 @@ fn test_fld_s_decode() {
     assert_eq!(c.si12, 64);
 }
 
+#[test]
+fn test_csr_format_csrrd() {
+    let mut c = FieldCapture::default();
+    // CSRRD rd=7, csr=0x0c, fixed rj=0.
+    let insn: u32 = (0b00000100 << 24) | (0x0C << 10) | 7;
+    assert!(insn_decode::decode(&mut c, &mut (), insn));
+    assert_eq!(c.name, "csrrd");
+    assert_eq!(c.csr_num, 0x0C);
+    assert_eq!(c.rd, 7);
+    assert_eq!(c.rj, 0);
+}
+
+#[test]
+fn test_fcmp_format_ceq_s() {
+    let mut c = FieldCapture::default();
+    // FCMP.CEQ.S cd=5, fj=2, fk=3.
+    let insn: u32 =
+        (0b000011000001 << 20) | (0b00100 << 15) | (3 << 10) | (2 << 5) | 5;
+    assert!(insn_decode::decode(&mut c, &mut (), insn));
+    assert_eq!(c.name, "fcmp_ceq_s");
+    assert_eq!(c.cd, 5);
+    assert_eq!(c.rj, 2);
+    assert_eq!(c.rk, 3);
+}
+
+#[test]
+fn test_fsel_format() {
+    let mut c = FieldCapture::default();
+    // FSEL fd=1, fj=2, fk=3, ca=6.
+    let insn: u32 =
+        (0b000011010000 << 20) | (6 << 15) | (3 << 10) | (2 << 5) | 1;
+    assert!(insn_decode::decode(&mut c, &mut (), insn));
+    assert_eq!(c.name, "fsel");
+    assert_eq!(c.rd, 1);
+    assert_eq!(c.rj, 2);
+    assert_eq!(c.rk, 3);
+    assert_eq!(c.ca, 6);
+}
+
+#[test]
+fn test_fbranch_format_bceqz_split_offset() {
+    let mut c = FieldCapture::default();
+    // BCEQZ cj=6, offs21=0x3_1234 split between bits [4:0] and [25:10].
+    let insn: u32 = (0b010010 << 26) | (0x1234 << 10) | (6 << 5) | 0x03;
+    assert!(insn_decode::decode(&mut c, &mut (), insn));
+    assert_eq!(c.name, "bceqz");
+    assert_eq!(c.cj, 6);
+    assert_eq!(c.offs21, 0x3_1234);
+}
+
+#[test]
+fn test_fpu_rounding_conversion_opcodes() {
+    let cases = [
+        ("ftintrm_w_s", 0b0000000100011010000001u32),
+        ("ftintrz_w_s", 0b0000000100011010100001u32),
+        ("ftintrne_l_d", 0b0000000100011010111010u32),
+        ("ftint_l_d", 0b0000000100011011001010u32),
+        ("frint_d", 0b0000000100011110010010u32),
+    ];
+
+    for (name, opcode) in cases {
+        let mut c = FieldCapture::default();
+        let insn = (opcode << 10) | (9 << 5) | 4;
+        assert!(insn_decode::decode(&mut c, &mut (), insn), "{name}");
+        assert_eq!(c.name, name);
+        assert_eq!(c.rd, 4);
+        assert_eq!(c.rj, 9);
+    }
+}
+
+#[test]
+fn test_ftintrm_and_ftintrz_are_distinct_opcodes() {
+    let mut round_down = FieldCapture::default();
+    let ftintrm = (0b0000000100011010000001u32 << 10) | (1 << 5) | 2;
+    assert!(insn_decode::decode(&mut round_down, &mut (), ftintrm));
+    assert_eq!(round_down.name, "ftintrm_w_s");
+
+    let mut round_zero = FieldCapture::default();
+    let ftintrz = (0b0000000100011010100001u32 << 10) | (1 << 5) | 2;
+    assert!(insn_decode::decode(&mut round_zero, &mut (), ftintrz));
+    assert_eq!(round_zero.name, "ftintrz_w_s");
+}
+
 // --- Invalid opcode tests ---
 
 #[test]
@@ -373,6 +879,80 @@ fn test_decode_near_miss_ertn_one_bit_flip() {
         !invalid_result,
         "flipping a fixed bit in ERTN must fail decode"
     );
+}
+
+#[test]
+fn test_decode_near_miss_fcmp_fixed_bit_flip() {
+    let valid: u32 =
+        (0b000011000001 << 20) | (0b00100 << 15) | (3 << 10) | (2 << 5) | 5;
+    let mut c = FieldCapture::default();
+    assert!(insn_decode::decode(&mut c, &mut (), valid));
+    assert_eq!(c.name, "fcmp_ceq_s");
+
+    let invalid = valid ^ (1 << 3);
+    let mut c2 = FieldCapture::default();
+    assert!(!insn_decode::decode(&mut c2, &mut (), invalid));
+}
+
+#[test]
+fn test_decode_near_miss_bstrins_w_prefix_bit_flip() {
+    let valid: u32 =
+        (0b00000000011 << 21) | (23 << 16) | (5 << 10) | (13 << 5) | 7;
+    let mut c = FieldCapture::default();
+    assert!(insn_decode::decode(&mut c, &mut (), valid));
+    assert_eq!(c.name, "bstrins_w");
+
+    let invalid = valid ^ (1 << 21);
+    let mut c2 = FieldCapture::default();
+    assert!(!insn_decode::decode(&mut c2, &mut (), invalid));
+}
+
+#[test]
+fn test_decode_near_miss_ftintrz_fixed_bit_flip() {
+    let valid: u32 = (0b0000000100011010100001u32 << 10) | (1 << 5) | 2;
+    let mut c = FieldCapture::default();
+    assert!(insn_decode::decode(&mut c, &mut (), valid));
+    assert_eq!(c.name, "ftintrz_w_s");
+
+    let invalid = valid ^ (1 << 21);
+    let mut c2 = FieldCapture::default();
+    assert!(!insn_decode::decode(&mut c2, &mut (), invalid));
+}
+
+#[test]
+fn test_decode_near_miss_ldpte_low_fixed_bit_flip() {
+    let valid: u32 = (0b00000110010001 << 18) | (5 << 10) | (2 << 5);
+    let mut c = FieldCapture::default();
+    assert!(insn_decode::decode(&mut c, &mut (), valid));
+    assert_eq!(c.name, "ldpte");
+
+    let invalid = valid | 1;
+    let mut c2 = FieldCapture::default();
+    assert!(!insn_decode::decode(&mut c2, &mut (), invalid));
+}
+
+#[test]
+fn test_decode_near_miss_tlbclr_low_fixed_bit_flip() {
+    let valid: u32 = 0b0000011001001000001000 << 10;
+    let mut c = FieldCapture::default();
+    assert!(insn_decode::decode(&mut c, &mut (), valid));
+    assert_eq!(c.name, "tlbclr");
+
+    let invalid = valid | 1;
+    let mut c2 = FieldCapture::default();
+    assert!(!insn_decode::decode(&mut c2, &mut (), invalid));
+}
+
+#[test]
+fn test_decode_near_miss_cacop_prefix_bit_flip() {
+    let valid: u32 = (0b0000011000 << 22) | (0x321 << 10) | (6 << 5) | 5;
+    let mut c = FieldCapture::default();
+    assert!(insn_decode::decode(&mut c, &mut (), valid));
+    assert_eq!(c.name, "cacop");
+
+    let invalid = valid ^ (1 << 22);
+    let mut c2 = FieldCapture::default();
+    assert!(!insn_decode::decode(&mut c2, &mut (), invalid));
 }
 
 // --- Translator dispatch test ---
@@ -436,7 +1016,7 @@ fn translate_one(insn: u32) -> (usize, machina_guest_loongarch::DisasJumpType) {
     use machina_guest_loongarch::loongarch::trans::{
         LoongArchDisasContext, LoongArchTranslator,
     };
-    use machina_guest_loongarch::{DisasJumpType, TranslatorOps};
+    use machina_guest_loongarch::TranslatorOps;
 
     let code: [u32; 1] = [insn];
     let guest_base = code.as_ptr().cast::<u8>();

@@ -1,3 +1,5 @@
+//! LoongArch64 guest frontend for Machina.
+
 #![allow(dead_code)]
 
 pub mod loongarch;

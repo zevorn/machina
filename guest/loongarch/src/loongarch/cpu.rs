@@ -1,13 +1,14 @@
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 
+use super::ext::LoongArchCfg;
 use super::mmu::LoongArchMmu;
 
 pub const NUM_GPRS: usize = 32;
 pub const NUM_FPRS: usize = 32;
 pub const NUM_FCC: usize = 8;
 pub const NUM_DMW: usize = 4;
-pub const NUM_SAVE: usize = 16;
+pub const NUM_SAVE: usize = 8;
 
 #[repr(C)]
 pub struct LoongArchCpu {
@@ -82,6 +83,7 @@ pub struct LoongArchCpu {
     pub(crate) code_pages_ptr: u64,
     pub(crate) code_pages_len: u64,
     pub(crate) tb_flush_pending: bool,
+    pub(crate) cfg: LoongArchCfg,
 }
 
 pub const GPR_OFFSET: usize = offset_of!(LoongArchCpu, gpr);
@@ -115,6 +117,16 @@ pub const fn fpr_offset(i: usize) -> usize {
 impl LoongArchCpu {
     #[must_use]
     pub const fn new() -> Self {
+        Self::with_cfg(LoongArchCfg {
+            has_fpu: true,
+            has_lsx: false,
+            has_lasx: false,
+            has_lbt: false,
+        })
+    }
+
+    #[must_use]
+    pub const fn with_cfg(cfg: LoongArchCfg) -> Self {
         Self {
             gpr: [0; NUM_GPRS],
             pc: 0,
@@ -145,7 +157,7 @@ impl LoongArchCpu {
             rvacfg: 0,
             cpuid: 0,
             prcfg1: 0x72F8,
-            prcfg2: 0x3FFF_F000,
+            prcfg2: 0x4020_5000,
             prcfg3: 0x0080_73F2,
             llbctl: 0,
             ll_res_addr: u64::MAX,
@@ -179,6 +191,7 @@ impl LoongArchCpu {
             code_pages_ptr: 0,
             code_pages_len: 0,
             tb_flush_pending: false,
+            cfg,
         }
     }
 
@@ -746,6 +759,40 @@ impl LoongArchCpu {
         } else {
             self.estat &= !(1 << 12);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jit_global_offsets_match_cpu_layout() {
+        assert_eq!(GPR_OFFSET, offset_of!(LoongArchCpu, gpr));
+        assert_eq!(PC_OFFSET, offset_of!(LoongArchCpu, pc));
+        assert_eq!(GUEST_BASE_OFFSET, offset_of!(LoongArchCpu, guest_base));
+        assert_eq!(FPR_OFFSET, offset_of!(LoongArchCpu, fpr));
+        assert_eq!(FCSR0_OFFSET, offset_of!(LoongArchCpu, fcsr0));
+        assert_eq!(FCC_OFFSET, offset_of!(LoongArchCpu, fcc));
+        assert_eq!(CRMD_OFFSET, offset_of!(LoongArchCpu, crmd));
+        assert_eq!(ESTAT_OFFSET, offset_of!(LoongArchCpu, estat));
+        assert_eq!(ERA_OFFSET, offset_of!(LoongArchCpu, era));
+        assert_eq!(BADV_OFFSET, offset_of!(LoongArchCpu, badv));
+        assert_eq!(EENTRY_OFFSET, offset_of!(LoongArchCpu, eentry));
+        assert_eq!(LLBCTL_OFFSET, offset_of!(LoongArchCpu, llbctl));
+        assert_eq!(LL_RES_ADDR_OFFSET, offset_of!(LoongArchCpu, ll_res_addr));
+        assert_eq!(LL_RES_VAL_OFFSET, offset_of!(LoongArchCpu, ll_res_val));
+        assert_eq!(RAM_BASE_OFFSET, offset_of!(LoongArchCpu, ram_base));
+        assert_eq!(RAM_END_OFFSET, offset_of!(LoongArchCpu, ram_end));
+        assert_eq!(GUEST_BASE_CPU_OFFSET, offset_of!(LoongArchCpu, guest_base));
+    }
+
+    #[test]
+    fn register_array_offsets_are_contiguous() {
+        assert_eq!(gpr_offset(0), GPR_OFFSET);
+        assert_eq!(gpr_offset(NUM_GPRS - 1), GPR_OFFSET + 31 * 8);
+        assert_eq!(fpr_offset(0), FPR_OFFSET);
+        assert_eq!(fpr_offset(NUM_FPRS - 1), FPR_OFFSET + 31 * 8);
     }
 }
 

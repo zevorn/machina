@@ -11,6 +11,11 @@ use machina_guest_loongarch::loongarch::trans::{
 };
 use machina_guest_loongarch::{DisasJumpType, TranslatorOps};
 
+pub const LOONGARCH_TB_FLAG_PLV_MASK: u32 = 0b0000_0011;
+pub const LOONGARCH_TB_FLAG_DA: u32 = 1 << 2;
+pub const LOONGARCH_TB_FLAG_PG: u32 = 1 << 3;
+pub const LOONGARCH_TB_FLAG_FPE: u32 = 1 << 4;
+
 pub struct LoongArchFullSystemCpu {
     pub cpu: LoongArchCpu,
     stop_flag: Arc<AtomicBool>,
@@ -46,11 +51,23 @@ impl GuestCpu for LoongArchFullSystemCpu {
 
     fn get_flags(&self) -> u32 {
         let crmd = self.cpu.crmd();
-        let plv = (crmd & CRMD_PLV_MASK) as u32;
-        let da = ((crmd >> 3) & 1) as u32;
-        let pg = ((crmd >> 4) & 1) as u32;
-        let fpe = (self.cpu.euen() & 1) as u32;
-        plv | (da << 2) | (pg << 3) | (fpe << 4)
+        let plv = (crmd & CRMD_PLV_MASK) as u32 & LOONGARCH_TB_FLAG_PLV_MASK;
+        let da = if crmd & CRMD_DA != 0 {
+            LOONGARCH_TB_FLAG_DA
+        } else {
+            0
+        };
+        let pg = if crmd & CRMD_PG != 0 {
+            LOONGARCH_TB_FLAG_PG
+        } else {
+            0
+        };
+        let fpe = if self.cpu.euen() & EUEN_FPE != 0 {
+            LOONGARCH_TB_FLAG_FPE
+        } else {
+            0
+        };
+        plv | da | pg | fpe
     }
 
     fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
@@ -63,16 +80,7 @@ impl GuestCpu for LoongArchFullSystemCpu {
         if ir.nb_globals() == 0 {
             LoongArchTranslator::init_disas_context(&mut ctx, ir);
         } else {
-            use machina_accel::ir::TempIdx;
-            use machina_guest_loongarch::loongarch::cpu::NUM_GPRS;
-            ctx.env = TempIdx(0);
-            for i in 0..NUM_GPRS {
-                ctx.gpr[i] = TempIdx((1 + i) as u32);
-            }
-            ctx.pc = TempIdx(33);
-            ctx.llbctl = TempIdx(34);
-            ctx.ll_res_addr = TempIdx(35);
-            ctx.ll_res_val = TempIdx(36);
+            ctx.bind_existing_globals(ir);
         }
         LoongArchTranslator::tb_start(&mut ctx, ir);
 

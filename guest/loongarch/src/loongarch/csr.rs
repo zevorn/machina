@@ -1,3 +1,5 @@
+use super::cpu::{LoongArchCpu, NUM_SAVE};
+
 pub const CSR_CRMD: u32 = 0x0;
 pub const CSR_PRMD: u32 = 0x1;
 pub const CSR_EUEN: u32 = 0x2;
@@ -25,7 +27,7 @@ pub const CSR_PRCFG1: u32 = 0x21;
 pub const CSR_PRCFG2: u32 = 0x22;
 pub const CSR_PRCFG3: u32 = 0x23;
 pub const CSR_SAVE0: u32 = 0x30;
-pub const CSR_SAVE15: u32 = 0x3F;
+pub const CSR_SAVE_LAST: u32 = CSR_SAVE0 + NUM_SAVE as u32 - 1;
 pub const CSR_TID: u32 = 0x40;
 pub const CSR_TCFG: u32 = 0x41;
 pub const CSR_TVAL: u32 = 0x42;
@@ -101,8 +103,6 @@ pub const TLBRPRMD_WRITE_MASK: u64 = 0x7;
 pub const DMW_WRITE_MASK: u64 = 0xF000_0000_0E00_0039;
 pub const SAVE_WRITE_MASK: u64 = u64::MAX;
 
-use super::cpu::LoongArchCpu;
-
 impl LoongArchCpu {
     pub fn csr_read(&self, num: u32) -> u64 {
         match num {
@@ -157,7 +157,7 @@ impl LoongArchCpu {
             CSR_DMW1 => self.dmw[1],
             CSR_DMW2 => self.dmw[2],
             CSR_DMW3 => self.dmw[3],
-            n if (CSR_SAVE0..=CSR_SAVE15).contains(&n) => {
+            n if (CSR_SAVE0..=CSR_SAVE_LAST).contains(&n) => {
                 self.save[(n - CSR_SAVE0) as usize]
             }
             _ => 0,
@@ -243,7 +243,7 @@ impl LoongArchCpu {
             CSR_DMW1 => self.dmw[1] = val,
             CSR_DMW2 => self.dmw[2] = val,
             CSR_DMW3 => self.dmw[3] = val,
-            n if (CSR_SAVE0..=CSR_SAVE15).contains(&n) => {
+            n if (CSR_SAVE0..=CSR_SAVE_LAST).contains(&n) => {
                 self.save[(n - CSR_SAVE0) as usize] = val;
             }
             _ => {}
@@ -292,7 +292,7 @@ pub const fn csr_write_mask(num: u32) -> u64 {
         CSR_TLBREHI => TLBREHI_WRITE_MASK,
         CSR_TLBRPRMD => TLBRPRMD_WRITE_MASK,
         CSR_DMW0 | CSR_DMW1 | CSR_DMW2 | CSR_DMW3 => DMW_WRITE_MASK,
-        n if n >= CSR_SAVE0 && n <= CSR_SAVE15 => SAVE_WRITE_MASK,
+        n if n >= CSR_SAVE0 && n <= CSR_SAVE_LAST => SAVE_WRITE_MASK,
         _ => 0,
     }
 }

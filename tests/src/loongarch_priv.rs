@@ -1,4 +1,4 @@
-use machina_guest_loongarch::loongarch::cpu::LoongArchCpu;
+use machina_guest_loongarch::loongarch::cpu::{LoongArchCpu, NUM_SAVE};
 use machina_guest_loongarch::loongarch::csr::*;
 use machina_guest_loongarch::loongarch::mmu;
 
@@ -9,14 +9,66 @@ fn csr_crmd_reset_value() {
 }
 
 #[test]
+fn cpu_reset_profile_matches_direct_boot_baseline() {
+    let cpu = LoongArchCpu::new();
+
+    assert_eq!(cpu.pc(), 0);
+    assert_eq!(cpu.csr_read(CSR_CRMD) & CRMD_PLV_MASK, 0);
+    assert_eq!(cpu.csr_read(CSR_CRMD) & CRMD_DA, CRMD_DA);
+    assert_eq!(cpu.csr_read(CSR_CRMD) & CRMD_PG, 0);
+    assert_eq!(cpu.csr_read(CSR_CRMD) & CRMD_IE, 0);
+    assert_eq!(cpu.csr_read(CSR_EUEN), 0);
+    assert_eq!(cpu.csr_read(CSR_ECFG), 0);
+    assert_eq!(cpu.csr_read(CSR_ESTAT), 0);
+    assert_eq!(cpu.csr_read(CSR_ERA), 0);
+    assert_eq!(cpu.csr_read(CSR_BADV), 0);
+    assert_eq!(cpu.csr_read(CSR_EENTRY), 0);
+    assert_eq!(cpu.csr_read(CSR_TID), 0);
+    assert_eq!(cpu.csr_read(CSR_TCFG), 0);
+    assert_eq!(cpu.csr_read(CSR_TVAL), 0);
+    assert_eq!(cpu.csr_read(CSR_CNTC), 0);
+    assert_eq!(cpu.csr_read(CSR_DMW0), 0);
+    assert_eq!(cpu.csr_read(CSR_DMW1), 0);
+    assert_eq!(cpu.csr_read(CSR_DMW2), 0);
+    assert_eq!(cpu.csr_read(CSR_DMW3), 0);
+    assert_eq!(cpu.csr_read(CSR_PRCFG1), 0x0000_72F8);
+    assert_eq!(cpu.csr_read(CSR_PRCFG2), 0x4020_5000);
+    assert_eq!(cpu.csr_read(CSR_PRCFG3), 0x0080_73F2);
+    assert_eq!((cpu.csr_read(CSR_ASID) >> 16) & 0xFF, 10);
+    assert_eq!(cpu.neg_align_val(), 0);
+    assert_eq!(cpu.last_phys_pc_val(), 0);
+    assert!(!cpu.is_halted());
+}
+
+#[test]
 fn csr_read_write_save_regs() {
     let mut cpu = LoongArchCpu::new();
-    for i in 0..16u32 {
+    for i in 0..NUM_SAVE as u32 {
         cpu.csr_write(CSR_SAVE0 + i, 0xDEAD_0000 + u64::from(i));
     }
-    for i in 0..16u32 {
+    for i in 0..NUM_SAVE as u32 {
         assert_eq!(cpu.csr_read(CSR_SAVE0 + i), 0xDEAD_0000 + u64::from(i));
     }
+}
+
+#[test]
+fn save_csr_range_matches_prcfg1_save_num() {
+    let cpu = LoongArchCpu::new();
+    let save_num = (cpu.csr_read(CSR_PRCFG1) & 0xF) as u32;
+
+    assert_eq!(NUM_SAVE, save_num as usize);
+    assert_eq!(CSR_SAVE_LAST, CSR_SAVE0 + save_num - 1);
+}
+
+#[test]
+fn save_csr_after_prcfg1_count_is_not_implemented() {
+    let mut cpu = LoongArchCpu::new();
+    let first_unimplemented = CSR_SAVE0 + NUM_SAVE as u32;
+
+    assert_eq!(first_unimplemented, CSR_SAVE_LAST + 1);
+    assert_eq!(csr_write_mask(first_unimplemented), 0);
+    cpu.csr_write(first_unimplemented, 0xBAD0_CAFE);
+    assert_eq!(cpu.csr_read(first_unimplemented), 0);
 }
 
 #[test]
@@ -312,20 +364,63 @@ fn cpucfg_index1_reports_la64() {
     assert_eq!(result & 0x3, 2); // ARCH=2 (LA64)
     assert_ne!(result & (1 << 2), 0); // PGMMU
     assert_ne!(result & (1 << 3), 0); // IOCSR
+    assert_eq!((result >> 4) & 0xFF, 47); // PALEN field = 47
+    assert_eq!((result >> 12) & 0xFF, 47); // VALEN field = 47
+    assert_eq!(result & (1 << 26), 0); // MSG_INT = 0
 }
 
 #[test]
 fn cpucfg_index2_reports_fp_no_lsx() {
+    use machina_guest_loongarch::loongarch::ext::LoongArchCfg;
+
     let mut cpu = LoongArchCpu::new();
     let result = unsafe {
         machina_guest_loongarch::loongarch::trans::helpers
             ::loongarch_helper_cpucfg(cpu.env_ptr(), 2)
     };
+    assert_eq!(result, LoongArchCfg::default().cpucfg2());
     assert_eq!(result, 0x0060_C00F);
     assert_ne!(result & 1, 0); // FP_SP
     assert_ne!(result & 2, 0); // FP_DP
     assert_eq!(result & (1 << 6), 0); // LSX=0
     assert_eq!(result & (1 << 7), 0); // LASX=0
+    assert_eq!(result & (1 << 18), 0); // LBT_X86=0
+    assert_eq!(result & (1 << 19), 0); // LBT_ARM=0
+    assert_eq!(result & (1 << 20), 0); // LBT_MIPS=0
+}
+
+#[test]
+fn cpucfg_index2_derives_lsx_lasx_from_cpu_config() {
+    use machina_guest_loongarch::loongarch::ext::LoongArchCfg;
+
+    let mut cpu = LoongArchCpu::with_cfg(LoongArchCfg {
+        has_lsx: true,
+        has_lasx: true,
+        ..LoongArchCfg::default()
+    });
+    let result = unsafe {
+        machina_guest_loongarch::loongarch::trans::helpers
+            ::loongarch_helper_cpucfg(cpu.env_ptr(), 2)
+    };
+    assert_eq!(result, 0x0060_C0CF);
+    assert_ne!(result & (1 << 6), 0);
+    assert_ne!(result & (1 << 7), 0);
+}
+
+#[test]
+fn cpucfg_index4_and_5_report_la464_cache_and_timer() {
+    let mut cpu = LoongArchCpu::new();
+    let cache = unsafe {
+        machina_guest_loongarch::loongarch::trans::helpers
+            ::loongarch_helper_cpucfg(cpu.env_ptr(), 4)
+    };
+    let timer = unsafe {
+        machina_guest_loongarch::loongarch::trans::helpers
+            ::loongarch_helper_cpucfg(cpu.env_ptr(), 5)
+    };
+
+    assert_eq!(cache, 0x05F5_E100);
+    assert_eq!(timer, 0x0001_0001);
 }
 
 #[test]
@@ -339,13 +434,15 @@ fn cpucfg_unknown_index_returns_zero() {
 }
 
 #[test]
-fn prcfg2_is_page_size_bitmap() {
+fn prcfg2_reports_only_minimal_la464_page_sizes() {
     let cpu = LoongArchCpu::new();
     let val = cpu.csr_read(CSR_PRCFG2);
-    assert_eq!(val, 0x3FFF_F000);
+    assert_eq!(val, 0x4020_5000);
     assert_ne!(val & (1 << 12), 0); // 4K supported
     assert_ne!(val & (1 << 14), 0); // 16K supported
     assert_ne!(val & (1 << 21), 0); // 2M supported
+    assert_ne!(val & (1 << 30), 0); // 1G supported
+    assert_eq!(val & !((1 << 12) | (1 << 14) | (1 << 21) | (1 << 30)), 0);
 }
 
 #[test]
@@ -360,6 +457,7 @@ fn prcfg3_is_tlb_organization() {
 fn prcfg1_has_nonzero_reset_value() {
     let cpu = LoongArchCpu::new();
     let val = cpu.csr_read(CSR_PRCFG1);
+    assert_eq!(val, 0x0000_72F8);
     assert_eq!(val & 0xF, 8); // SAVE_NUM=8
     assert_eq!((val >> 4) & 0xFF, 0x2F); // TIMER_BITS=47
     assert_eq!((val >> 12) & 0x7, 7); // VSMAX=7
