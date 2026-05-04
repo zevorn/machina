@@ -230,7 +230,11 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn reset_exit_request(&mut self) {
-        if self.interrupts.is_some() {
+        self.apply_async_interrupts();
+        if self.cpu.masked_interrupt_line().is_some()
+            || self.async_has_pending_irq()
+            || loongarch_timer_counting(&self.cpu)
+        {
             self.cpu.set_exit_request();
         } else {
             self.cpu.reset_exit_request();

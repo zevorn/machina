@@ -161,7 +161,7 @@ fn task83_runtime_cpu_owns_jit_state_and_receives_async_uart_irq() {
     };
     assert_ne!(runtime_env, board_env);
     runtime_cpu.reset_exit_request();
-    assert_eq!(runtime_cpu.cpu.neg_align_val(), -1);
+    assert_eq!(runtime_cpu.cpu.neg_align_val(), 0);
 
     runtime_cpu.cpu.csr_write(CSR_CRMD, CRMD_DA | CRMD_IE);
     runtime_cpu
@@ -175,6 +175,8 @@ fn task83_runtime_cpu_owns_jit_state_and_receives_async_uart_irq() {
     machine.uart().receive(0x5a);
 
     assert!(runtime_cpu.has_pending_irq());
+    runtime_cpu.reset_exit_request();
+    assert_eq!(runtime_cpu.cpu.neg_align_val(), -1);
     assert!(runtime_cpu.pending_interrupt());
     runtime_cpu.handle_interrupt();
     assert_eq!(runtime_cpu.cpu.pc(), 0x1000);
