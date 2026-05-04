@@ -245,16 +245,14 @@ impl LoongArchCpu {
                 }
             }
             CSR_CNTC => self.cntc = val,
-            CSR_TICLR => {
-                if val & 1 != 0 {
-                    self.set_timer_interrupt_pending(false);
-                }
+            CSR_TICLR if val & 1 != 0 => {
+                self.set_timer_interrupt_pending(false);
             }
-            CSR_LLBCTL => {
-                if val & 0x4 != 0 {
-                    self.llbctl &= !1;
-                }
+            CSR_TICLR => {}
+            CSR_LLBCTL if val & 0x4 != 0 => {
+                self.llbctl &= !1;
             }
+            CSR_LLBCTL => {}
             CSR_TLBRENTRY => self.tlbrentry = val,
             CSR_TLBRBADV => self.tlbrbadv = val,
             CSR_TLBRERA => self.tlbrera = val,
