@@ -3,6 +3,17 @@
 //! Every guest architecture (RISC-V, ARM, x86, ...) implements
 //! this trait to expose its CPU state to the execution engine.
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchExitAction {
+    Continue,
+    Halted,
+    Ecall { priv_level: u8 },
+    Exit(usize),
+    FlushAllTb,
+    FlushDirtyTbPages(Vec<u64>),
+    FlushPendingTb,
+}
+
 /// Trait for guest CPU state used by the execution loop.
 pub trait GuestCpu {
     /// IR translation context type provided by the backend.
@@ -40,6 +51,9 @@ pub trait GuestCpu {
     fn set_pc(&mut self, _pc: u64) {}
     fn handle_interrupt(&mut self) {}
     fn handle_exception(&mut self, _cause: u64, _tval: u64) {}
+    fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
+        ArchExitAction::Exit(code as usize)
+    }
 
     /// Check if sfence.vma should trap (TVM=1 in S-mode).
     fn check_sfence_trap(&self) -> bool {

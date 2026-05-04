@@ -1,9 +1,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use machina_accel::ir::context::Context;
+use machina_accel::ir::tb::{EXCP_LOONGARCH_DONE, EXCP_LOONGARCH_WFI};
 use machina_accel::x86_64::emitter::SoftMmuConfig;
-use machina_accel::GuestCpu;
+use machina_accel::{ArchExitAction, GuestCpu};
 use machina_core::address::GPA;
 use machina_guest_loongarch::loongarch::cpu::{
     LoongArchCpu, FAST_TLB_PTR_OFFSET, FAULT_PC_OFFSET, MEM_FAULT_CAUSE_OFFSET,
@@ -59,13 +60,16 @@ impl LoongArchFullSystemCpu {
         ram_ptr: *const u8,
         ram_base: u64,
         ram_size: u64,
+        address_space_ptr: u64,
         stop_flag: Arc<AtomicBool>,
     ) -> Self {
-        cpu.set_guest_base(
-            (ram_ptr as usize).wrapping_sub(ram_base as usize) as u64
+        configure_cpu_memory(
+            &mut cpu,
+            ram_ptr,
+            ram_base,
+            ram_size,
+            address_space_ptr,
         );
-        cpu.set_ram_base(ram_base);
-        cpu.set_ram_end(ram_base + ram_size);
         Self { cpu, stop_flag }
     }
 }
@@ -78,73 +82,11 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn get_flags(&self) -> u32 {
-        let crmd = self.cpu.crmd();
-        let plv = (crmd & CRMD_PLV_MASK) as u32 & LOONGARCH_TB_FLAG_PLV_MASK;
-        let da = if crmd & CRMD_DA != 0 {
-            LOONGARCH_TB_FLAG_DA
-        } else {
-            0
-        };
-        let pg = if crmd & CRMD_PG != 0 {
-            LOONGARCH_TB_FLAG_PG
-        } else {
-            0
-        };
-        let fpe = if self.cpu.euen() & EUEN_FPE != 0 {
-            LOONGARCH_TB_FLAG_FPE
-        } else {
-            0
-        };
-        plv | da | pg | fpe
+        loongarch_tb_flags(&self.cpu)
     }
 
     fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
-        let phys_pc = match self.cpu.translate_address_or_exception(
-            pc,
-            mmu::AccessType::Fetch,
-            pc,
-        ) {
-            Ok(pa) => pa,
-            Err(vec) => {
-                self.cpu.set_pc(vec);
-                self.cpu.set_translation_fault_pending();
-                return 0;
-            }
-        };
-        self.cpu.set_last_phys_pc(phys_pc);
-        let guest_base = (self.cpu.guest_base_val() as usize)
-            .wrapping_add(phys_pc as usize)
-            .wrapping_sub(pc as usize) as *const u8;
-        let cfg = LoongArchCfg::default();
-        let mut ctx = LoongArchDisasContext::new(pc, guest_base, cfg);
-        ctx.base.max_insns = max_insns;
-
-        if ir.nb_globals() == 0 {
-            LoongArchTranslator::init_disas_context(&mut ctx, ir);
-        } else {
-            ctx.bind_existing_globals(ir);
-        }
-        LoongArchTranslator::tb_start(&mut ctx, ir);
-
-        loop {
-            LoongArchTranslator::insn_start(&mut ctx, ir);
-            LoongArchTranslator::translate_insn(&mut ctx, ir);
-            if ctx.base.is_jmp != DisasJumpType::Next {
-                break;
-            }
-            if (ctx.base.pc_next & TARGET_PAGE_MASK) != (pc & TARGET_PAGE_MASK)
-            {
-                ctx.base.is_jmp = DisasJumpType::TooMany;
-                break;
-            }
-            if ctx.base.num_insns >= ctx.base.max_insns {
-                ctx.base.is_jmp = DisasJumpType::TooMany;
-                break;
-            }
-        }
-
-        LoongArchTranslator::tb_stop(&mut ctx, ir);
-        ctx.base.num_insns * 4
+        loongarch_gen_code(&mut self.cpu, ir, pc, max_insns)
     }
 
     fn env_ptr(&mut self) -> *mut u8 {
@@ -172,32 +114,15 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn handle_interrupt(&mut self) {
-        let Some(irq) = self.cpu.pending_interrupt_line() else {
-            return;
-        };
-        let vec = unsafe {
-            machina_guest_loongarch::loongarch::trans::helpers
-                ::loongarch_helper_raise_exception(
-                    self.cpu.env_ptr(),
-                    0, // ECODE_INT
-                    0,
-                )
-        };
-        self.cpu
-            .set_pc(self.cpu.external_interrupt_vector(irq, vec));
+        loongarch_handle_interrupt(&mut self.cpu);
     }
 
     fn handle_exception(&mut self, _cause: u64, _tval: u64) {
-        // LoongArch EXCP_UNDEF → raise INE (illegal instruction)
-        unsafe {
-            let vec = machina_guest_loongarch::loongarch::trans::helpers
-                ::loongarch_helper_raise_exception(
-                    self.cpu.env_ptr(),
-                    0x0D, // ECODE_INE
-                    0,
-                );
-            self.cpu.set_pc(vec);
-        }
+        loongarch_handle_exception(&mut self.cpu);
+    }
+
+    fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
+        loongarch_handle_arch_exit(&mut self.cpu, code)
     }
 
     fn check_mem_fault(&mut self) -> bool {
@@ -229,6 +154,265 @@ impl GuestCpu for LoongArchFullSystemCpu {
 
     fn take_tb_flush_pending(&mut self) -> bool {
         self.cpu.take_tb_flush()
+    }
+}
+
+pub struct SharedLoongArchFullSystemCpu {
+    cpu: Arc<Mutex<LoongArchCpu>>,
+    stop_flag: Arc<AtomicBool>,
+}
+
+unsafe impl Send for SharedLoongArchFullSystemCpu {}
+
+impl SharedLoongArchFullSystemCpu {
+    /// # Safety
+    /// `ram_ptr` must point to valid memory of `ram_size` bytes.
+    pub unsafe fn new(
+        cpu: Arc<Mutex<LoongArchCpu>>,
+        ram_ptr: *const u8,
+        ram_base: u64,
+        ram_size: u64,
+        address_space_ptr: u64,
+        stop_flag: Arc<AtomicBool>,
+    ) -> Self {
+        configure_cpu_memory(
+            &mut cpu.lock().unwrap(),
+            ram_ptr,
+            ram_base,
+            ram_size,
+            address_space_ptr,
+        );
+        Self { cpu, stop_flag }
+    }
+
+    #[must_use]
+    pub fn cpu(&self) -> Arc<Mutex<LoongArchCpu>> {
+        Arc::clone(&self.cpu)
+    }
+}
+
+impl GuestCpu for SharedLoongArchFullSystemCpu {
+    type IrContext = Context;
+
+    fn get_pc(&self) -> u64 {
+        self.cpu.lock().unwrap().pc()
+    }
+
+    fn get_flags(&self) -> u32 {
+        loongarch_tb_flags(&self.cpu.lock().unwrap())
+    }
+
+    fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
+        loongarch_gen_code(&mut self.cpu.lock().unwrap(), ir, pc, max_insns)
+    }
+
+    fn env_ptr(&mut self) -> *mut u8 {
+        self.cpu.lock().unwrap().env_ptr()
+    }
+
+    fn pending_interrupt(&self) -> bool {
+        self.cpu.lock().unwrap().pending_interrupt()
+    }
+
+    fn has_pending_irq(&self) -> bool {
+        self.cpu.lock().unwrap().masked_interrupt_line().is_some()
+    }
+
+    fn is_halted(&self) -> bool {
+        self.cpu.lock().unwrap().is_halted()
+    }
+
+    fn set_halted(&mut self, halted: bool) {
+        self.cpu.lock().unwrap().set_halted_flag(halted);
+    }
+
+    fn set_pc(&mut self, pc: u64) {
+        self.cpu.lock().unwrap().set_pc(pc);
+    }
+
+    fn handle_interrupt(&mut self) {
+        loongarch_handle_interrupt(&mut self.cpu.lock().unwrap());
+    }
+
+    fn handle_exception(&mut self, _cause: u64, _tval: u64) {
+        loongarch_handle_exception(&mut self.cpu.lock().unwrap());
+    }
+
+    fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
+        loongarch_handle_arch_exit(&mut self.cpu.lock().unwrap(), code)
+    }
+
+    fn check_mem_fault(&mut self) -> bool {
+        self.cpu.lock().unwrap().take_translation_fault_pending()
+    }
+
+    fn set_exit_request(&mut self) {
+        self.cpu.lock().unwrap().set_exit_request();
+    }
+
+    fn reset_exit_request(&mut self) {
+        self.cpu.lock().unwrap().reset_exit_request();
+    }
+
+    fn last_phys_pc(&self) -> u64 {
+        self.cpu.lock().unwrap().last_phys_pc_val()
+    }
+
+    fn translate_pc(&self, vpc: u64) -> u64 {
+        match self
+            .cpu
+            .lock()
+            .unwrap()
+            .translate_address(vpc, mmu::AccessType::Fetch)
+        {
+            mmu::TlbLookupResult::Hit { pa, .. } => pa,
+            _ => u64::MAX,
+        }
+    }
+
+    fn should_exit(&self) -> bool {
+        !self.stop_flag.load(Ordering::Relaxed)
+    }
+
+    fn take_tb_flush_pending(&mut self) -> bool {
+        self.cpu.lock().unwrap().take_tb_flush()
+    }
+}
+
+fn configure_cpu_memory(
+    cpu: &mut LoongArchCpu,
+    ram_ptr: *const u8,
+    ram_base: u64,
+    ram_size: u64,
+    address_space_ptr: u64,
+) {
+    cpu.set_guest_base(
+        (ram_ptr as usize).wrapping_sub(ram_base as usize) as u64
+    );
+    cpu.set_ram_base(ram_base);
+    cpu.set_ram_end(ram_base + ram_size);
+    cpu.set_address_space_ptr(address_space_ptr);
+}
+
+fn loongarch_tb_flags(cpu: &LoongArchCpu) -> u32 {
+    let crmd = cpu.crmd();
+    let plv = (crmd & CRMD_PLV_MASK) as u32 & LOONGARCH_TB_FLAG_PLV_MASK;
+    let da = if crmd & CRMD_DA != 0 {
+        LOONGARCH_TB_FLAG_DA
+    } else {
+        0
+    };
+    let pg = if crmd & CRMD_PG != 0 {
+        LOONGARCH_TB_FLAG_PG
+    } else {
+        0
+    };
+    let fpe = if cpu.euen() & EUEN_FPE != 0 {
+        LOONGARCH_TB_FLAG_FPE
+    } else {
+        0
+    };
+    plv | da | pg | fpe
+}
+
+fn loongarch_gen_code(
+    cpu: &mut LoongArchCpu,
+    ir: &mut Context,
+    pc: u64,
+    max_insns: u32,
+) -> u32 {
+    let phys_pc = match cpu.translate_address_or_exception(
+        pc,
+        mmu::AccessType::Fetch,
+        pc,
+    ) {
+        Ok(pa) => pa,
+        Err(vec) => {
+            cpu.set_pc(vec);
+            cpu.set_translation_fault_pending();
+            return 0;
+        }
+    };
+    cpu.set_last_phys_pc(phys_pc);
+    let guest_base = (cpu.guest_base_val() as usize)
+        .wrapping_add(phys_pc as usize)
+        .wrapping_sub(pc as usize) as *const u8;
+    let cfg = LoongArchCfg::default();
+    let mut ctx = LoongArchDisasContext::new(pc, guest_base, cfg);
+    ctx.base.max_insns = max_insns;
+
+    if ir.nb_globals() == 0 {
+        LoongArchTranslator::init_disas_context(&mut ctx, ir);
+    } else {
+        ctx.bind_existing_globals(ir);
+    }
+    LoongArchTranslator::tb_start(&mut ctx, ir);
+
+    loop {
+        LoongArchTranslator::insn_start(&mut ctx, ir);
+        LoongArchTranslator::translate_insn(&mut ctx, ir);
+        if ctx.base.is_jmp != DisasJumpType::Next {
+            break;
+        }
+        if (ctx.base.pc_next & TARGET_PAGE_MASK) != (pc & TARGET_PAGE_MASK) {
+            ctx.base.is_jmp = DisasJumpType::TooMany;
+            break;
+        }
+        if ctx.base.num_insns >= ctx.base.max_insns {
+            ctx.base.is_jmp = DisasJumpType::TooMany;
+            break;
+        }
+    }
+
+    LoongArchTranslator::tb_stop(&mut ctx, ir);
+    ctx.base.num_insns * 4
+}
+
+fn loongarch_handle_interrupt(cpu: &mut LoongArchCpu) {
+    let Some(irq) = cpu.pending_interrupt_line() else {
+        return;
+    };
+    let vec = unsafe {
+        machina_guest_loongarch::loongarch::trans::helpers
+            ::loongarch_helper_raise_exception(
+                cpu.env_ptr(),
+                0, // ECODE_INT
+                0,
+            )
+    };
+    cpu.set_pc(cpu.external_interrupt_vector(irq, vec));
+}
+
+fn loongarch_handle_exception(cpu: &mut LoongArchCpu) {
+    // LoongArch EXCP_UNDEF -> raise INE (illegal instruction).
+    unsafe {
+        let vec = machina_guest_loongarch::loongarch::trans::helpers
+            ::loongarch_helper_raise_exception(
+                cpu.env_ptr(),
+                0x0D, // ECODE_INE
+                0,
+            );
+        cpu.set_pc(vec);
+    }
+}
+
+fn loongarch_handle_arch_exit(
+    cpu: &mut LoongArchCpu,
+    code: u64,
+) -> ArchExitAction {
+    match code {
+        EXCP_LOONGARCH_DONE => ArchExitAction::Continue,
+        EXCP_LOONGARCH_WFI => {
+            cpu.set_halted_flag(true);
+            if !cpu.pending_interrupt() {
+                cpu.set_halted_flag(false);
+                return ArchExitAction::Halted;
+            }
+            cpu.set_halted_flag(false);
+            loongarch_handle_interrupt(cpu);
+            ArchExitAction::Continue
+        }
+        _ => ArchExitAction::Exit(code as usize),
     }
 }
 

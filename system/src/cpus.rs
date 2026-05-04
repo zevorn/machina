@@ -12,7 +12,7 @@ use machina_core::wfi::WfiWaker;
 
 use machina_accel::ir::context::Context;
 use machina_accel::ir::TempIdx;
-use machina_accel::GuestCpu;
+use machina_accel::{ArchExitAction, GuestCpu};
 use machina_gdbstub::handler::{GdbTarget, StopReason};
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::csr::PrivLevel;
@@ -705,6 +705,10 @@ impl GuestCpu for FullSystemCpu {
             _ => Exception::IllegalInstruction,
         };
         self.cpu.raise_exception(e, tval);
+    }
+
+    fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
+        machina_accel::exec::handle_riscv_arch_exit(self, code)
     }
 
     fn set_pc(&mut self, pc: u64) {

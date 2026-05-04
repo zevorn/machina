@@ -166,17 +166,41 @@ pub const TB_EXIT_IDX1: u64 = 1;
 pub const TB_EXIT_NOCHAIN: u64 = 2;
 pub const TB_EXIT_MAX: u64 = 3;
 
-/// Guest exception exit codes (must be >= `TB_EXIT_MAX`).
-pub const EXCP_ECALL: u64 = TB_EXIT_MAX;
-pub const EXCP_EBREAK: u64 = TB_EXIT_MAX + 1;
+/// Generic guest exception exit codes (must be >= `TB_EXIT_MAX`).
 pub const EXCP_UNDEF: u64 = TB_EXIT_MAX + 2;
-pub const EXCP_MRET: u64 = TB_EXIT_MAX + 3;
-pub const EXCP_SRET: u64 = TB_EXIT_MAX + 4;
-pub const EXCP_WFI: u64 = TB_EXIT_MAX + 5;
-pub const EXCP_SFENCE_VMA: u64 = TB_EXIT_MAX + 6;
-pub const EXCP_PRIV_CSR: u64 = TB_EXIT_MAX + 7;
-pub const EXCP_FENCE_I: u64 = TB_EXIT_MAX + 8;
-pub const EXCP_ARCH_DONE: u64 = TB_EXIT_MAX + 9;
+
+/// Architecture-specific TB exits are partitioned by guest
+/// architecture so the exec loop can delegate them instead of
+/// hard-coding one target's semantics.
+pub const EXCP_ARCH_BASE: u64 = 16;
+
+pub const EXCP_RISCV_BASE: u64 = EXCP_ARCH_BASE;
+pub const EXCP_RISCV_ECALL: u64 = EXCP_RISCV_BASE;
+pub const EXCP_RISCV_EBREAK: u64 = EXCP_RISCV_BASE + 1;
+pub const EXCP_RISCV_MRET: u64 = EXCP_RISCV_BASE + 2;
+pub const EXCP_RISCV_SRET: u64 = EXCP_RISCV_BASE + 3;
+pub const EXCP_RISCV_WFI: u64 = EXCP_RISCV_BASE + 4;
+pub const EXCP_RISCV_SFENCE_VMA: u64 = EXCP_RISCV_BASE + 5;
+pub const EXCP_RISCV_PRIV_CSR: u64 = EXCP_RISCV_BASE + 6;
+pub const EXCP_RISCV_FENCE_I: u64 = EXCP_RISCV_BASE + 7;
+pub const EXCP_RISCV_END: u64 = EXCP_RISCV_BASE + 16;
+
+pub const EXCP_LOONGARCH_BASE: u64 = EXCP_RISCV_END;
+pub const EXCP_LOONGARCH_DONE: u64 = EXCP_LOONGARCH_BASE;
+pub const EXCP_LOONGARCH_WFI: u64 = EXCP_LOONGARCH_BASE + 1;
+pub const EXCP_LOONGARCH_END: u64 = EXCP_LOONGARCH_BASE + 16;
+
+// Compatibility aliases for existing RISC-V frontend tests
+// and call sites. New architecture-specific code should use
+// the `EXCP_RISCV_*` or `EXCP_LOONGARCH_*` names above.
+pub const EXCP_ECALL: u64 = EXCP_RISCV_ECALL;
+pub const EXCP_EBREAK: u64 = EXCP_RISCV_EBREAK;
+pub const EXCP_MRET: u64 = EXCP_RISCV_MRET;
+pub const EXCP_SRET: u64 = EXCP_RISCV_SRET;
+pub const EXCP_WFI: u64 = EXCP_RISCV_WFI;
+pub const EXCP_SFENCE_VMA: u64 = EXCP_RISCV_SFENCE_VMA;
+pub const EXCP_PRIV_CSR: u64 = EXCP_RISCV_PRIV_CSR;
+pub const EXCP_FENCE_I: u64 = EXCP_RISCV_FENCE_I;
 
 /// Encode an exit_tb return value with the source TB index.
 ///

@@ -89,6 +89,8 @@ machina-core     = { workspace = true }
 machina-accel    = { workspace = true }
 machina-memory   = { workspace = true }
 machina-hw-riscv = { workspace = true }
+machina-hw-loongarch = { workspace = true }
+machina-guest-loongarch = { workspace = true }
 machina-system   = { workspace = true }
 machina-difftest = { workspace = true }
 machina-monitor  = { workspace = true }

@@ -168,6 +168,7 @@ fn full_system_cpu(cpu: LoongArchCpu) -> LoongArchFullSystemCpu {
             ptr,
             0,
             4,
+            0,
             Arc::new(AtomicBool::new(true)),
         )
     }

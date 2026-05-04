@@ -16,7 +16,7 @@ fn make_cpu(code: &[u32]) -> LoongArchFullSystemCpu {
     let stop = Arc::new(AtomicBool::new(true));
     let mut cpu = LoongArchCpu::new();
     cpu.csr_write(CSR_CRMD, CRMD_DA);
-    unsafe { LoongArchFullSystemCpu::new(cpu, ptr, 0, size, stop) }
+    unsafe { LoongArchFullSystemCpu::new(cpu, ptr, 0, size, 0, stop) }
 }
 
 #[test]

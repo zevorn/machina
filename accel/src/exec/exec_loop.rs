@@ -3,13 +3,11 @@ use std::sync::atomic::Ordering;
 use crate::plat::{self, JmpBuf};
 
 use super::{ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING};
-use crate::cpu::GuestCpu;
+use crate::cpu::{ArchExitAction, GuestCpu};
 use crate::ir::context::Context;
 use crate::ir::tb::{
-    cflags::CF_SINGLE_STEP, decode_tb_exit, TranslationBlock, EXCP_ARCH_DONE,
-    EXCP_EBREAK, EXCP_ECALL, EXCP_FENCE_I, EXCP_MRET, EXCP_PRIV_CSR,
-    EXCP_SFENCE_VMA, EXCP_SRET, EXCP_UNDEF, EXCP_WFI, EXIT_TARGET_NONE,
-    TB_EXIT_NOCHAIN,
+    cflags::CF_SINGLE_STEP, decode_tb_exit, TranslationBlock, EXCP_ARCH_BASE,
+    EXCP_UNDEF, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
 };
 use crate::translate::translate;
 use crate::HostCodeGen;
@@ -303,107 +301,51 @@ where
                 stb.exit_target.store(dst, Ordering::Relaxed);
                 next_tb_hint = Some(dst);
             }
-            v if v == EXCP_MRET as usize => {
+            v if v >= EXCP_ARCH_BASE as usize => {
                 per_cpu.stats.real_exit += 1;
-                cpu.execute_mret();
-            }
-            v if v == EXCP_SRET as usize => {
-                per_cpu.stats.real_exit += 1;
-                if !cpu.execute_sret() {
-                    // Illegal: TSR trap or U-mode sret.
-                    // PC points to next insn; rewind to
-                    // the sret itself for mepc.
-                    let cur = cpu.get_pc().wrapping_sub(4);
-                    cpu.set_pc(cur);
-                    cpu.handle_exception(2, 0);
-                }
-            }
-            v if v == EXCP_SFENCE_VMA as usize => {
-                per_cpu.stats.real_exit += 1;
-                // TVM trap: sfence.vma in S-mode with
-                // mstatus.TVM=1 raises IllegalInstruction.
-                // PC was set to the sfence.vma instruction
-                // by the translator.
-                if cpu.check_sfence_trap() {
-                    // TVM trap: PC points to next insn;
-                    // rewind to the sfence.vma itself.
-                    let cur = cpu.get_pc().wrapping_sub(4);
-                    cpu.set_pc(cur);
-                    cpu.handle_exception(2, 0);
-                } else {
-                    // Normal path: PC already at next insn.
-                    cpu.tlb_flush();
-                    shared
-                        .tb_store
-                        .invalidate_all(shared.code_buf(), &shared.backend);
-                    per_cpu.jump_cache.invalidate();
-                    next_tb_hint = None;
-                }
-            }
-            v if v == EXCP_FENCE_I as usize => {
-                per_cpu.stats.real_exit += 1;
-                // fence.i: invalidate TBs on pages that
-                // were written since the last fence.i.
-                // Only code pages are tracked (store
-                // helper checks the code-page bitmap).
-                let dirty = cpu.take_dirty_pages();
-                if dirty.is_empty() {
-                    // No code-page writes tracked:
-                    // conservative full flush.
-                    shared
-                        .tb_store
-                        .invalidate_all(shared.code_buf(), &shared.backend);
-                } else {
-                    for page in &dirty {
-                        shared.tb_store.invalidate_phys_page(
-                            *page,
-                            shared.code_buf(),
-                            &shared.backend,
+                match cpu.handle_arch_exit(v as u64) {
+                    ArchExitAction::Continue => {}
+                    ArchExitAction::Halted => return ExitReason::Halted,
+                    ArchExitAction::Ecall { priv_level } => {
+                        return ExitReason::Ecall { priv_level };
+                    }
+                    ArchExitAction::Exit(code) => {
+                        return ExitReason::Exit(code);
+                    }
+                    ArchExitAction::FlushAllTb => {
+                        shared
+                            .tb_store
+                            .invalidate_all(shared.code_buf(), &shared.backend);
+                        per_cpu.jump_cache.invalidate();
+                        next_tb_hint = None;
+                    }
+                    ArchExitAction::FlushDirtyTbPages(dirty) => {
+                        if dirty.is_empty() {
+                            shared.tb_store.invalidate_all(
+                                shared.code_buf(),
+                                &shared.backend,
+                            );
+                        } else {
+                            for page in &dirty {
+                                shared.tb_store.invalidate_phys_page(
+                                    *page,
+                                    shared.code_buf(),
+                                    &shared.backend,
+                                );
+                            }
+                        }
+                        per_cpu.jump_cache.invalidate();
+                        next_tb_hint = None;
+                    }
+                    ArchExitAction::FlushPendingTb => {
+                        flush_pending_tbs(
+                            shared,
+                            per_cpu,
+                            cpu,
+                            &mut next_tb_hint,
                         );
                     }
                 }
-                per_cpu.jump_cache.invalidate();
-                next_tb_hint = None;
-            }
-            v if v == EXCP_WFI as usize => {
-                per_cpu.stats.real_exit += 1;
-                cpu.set_halted(true);
-                if !cpu.pending_wfi_wakeup() {
-                    if !cpu.wait_for_interrupt() {
-                        cpu.set_halted(false);
-                        return ExitReason::Halted;
-                    }
-                    if cpu.check_monitor_pause() {
-                        cpu.set_halted(false);
-                        return ExitReason::Halted;
-                    }
-                }
-                cpu.set_halted(false);
-                if cpu.pending_interrupt() {
-                    cpu.handle_interrupt();
-                }
-            }
-            v if v == EXCP_PRIV_CSR as usize => {
-                per_cpu.stats.real_exit += 1;
-                if !cpu.handle_priv_csr() {
-                    cpu.handle_exception(2, 0);
-                }
-                flush_pending_tbs(shared, per_cpu, cpu, &mut next_tb_hint);
-            }
-            v if v == EXCP_EBREAK as usize => {
-                per_cpu.stats.real_exit += 1;
-                let pc = cpu.get_pc();
-                cpu.handle_exception(3, pc);
-            }
-            v if v == EXCP_ECALL as usize => {
-                // The translator emits a unified EXCP_ECALL;
-                // the per-privilege exception code (EcallFromU
-                // / EcallFromS / EcallFromM) is determined
-                // here at runtime, because privilege can
-                // change between translation and execution.
-                per_cpu.stats.real_exit += 1;
-                let pl = cpu.privilege_level();
-                return ExitReason::Ecall { priv_level: pl };
             }
             v if v == EXCP_UNDEF as usize => {
                 // Illegal instruction — raise exception
@@ -411,10 +353,6 @@ where
                 // tval=0 per RISC-V spec (mtval is either 0
                 // or the faulting insn word; we use 0).
                 cpu.handle_exception(2, 0);
-            }
-            v if v == EXCP_ARCH_DONE as usize => {
-                // Helper already handled the architectural event
-                // (set CSR state, updated PC). Just continue.
             }
             _ => {
                 per_cpu.stats.real_exit += 1;

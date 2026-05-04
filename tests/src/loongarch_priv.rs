@@ -209,6 +209,7 @@ fn full_system_cpu(cpu: LoongArchCpu) -> LoongArchFullSystemCpu {
             NOP_CODE.as_ptr().cast::<u8>(),
             0,
             (NOP_CODE.len() * 4) as u64,
+            0,
             stop,
         )
     }
@@ -225,6 +226,7 @@ fn full_system_cpu_with_code(
             code.as_ptr().cast::<u8>(),
             0,
             (code.len() * 4) as u64,
+            0,
             stop,
         )
     }
@@ -1390,7 +1392,7 @@ fn task17_translated_idle_at_plv0_halts_and_advances_pc() {
 
     let exit = run_priv_la_at(&mut cpu, &[code15_insn(IDLE_OP, 0x1234)], pc);
 
-    assert_eq!(exit, machina_accel::ir::tb::EXCP_WFI as usize);
+    assert_eq!(exit, machina_accel::ir::tb::EXCP_LOONGARCH_WFI as usize);
     assert!(cpu.is_halted());
     assert_eq!(cpu.pc(), pc + 4);
 }

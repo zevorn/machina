@@ -1,9 +1,11 @@
 use machina_accel::code_buffer::CodeBuffer;
 use machina_accel::exec::{cpu_exec_loop_env, ExecEnv, ExitReason};
-use machina_accel::ir::tb::TB_EXIT_NOCHAIN;
+use machina_accel::ir::tb::{
+    EXCP_LOONGARCH_DONE, EXCP_LOONGARCH_WFI, TB_EXIT_NOCHAIN,
+};
 use machina_accel::ir::Context;
 use machina_accel::translate::translate_and_execute;
-use machina_accel::{GuestCpu, HostCodeGen, X86_64CodeGen};
+use machina_accel::{ArchExitAction, GuestCpu, HostCodeGen, X86_64CodeGen};
 use machina_guest_loongarch::loongarch::cpu::LoongArchCpu;
 use machina_guest_loongarch::loongarch::ext::LoongArchCfg;
 use machina_guest_loongarch::loongarch::trans::{
@@ -151,6 +153,14 @@ impl GuestCpu for ExecLoopLoongArchCpu {
 
     fn env_ptr(&mut self) -> *mut u8 {
         self.cpu.env_ptr()
+    }
+
+    fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
+        match code {
+            EXCP_LOONGARCH_DONE => ArchExitAction::Continue,
+            EXCP_LOONGARCH_WFI => ArchExitAction::Halted,
+            _ => ArchExitAction::Exit(code as usize),
+        }
     }
 
     fn set_exit_request(&mut self) {

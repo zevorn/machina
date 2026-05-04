@@ -13,7 +13,7 @@ pub mod x86_64;
 
 pub use code_buffer::CodeBuffer;
 pub use constraint::{ArgConstraint, OpConstraint};
-pub use cpu::GuestCpu;
+pub use cpu::{ArchExitAction, GuestCpu};
 pub use x86_64::X86_64CodeGen;
 
 /// Trait for host architecture code generators.

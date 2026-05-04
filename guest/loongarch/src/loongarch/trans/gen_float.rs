@@ -4,7 +4,7 @@
     clippy::cast_possible_wrap
 )]
 
-use machina_accel::ir::tb::EXCP_ARCH_DONE;
+use machina_accel::ir::tb::EXCP_LOONGARCH_DONE;
 use machina_accel::ir::{Cond, Context, TempIdx, Type};
 
 use super::helpers;
@@ -83,7 +83,7 @@ pub fn check_fpe(ctx: &mut LoongArchDisasContext, ir: &mut Context) -> bool {
     let zero = ir.new_const(Type::I64, 0);
     let label_ok = ir.new_label();
     ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
-    ir.gen_exit_tb(EXCP_ARCH_DONE);
+    ir.gen_exit_tb(EXCP_LOONGARCH_DONE);
     ir.gen_set_label(label_ok);
     true
 }
@@ -92,7 +92,7 @@ fn check_fp_trap(ir: &mut Context, trap: TempIdx) {
     let zero = ir.new_const(Type::I64, 0);
     let label_ok = ir.new_label();
     ir.gen_brcond(Type::I64, trap, zero, Cond::Eq, label_ok);
-    ir.gen_exit_tb(EXCP_ARCH_DONE);
+    ir.gen_exit_tb(EXCP_LOONGARCH_DONE);
     ir.gen_set_label(label_ok);
 }
 

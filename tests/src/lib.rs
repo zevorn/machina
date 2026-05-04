@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod accel_timer;
 #[cfg(test)]
+mod arch_exit;
+#[cfg(test)]
 mod backend;
 #[cfg(test)]
 mod cli_kernel;
@@ -76,6 +78,8 @@ mod loongarch_memory;
 mod loongarch_memory_branch_atomic;
 #[cfg(test)]
 mod loongarch_priv;
+#[cfg(test)]
+mod loongarch_scheduler;
 #[cfg(test)]
 mod loongarch_system;
 #[cfg(test)]

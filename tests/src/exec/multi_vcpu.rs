@@ -6,8 +6,8 @@ use machina_accel::exec::exec_loop::{cpu_exec_loop, ExitReason};
 use machina_accel::exec::{ExecEnv, PerCpuState};
 use machina_accel::ir::context::Context;
 use machina_accel::ir::TempIdx;
-use machina_accel::GuestCpu;
 use machina_accel::X86_64CodeGen;
+use machina_accel::{ArchExitAction, GuestCpu};
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
@@ -66,6 +66,10 @@ impl GuestCpu for TestCpu {
 
     fn env_ptr(&mut self) -> *mut u8 {
         &mut self.cpu as *mut RiscvCpu as *mut u8
+    }
+
+    fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
+        machina_accel::exec::handle_riscv_arch_exit(self, code)
     }
 }
 
