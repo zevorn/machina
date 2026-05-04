@@ -1209,16 +1209,20 @@ pub struct SoftMmuConfig {
 }
 
 /// x86-64 backend code generator.
+pub const DEFAULT_GUEST_BASE_OFFSET: i32 = 520;
+
 pub struct X86_64CodeGen {
     pub prologue_offset: usize,
     pub epilogue_return_zero_offset: usize,
     pub tb_ret_offset: usize,
     pub code_gen_start: usize,
-    /// Recorded (jmp_offset, reset_offset) for each goto_tb.
-    pub(crate) goto_tb_info: Mutex<Vec<(usize, usize)>>,
+    /// Recorded (jmp_offset, reset_offset) by explicit goto_tb slot.
+    pub(crate) goto_tb_info: Mutex<[Option<(usize, usize)>; 2]>,
     /// SoftMMU config for full-system mode. When `None`,
     /// all guest memory accesses use direct [R14+addr].
     pub mmio: Option<SoftMmuConfig>,
+    /// Byte offset of guest_base from env (rbp).
+    pub guest_base_offset: i32,
     /// Byte offset of the neg_align exit flag from env
     /// (rbp). When non-zero, emit_goto_tb checks
     /// [rbp + neg_align_off] before the direct jump.
@@ -1232,10 +1236,16 @@ impl X86_64CodeGen {
             epilogue_return_zero_offset: 0,
             tb_ret_offset: 0,
             code_gen_start: 0,
-            goto_tb_info: Mutex::new(Vec::new()),
+            goto_tb_info: Mutex::new([None; 2]),
             mmio: None,
+            guest_base_offset: DEFAULT_GUEST_BASE_OFFSET,
             neg_align_off: 0,
         }
+    }
+
+    pub fn set_guest_base_offset(&mut self, offset: usize) {
+        self.guest_base_offset =
+            i32::try_from(offset).expect("guest_base offset fits in i32");
     }
 
     /// Emit `exit_tb(val)`: load return value into rax and jump to epilogue.

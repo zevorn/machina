@@ -357,6 +357,20 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         true
     }
 
+    fn trans_addu16i_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Si16,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let src = gpr_get(&self.gpr, ir, a.rj as u8);
+        let imm = ir.new_const(Type::I64, (a.si16 << 16) as u64);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, d, src, imm);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
     fn trans_lu12i_w(
         &mut self,
         ir: &mut Context,
@@ -409,6 +423,42 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let s2 = gpr_get(&self.gpr, ir, a.rk as u8);
         let d = ir.new_temp(Type::I64);
         ir.gen_mul(Type::I64, d, s1, s2);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_mulw_d_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let s1 = gpr_get(&self.gpr, ir, a.rj as u8);
+        let s2 = gpr_get(&self.gpr, ir, a.rk as u8);
+        let s1_ext = ir.new_temp(Type::I64);
+        let s2_ext = ir.new_temp(Type::I64);
+        ir.gen_ext_i32_i64(s1_ext, s1);
+        ir.gen_ext_i32_i64(s2_ext, s2);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_mul(Type::I64, d, s1_ext, s2_ext);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_mulw_d_wu(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let s1 = gpr_get(&self.gpr, ir, a.rj as u8);
+        let s2 = gpr_get(&self.gpr, ir, a.rk as u8);
+        let s1_ext = ir.new_temp(Type::I64);
+        let s2_ext = ir.new_temp(Type::I64);
+        ir.gen_ext_u32_i64(s1_ext, s1);
+        ir.gen_ext_u32_i64(s2_ext, s2);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_mul(Type::I64, d, s1_ext, s2_ext);
         gpr_set(&self.gpr, ir, a.rd as u8, d);
         true
     }
@@ -663,6 +713,38 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         true
     }
 
+    fn trans_maskeqz(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        use machina_accel::ir::Cond;
+        let src = gpr_get(&self.gpr, ir, a.rj as u8);
+        let test = gpr_get(&self.gpr, ir, a.rk as u8);
+        let zero = ir.new_const(Type::I64, 0);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_movcond(Type::I64, d, test, zero, zero, src, Cond::Eq);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_masknez(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        use machina_accel::ir::Cond;
+        let src = gpr_get(&self.gpr, ir, a.rj as u8);
+        let test = gpr_get(&self.gpr, ir, a.rk as u8);
+        let zero = ir.new_const(Type::I64, 0);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_movcond(Type::I64, d, test, zero, zero, src, Cond::Ne);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
     fn trans_lu52i_d(
         &mut self,
         ir: &mut Context,
@@ -730,6 +812,61 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let result = ir.new_temp(Type::I64);
         ir.gen_sar(Type::I64, result, sext, shift);
         gpr_set(&self.gpr, ir, a.rd as u8, result);
+        true
+    }
+
+    fn trans_alsl_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3Sa2,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let s1 = gpr_get(&self.gpr, ir, a.rj as u8);
+        let s2 = gpr_get(&self.gpr, ir, a.rk as u8);
+        let shift = ir.new_const(Type::I64, (a.sa2 + 1) as u64);
+        let shifted = ir.new_temp(Type::I64);
+        ir.gen_shl(Type::I64, shifted, s1, shift);
+        let sum = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, sum, shifted, s2);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_ext_i32_i64(d, sum);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_alsl_wu(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3Sa2,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let s1 = gpr_get(&self.gpr, ir, a.rj as u8);
+        let s2 = gpr_get(&self.gpr, ir, a.rk as u8);
+        let shift = ir.new_const(Type::I64, (a.sa2 + 1) as u64);
+        let shifted = ir.new_temp(Type::I64);
+        ir.gen_shl(Type::I64, shifted, s1, shift);
+        let sum = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, sum, shifted, s2);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_ext_u32_i64(d, sum);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_alsl_d(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR3Sa2,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let s1 = gpr_get(&self.gpr, ir, a.rj as u8);
+        let s2 = gpr_get(&self.gpr, ir, a.rk as u8);
+        let shift = ir.new_const(Type::I64, (a.sa2 + 1) as u64);
+        let shifted = ir.new_temp(Type::I64);
+        ir.gen_shl(Type::I64, shifted, s1, shift);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_add(Type::I64, d, shifted, s2);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
         true
     }
 
@@ -827,6 +964,32 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         true
     }
 
+    fn trans_bstrpick_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Msbw,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let msbw = a.msbw as u64;
+        let lsbw = a.lsbw as u64;
+        if msbw < lsbw {
+            return false;
+        }
+        let src = gpr_get(&self.gpr, ir, a.rj as u8);
+        let shift = ir.new_const(Type::I64, lsbw);
+        let shifted = ir.new_temp(Type::I64);
+        ir.gen_shr(Type::I64, shifted, src, shift);
+        let width = msbw - lsbw + 1;
+        let mask_val = (1u64 << width) - 1;
+        let mask = ir.new_const(Type::I64, mask_val);
+        let picked = ir.new_temp(Type::I64);
+        ir.gen_and(Type::I64, picked, shifted, mask);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_ext_i32_i64(d, picked);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
     fn trans_bstrpick_d(
         &mut self,
         ir: &mut Context,
@@ -851,6 +1014,38 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let mask = ir.new_const(Type::I64, mask_val);
         let d = ir.new_temp(Type::I64);
         ir.gen_and(Type::I64, d, shifted, mask);
+        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        true
+    }
+
+    fn trans_bstrins_w(
+        &mut self,
+        ir: &mut Context,
+        a: &insn_decode::ArgsR2Msbw,
+    ) -> bool {
+        use gen_common::{gpr_get, gpr_set};
+        let msbw = a.msbw as u64;
+        let lsbw = a.lsbw as u64;
+        if msbw < lsbw {
+            return false;
+        }
+        let width = msbw - lsbw + 1;
+        let src = gpr_get(&self.gpr, ir, a.rj as u8);
+        let dst_old = gpr_get(&self.gpr, ir, a.rd as u8);
+        let field_mask = (1u64 << width) - 1;
+        let src_mask = ir.new_const(Type::I64, field_mask);
+        let src_masked = ir.new_temp(Type::I64);
+        ir.gen_and(Type::I64, src_masked, src, src_mask);
+        let shift = ir.new_const(Type::I64, lsbw);
+        let src_shifted = ir.new_temp(Type::I64);
+        ir.gen_shl(Type::I64, src_shifted, src_masked, shift);
+        let clear_mask = ir.new_const(Type::I64, !(field_mask << lsbw));
+        let dst_cleared = ir.new_temp(Type::I64);
+        ir.gen_and(Type::I64, dst_cleared, dst_old, clear_mask);
+        let merged = ir.new_temp(Type::I64);
+        ir.gen_or(Type::I64, merged, dst_cleared, src_shifted);
+        let d = ir.new_temp(Type::I64);
+        ir.gen_ext_i32_i64(d, merged);
         gpr_set(&self.gpr, ir, a.rd as u8, d);
         true
     }
@@ -1545,13 +1740,13 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_brcond(Type::I64, s1, s2, Cond::Eq, label_taken);
         let c_next = ir.new_const(Type::I64, next_pc);
         ir.gen_mov(Type::I64, self.pc, c_next);
-        ir.gen_goto_tb(0);
-        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
         ir.gen_set_label(label_taken);
         let c_target = ir.new_const(Type::I64, target);
         ir.gen_mov(Type::I64, self.pc, c_target);
-        ir.gen_goto_tb(1);
-        ir.gen_exit_tb(TB_EXIT_IDX1);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -1573,13 +1768,13 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_brcond(Type::I64, s1, s2, Cond::Ne, label_taken);
         let c_next = ir.new_const(Type::I64, next_pc);
         ir.gen_mov(Type::I64, self.pc, c_next);
-        ir.gen_goto_tb(0);
-        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
         ir.gen_set_label(label_taken);
         let c_target = ir.new_const(Type::I64, target);
         ir.gen_mov(Type::I64, self.pc, c_target);
-        ir.gen_goto_tb(1);
-        ir.gen_exit_tb(TB_EXIT_IDX1);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -1601,13 +1796,13 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_brcond(Type::I64, s1, s2, Cond::Lt, label_taken);
         let c_next = ir.new_const(Type::I64, next_pc);
         ir.gen_mov(Type::I64, self.pc, c_next);
-        ir.gen_goto_tb(0);
-        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
         ir.gen_set_label(label_taken);
         let c_target = ir.new_const(Type::I64, target);
         ir.gen_mov(Type::I64, self.pc, c_target);
-        ir.gen_goto_tb(1);
-        ir.gen_exit_tb(TB_EXIT_IDX1);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -1629,13 +1824,13 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_brcond(Type::I64, s1, s2, Cond::Ge, label_taken);
         let c_next = ir.new_const(Type::I64, next_pc);
         ir.gen_mov(Type::I64, self.pc, c_next);
-        ir.gen_goto_tb(0);
-        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
         ir.gen_set_label(label_taken);
         let c_target = ir.new_const(Type::I64, target);
         ir.gen_mov(Type::I64, self.pc, c_target);
-        ir.gen_goto_tb(1);
-        ir.gen_exit_tb(TB_EXIT_IDX1);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -1657,13 +1852,13 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_brcond(Type::I64, s1, s2, Cond::Ltu, label_taken);
         let c_next = ir.new_const(Type::I64, next_pc);
         ir.gen_mov(Type::I64, self.pc, c_next);
-        ir.gen_goto_tb(0);
-        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
         ir.gen_set_label(label_taken);
         let c_target = ir.new_const(Type::I64, target);
         ir.gen_mov(Type::I64, self.pc, c_target);
-        ir.gen_goto_tb(1);
-        ir.gen_exit_tb(TB_EXIT_IDX1);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -1685,13 +1880,13 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_brcond(Type::I64, s1, s2, Cond::Geu, label_taken);
         let c_next = ir.new_const(Type::I64, next_pc);
         ir.gen_mov(Type::I64, self.pc, c_next);
-        ir.gen_goto_tb(0);
-        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
         ir.gen_set_label(label_taken);
         let c_target = ir.new_const(Type::I64, target);
         ir.gen_mov(Type::I64, self.pc, c_target);
-        ir.gen_goto_tb(1);
-        ir.gen_exit_tb(TB_EXIT_IDX1);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -1713,13 +1908,13 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_brcond(Type::I64, s1, zero, Cond::Eq, label_taken);
         let c_next = ir.new_const(Type::I64, next_pc);
         ir.gen_mov(Type::I64, self.pc, c_next);
-        ir.gen_goto_tb(0);
-        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
         ir.gen_set_label(label_taken);
         let c_target = ir.new_const(Type::I64, target);
         ir.gen_mov(Type::I64, self.pc, c_target);
-        ir.gen_goto_tb(1);
-        ir.gen_exit_tb(TB_EXIT_IDX1);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -1741,13 +1936,13 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir.gen_brcond(Type::I64, s1, zero, Cond::Ne, label_taken);
         let c_next = ir.new_const(Type::I64, next_pc);
         ir.gen_mov(Type::I64, self.pc, c_next);
-        ir.gen_goto_tb(0);
-        ir.gen_exit_tb(TB_EXIT_IDX0);
+        ir.gen_goto_tb(1);
+        ir.gen_exit_tb(TB_EXIT_IDX1);
         ir.gen_set_label(label_taken);
         let c_target = ir.new_const(Type::I64, target);
         ir.gen_mov(Type::I64, self.pc, c_target);
-        ir.gen_goto_tb(1);
-        ir.gen_exit_tb(TB_EXIT_IDX1);
+        ir.gen_goto_tb(0);
+        ir.gen_exit_tb(TB_EXIT_IDX0);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -1821,6 +2016,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         _a: &insn_decode::ArgsCode,
     ) -> bool {
         ir.gen_mb(0);
+        self.base.is_jmp = DisasJumpType::TooMany;
         true
     }
 
@@ -2191,14 +2387,14 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let addr = gpr_get(&self.gpr, ir, a.rj as u8);
         let src = gpr_get(&self.gpr, ir, a.rk as u8);
         let old = ir.new_temp(Type::I64);
-        ir.gen_qemu_ld(Type::I64, old, addr, u32::from(MemOp::ul().bits()));
-        let src_trunc = ir.new_temp(Type::I64);
-        ir.gen_ext_i32_i64(src_trunc, src);
-        let src_u = ir.new_temp(Type::I64);
+        ir.gen_qemu_ld(Type::I64, old, addr, u32::from(MemOp::sl().bits()));
+        let old_u = ir.new_temp(Type::I64);
         let mask32 = ir.new_const(Type::I64, 0xFFFF_FFFF);
+        ir.gen_and(Type::I64, old_u, old, mask32);
+        let src_u = ir.new_temp(Type::I64);
         ir.gen_and(Type::I64, src_u, src, mask32);
         let new = ir.new_temp(Type::I64);
-        ir.gen_movcond(Type::I64, new, old, src_u, old, src_u, Cond::Geu);
+        ir.gen_movcond(Type::I64, new, old_u, src_u, old_u, src_u, Cond::Geu);
         ir.gen_qemu_st(Type::I64, new, addr, u32::from(MemOp::ul().bits()));
         gpr_set(&self.gpr, ir, a.rd as u8, old);
         true
@@ -2215,12 +2411,14 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let addr = gpr_get(&self.gpr, ir, a.rj as u8);
         let src = gpr_get(&self.gpr, ir, a.rk as u8);
         let old = ir.new_temp(Type::I64);
-        ir.gen_qemu_ld(Type::I64, old, addr, u32::from(MemOp::ul().bits()));
-        let src_u = ir.new_temp(Type::I64);
+        ir.gen_qemu_ld(Type::I64, old, addr, u32::from(MemOp::sl().bits()));
+        let old_u = ir.new_temp(Type::I64);
         let mask32 = ir.new_const(Type::I64, 0xFFFF_FFFF);
+        ir.gen_and(Type::I64, old_u, old, mask32);
+        let src_u = ir.new_temp(Type::I64);
         ir.gen_and(Type::I64, src_u, src, mask32);
         let new = ir.new_temp(Type::I64);
-        ir.gen_movcond(Type::I64, new, old, src_u, old, src_u, Cond::Leu);
+        ir.gen_movcond(Type::I64, new, old_u, src_u, old_u, src_u, Cond::Leu);
         ir.gen_qemu_st(Type::I64, new, addr, u32::from(MemOp::ul().bits()));
         gpr_set(&self.gpr, ir, a.rd as u8, old);
         true
@@ -4113,16 +4311,157 @@ fn decode_insn(
 
 #[cfg(test)]
 mod tests {
+    use machina_accel::code_buffer::CodeBuffer;
     use machina_accel::ir::opcode::Opcode;
     use machina_accel::ir::temp::{TempIdx, TempKind};
+    use machina_accel::translate::translate_and_execute;
+    use machina_accel::{HostCodeGen, X86_64CodeGen};
 
+    use super::super::cpu::LoongArchCpu;
     use super::*;
     use crate::translator_loop;
 
     const ADDI_D_NOP: u32 = 0b0000001011 << 22;
+    const OP_ADD_W: u32 = 0b00000000000100000;
+    const OP_ADD_D: u32 = 0b00000000000100001;
+    const OP_SUB_W: u32 = 0b00000000000100010;
+    const OP_SUB_D: u32 = 0b00000000000100011;
+    const OP_SLT: u32 = 0b00000000000100100;
+    const OP_SLTU: u32 = 0b00000000000100101;
+    const OP_NOR: u32 = 0b00000000000101000;
+    const OP_AND: u32 = 0b00000000000101001;
+    const OP_OR: u32 = 0b00000000000101010;
+    const OP_XOR: u32 = 0b00000000000101011;
+    const OP_ORN: u32 = 0b00000000000101100;
+    const OP_ANDN: u32 = 0b00000000000101101;
+    const OP_DIV_W: u32 = 0b00000000001000000;
+    const OP_MOD_W: u32 = 0b00000000001000001;
+    const OP_DIV_WU: u32 = 0b00000000001000010;
+    const OP_MOD_WU: u32 = 0b00000000001000011;
+    const OP_DIV_D: u32 = 0b00000000001000100;
+    const OP_MOD_D: u32 = 0b00000000001000101;
+    const OP_DIV_DU: u32 = 0b00000000001000110;
+    const OP_MOD_DU: u32 = 0b00000000001000111;
+    const OP_MUL_W: u32 = 0b00000000000111000;
+    const OP_MULH_W: u32 = 0b00000000000111001;
+    const OP_MULH_WU: u32 = 0b00000000000111010;
+    const OP_MUL_D: u32 = 0b00000000000111011;
+    const OP_MULH_D: u32 = 0b00000000000111100;
+    const OP_MULH_DU: u32 = 0b00000000000111101;
+    const OP_MULW_D_W: u32 = 0b00000000000111110;
+    const OP_MULW_D_WU: u32 = 0b00000000000111111;
+    const OP_SLL_W: u32 = 0b00000000000101110;
+    const OP_SRL_W: u32 = 0b00000000000101111;
+    const OP_SRA_W: u32 = 0b00000000000110000;
+    const OP_SLL_D: u32 = 0b00000000000110001;
+    const OP_SRL_D: u32 = 0b00000000000110010;
+    const OP_SRA_D: u32 = 0b00000000000110011;
+    const OP_ROTR_W: u32 = 0b00000000000110110;
+    const OP_ROTR_D: u32 = 0b00000000000110111;
+    const OP_ALSL_W: u32 = 0b000000000000010;
+    const OP_ALSL_WU: u32 = 0b000000000000011;
+    const OP_ALSL_D: u32 = 0b000000000010110;
+    const OP_MASKEQZ: u32 = 0b00000000000100110;
+    const OP_MASKNEZ: u32 = 0b00000000000100111;
+    const OP_SLTI: u32 = 0b0000001000;
+    const OP_SLTUI: u32 = 0b0000001001;
+    const OP_ADDI_W: u32 = 0b0000001010;
+    const OP_ANDI: u32 = 0b0000001101;
+    const OP_ORI: u32 = 0b0000001110;
+    const OP_XORI: u32 = 0b0000001111;
+    const OP_ADDU16I_D: u32 = 0b000100;
+    const OP_CLO_W: u32 = 0b0000000000000000000100;
+    const OP_CLZ_W: u32 = 0b0000000000000000000101;
+    const OP_CTO_W: u32 = 0b0000000000000000000110;
+    const OP_CTZ_W: u32 = 0b0000000000000000000111;
+    const OP_CLO_D: u32 = 0b0000000000000000001000;
+    const OP_CLZ_D: u32 = 0b0000000000000000001001;
+    const OP_CTO_D: u32 = 0b0000000000000000001010;
+    const OP_CTZ_D: u32 = 0b0000000000000000001011;
+    const OP_REVB_2H: u32 = 0b0000000000000000001100;
+    const OP_REVB_4H: u32 = 0b0000000000000000001101;
+    const OP_REVB_2W: u32 = 0b0000000000000000001110;
+    const OP_REVB_D: u32 = 0b0000000000000000001111;
+    const OP_BITREV_W: u32 = 0b0000000000000000010100;
+    const OP_BITREV_D: u32 = 0b0000000000000000010101;
+    const OP_EXT_W_H: u32 = 0b0000000000000000010110;
+    const OP_EXT_W_B: u32 = 0b0000000000000000010111;
+    const OP_BSTR_W: u32 = 0b00000000011;
+    const OP_BSTRINS_D: u32 = 0b0000000010;
+    const OP_BSTRPICK_D: u32 = 0b0000000011;
+    const OP_LU12I_W: u32 = 0b0001010;
+    const OP_LU32I_D: u32 = 0b0001011;
+    const OP_LU52I_D: u32 = 0b0000001100;
 
     fn code_ptr(code: &[u32]) -> *const u8 {
         code.as_ptr().cast::<u8>()
+    }
+
+    fn r3(op: u32, rk: u32, rj: u32, rd: u32) -> u32 {
+        (op << 15) | (rk << 10) | (rj << 5) | rd
+    }
+
+    fn r3_sa2(op: u32, sa2: u32, rk: u32, rj: u32, rd: u32) -> u32 {
+        (op << 17) | (sa2 << 15) | (rk << 10) | (rj << 5) | rd
+    }
+
+    fn r2_si16(op: u32, si16: i16, rj: u32, rd: u32) -> u32 {
+        (op << 26) | ((si16 as u16 as u32) << 10) | (rj << 5) | rd
+    }
+
+    fn r1_si20(op: u32, si20: i32, rd: u32) -> u32 {
+        (op << 25) | ((si20 as u32 & 0x000F_FFFF) << 5) | rd
+    }
+
+    fn r2_si12(op: u32, si12: i16, rj: u32, rd: u32) -> u32 {
+        (op << 22) | ((si12 as u16 as u32 & 0x0FFF) << 10) | (rj << 5) | rd
+    }
+
+    fn r2_ui12(op: u32, ui12: u16, rj: u32, rd: u32) -> u32 {
+        (op << 22) | ((u32::from(ui12) & 0x0FFF) << 10) | (rj << 5) | rd
+    }
+
+    fn r2(op: u32, rj: u32, rd: u32) -> u32 {
+        (op << 10) | (rj << 5) | rd
+    }
+
+    fn sx32(v: u32) -> u64 {
+        i64::from(v as i32) as u64
+    }
+
+    fn bstr_w(pick: bool, ms: u32, ls: u32, rj: u32, rd: u32) -> u32 {
+        (OP_BSTR_W << 21)
+            | ((ms & 0x1F) << 16)
+            | (u32::from(pick) << 15)
+            | ((ls & 0x1F) << 10)
+            | (rj << 5)
+            | rd
+    }
+
+    fn bstr_d(op: u32, ms: u32, ls: u32, rj: u32, rd: u32) -> u32 {
+        (op << 22) | ((ms & 0x3F) << 16) | ((ls & 0x3F) << 10) | (rj << 5) | rd
+    }
+
+    fn run_la(cpu: &mut LoongArchCpu, insns: &[u32]) -> usize {
+        let mut backend = X86_64CodeGen::new();
+        let mut buf = CodeBuffer::new(4096).unwrap();
+        backend.emit_prologue(&mut buf);
+        backend.emit_epilogue(&mut buf);
+
+        let mut ir = Context::new();
+        backend.init_context(&mut ir);
+
+        let mut ctx = LoongArchDisasContext::new(
+            0,
+            code_ptr(insns),
+            LoongArchCfg::default(),
+        );
+        ctx.base.max_insns = insns.len() as u32;
+        translator_loop::<LoongArchTranslator>(&mut ctx, &mut ir);
+
+        unsafe {
+            translate_and_execute(&mut ir, &backend, &mut buf, cpu.env_ptr())
+        }
     }
 
     #[test]
@@ -4220,5 +4559,547 @@ mod tests {
         assert!(ops.len() >= 2);
         assert_eq!(ops[ops.len() - 2].opc, Opcode::GotoTb);
         assert_eq!(ops[ops.len() - 1].opc, Opcode::ExitTb);
+    }
+
+    #[test]
+    fn translator_executes_round10_arithmetic_helpers() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 0xFFFF_FFFF;
+        cpu.gpr[3] = 2;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MULW_D_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], (-2i64) as u64);
+
+        cpu.gpr[2] = 0xFFFF_FFFF;
+        cpu.gpr[3] = 2;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MULW_D_WU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x1_FFFF_FFFE);
+
+        cpu.gpr[2] = 0x1_0000;
+        assert_eq!(run_la(&mut cpu, &[r2_si16(OP_ADDU16I_D, -2, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], (-0x1_0000i64) as u64);
+    }
+
+    #[test]
+    fn translator_executes_round10_alsl_variants() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 5;
+        cpu.gpr[3] = 7;
+        assert_eq!(run_la(&mut cpu, &[r3_sa2(OP_ALSL_D, 2, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 47);
+
+        cpu.gpr[2] = 0x4000_0000;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3_sa2(OP_ALSL_W, 0, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0xFFFF_FFFF_8000_0000);
+
+        cpu.gpr[2] = 0x4000_0000;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3_sa2(OP_ALSL_WU, 0, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x8000_0000);
+    }
+
+    #[test]
+    fn translator_executes_round10_mask_logic() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 0x55AA;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MASKEQZ, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+
+        cpu.gpr[3] = 1;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MASKEQZ, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x55AA);
+
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MASKNEZ, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MASKNEZ, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x55AA);
+    }
+
+    #[test]
+    fn translator_executes_round10_existing_edges() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = u64::MAX;
+        cpu.gpr[3] = 1;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_ADD_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+
+        cpu.gpr[2] = 123;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 123);
+
+        cpu.gpr[2] = 1;
+        cpu.gpr[3] = 65;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SLL_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 2);
+
+        cpu.gpr[0] = 0;
+        cpu.gpr[2] = 1;
+        cpu.gpr[3] = 2;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_ADD_D, 3, 2, 0)]), 0);
+        assert_eq!(cpu.gpr[0], 0);
+    }
+
+    #[test]
+    fn translator_executes_round11_divide_by_zero_edges() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 123;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 123);
+
+        cpu.gpr[2] = u64::MAX - 7;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_DU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], u64::MAX - 7);
+
+        cpu.gpr[2] = 123;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+
+        cpu.gpr[2] = u64::MAX - 7;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_DU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+    }
+
+    #[test]
+    fn translator_executes_round11_signed_min_edges() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = i64::MIN as u64;
+        cpu.gpr[3] = (-1i64) as u64;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], i64::MIN as u64);
+
+        cpu.gpr[2] = i64::MIN as u64;
+        cpu.gpr[3] = (-1i64) as u64;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+
+        cpu.gpr[2] = i64::from(i32::MIN) as u64;
+        cpu.gpr[3] = (-1i64) as u64;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], i64::from(i32::MIN) as u64);
+
+        cpu.gpr[2] = i64::from(i32::MIN) as u64;
+        cpu.gpr[3] = (-1i64) as u64;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+    }
+
+    #[test]
+    fn translator_executes_round11_unsigned_word_zero_divisor_edges() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 0x8000_0000;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_WU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], i64::from(i32::MIN) as u64);
+
+        cpu.gpr[2] = 0x8000_0000;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_WU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+    }
+
+    #[test]
+    fn translator_executes_round12_lu12i_w_sign_cases() {
+        let mut cpu = LoongArchCpu::new();
+
+        assert_eq!(run_la(&mut cpu, &[r1_si20(OP_LU12I_W, 0x12345, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x1234_5000);
+
+        assert_eq!(run_la(&mut cpu, &[r1_si20(OP_LU12I_W, -1, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0xFFFF_FFFF_FFFF_F000);
+    }
+
+    #[test]
+    fn translator_executes_round12_lu32i_d_preserves_low_word() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[1] = 0x1122_3344_5566_7788;
+        assert_eq!(run_la(&mut cpu, &[r1_si20(OP_LU32I_D, 0x12345, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x0001_2345_5566_7788);
+
+        cpu.gpr[1] = 0x1122_3344_0123_4567;
+        assert_eq!(run_la(&mut cpu, &[r1_si20(OP_LU32I_D, -1, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0xFFFF_FFFF_0123_4567);
+    }
+
+    #[test]
+    fn translator_executes_round12_lu52i_d_deposits_top_bits() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 0xFEDA_BCDE_F012_3456;
+        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_LU52I_D, 0x123, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x123A_BCDE_F012_3456);
+
+        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_LU52I_D, -1, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0xFFFA_BCDE_F012_3456);
+    }
+
+    #[test]
+    fn translator_executes_round12_immediate_load_composition() {
+        let mut cpu = LoongArchCpu::new();
+        let insns = [
+            r1_si20(OP_LU12I_W, -0x65433, 1),
+            r1_si20(OP_LU32I_D, 0x45678, 1),
+            r2_si12(OP_LU52I_D, 0x123, 1, 1),
+        ];
+
+        assert_eq!(run_la(&mut cpu, &insns), 0);
+        assert_eq!(cpu.gpr[1], 0x1234_5678_9ABC_D000);
+    }
+
+    #[test]
+    fn translator_executes_round12_immediate_load_r0_suppression() {
+        let mut cpu = LoongArchCpu::new();
+        cpu.gpr[2] = 0xFEDA_BCDE_F012_3456;
+        let insns = [
+            r1_si20(OP_LU12I_W, 0x12345, 0),
+            r1_si20(OP_LU32I_D, -1, 0),
+            r2_si12(OP_LU52I_D, 0x123, 2, 0),
+        ];
+
+        assert_eq!(run_la(&mut cpu, &insns), 0);
+        assert_eq!(cpu.gpr[0], 0);
+    }
+
+    #[test]
+    fn translator_executes_round13_ext_w_sign_cases() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 0x80;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_EXT_W_B, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], (-128i64) as u64);
+
+        cpu.gpr[2] = 0x7F;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_EXT_W_B, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 127);
+
+        cpu.gpr[2] = 0x8000;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_EXT_W_H, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], (-32768i64) as u64);
+    }
+
+    #[test]
+    fn translator_executes_round13_bstrpick_boundaries() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 0xFEDC_BA98_7654_3210;
+        assert_eq!(run_la(&mut cpu, &[bstr_d(OP_BSTRPICK_D, 63, 63, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 1);
+
+        assert_eq!(run_la(&mut cpu, &[bstr_d(OP_BSTRPICK_D, 63, 0, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0xFEDC_BA98_7654_3210);
+
+        cpu.gpr[2] = 0x8000_1234;
+        assert_eq!(run_la(&mut cpu, &[bstr_w(true, 31, 0, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], (-2147478988i64) as u64);
+    }
+
+    #[test]
+    fn translator_executes_round13_bstrins_boundaries() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[1] = 0xFFFF_0000_0000_0000;
+        cpu.gpr[2] = 0x123;
+        assert_eq!(run_la(&mut cpu, &[bstr_d(OP_BSTRINS_D, 11, 4, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0xFFFF_0000_0000_0230);
+
+        cpu.gpr[1] = 0;
+        cpu.gpr[2] = 0x8000_1234;
+        assert_eq!(run_la(&mut cpu, &[bstr_w(false, 31, 0, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], (-2147478988i64) as u64);
+
+        cpu.gpr[1] = 0x8000_0000;
+        cpu.gpr[2] = 0xA;
+        assert_eq!(run_la(&mut cpu, &[bstr_w(false, 3, 0, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0xFFFF_FFFF_8000_000A);
+    }
+
+    #[test]
+    fn translator_executes_round13_bitfield_invalid_width_exits_undef() {
+        use machina_accel::ir::tb::EXCP_UNDEF;
+
+        let mut cpu = LoongArchCpu::new();
+        cpu.gpr[2] = 0x1234;
+
+        assert_eq!(
+            run_la(&mut cpu, &[bstr_d(OP_BSTRPICK_D, 3, 4, 2, 1)]),
+            EXCP_UNDEF as usize
+        );
+        assert_eq!(cpu.gpr[1], 0);
+
+        assert_eq!(
+            run_la(&mut cpu, &[bstr_w(false, 3, 4, 2, 1)]),
+            EXCP_UNDEF as usize
+        );
+        assert_eq!(cpu.gpr[1], 0);
+    }
+
+    #[test]
+    fn translator_executes_round13_bitfield_r0_suppression() {
+        let mut cpu = LoongArchCpu::new();
+        cpu.gpr[1] = 0xFFFF_FFFF_FFFF_FFFF;
+        cpu.gpr[2] = 0xFEDC_BA98_7654_3210;
+        let insns = [
+            r2(OP_EXT_W_B, 2, 0),
+            r2(OP_EXT_W_H, 2, 0),
+            bstr_w(true, 31, 0, 2, 0),
+            bstr_w(false, 31, 0, 2, 0),
+            bstr_d(OP_BSTRPICK_D, 63, 0, 2, 0),
+            bstr_d(OP_BSTRINS_D, 63, 0, 2, 0),
+        ];
+
+        assert_eq!(run_la(&mut cpu, &insns), 0);
+        assert_eq!(cpu.gpr[0], 0);
+    }
+
+    #[test]
+    fn translator_executes_round14_arithmetic_overflow_and_mulh_matrix() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 0x7FFF_FFFF;
+        cpu.gpr[3] = 1;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_ADD_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], sx32(0x8000_0000));
+
+        cpu.gpr[2] = 0;
+        cpu.gpr[3] = 1;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SUB_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], u64::MAX);
+
+        cpu.gpr[2] = 0x8000_0000;
+        cpu.gpr[3] = 1;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SUB_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x7FFF_FFFF);
+
+        cpu.gpr[2] = 0;
+        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_ADDI_W, -1, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], u64::MAX);
+
+        cpu.gpr[2] = 0xFFFF_FFFF;
+        cpu.gpr[3] = 2;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MUL_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], (-2i64) as u64);
+
+        cpu.gpr[2] = (-2i64) as u64;
+        cpu.gpr[3] = 3;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MUL_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], (-6i64) as u64);
+
+        cpu.gpr[2] = (-2i64) as u64;
+        cpu.gpr[3] = 3;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MULH_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], u64::MAX);
+
+        cpu.gpr[2] = 0xFFFF_FFFF;
+        cpu.gpr[3] = 2;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MULH_WU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 1);
+
+        cpu.gpr[2] = (-2i64) as u64;
+        cpu.gpr[3] = 3;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MULH_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], u64::MAX);
+
+        cpu.gpr[2] = u64::MAX;
+        cpu.gpr[3] = 2;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MULH_DU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 1);
+    }
+
+    #[test]
+    fn translator_executes_round14_logic_and_compare_matrix() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 0b1100;
+        cpu.gpr[3] = 0b1010;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_AND, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0b1000);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_OR, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0b1110);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_XOR, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0b0110);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_NOR, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], !0b1110u64);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_ANDN, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0b0100);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_ORN, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], !0b0010u64);
+
+        cpu.gpr[2] = 0x0AF5;
+        assert_eq!(run_la(&mut cpu, &[r2_ui12(OP_ANDI, 0x0F0, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x0F0);
+        assert_eq!(run_la(&mut cpu, &[r2_ui12(OP_ORI, 0x00F, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x0AFF);
+        assert_eq!(run_la(&mut cpu, &[r2_ui12(OP_XORI, 0x0FF, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x0A0A);
+
+        cpu.gpr[2] = (-1i64) as u64;
+        cpu.gpr[3] = 1;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SLT, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 1);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SLTU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+
+        cpu.gpr[2] = (-2i64) as u64;
+        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_SLTI, -1, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 1);
+
+        cpu.gpr[2] = 0;
+        assert_eq!(run_la(&mut cpu, &[r2_si12(OP_SLTUI, -1, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 1);
+    }
+
+    #[test]
+    fn translator_executes_round14_shift_rotate_count_mask_matrix() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 1;
+        cpu.gpr[3] = 33;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SLL_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 2);
+
+        cpu.gpr[2] = 0x8000_0000;
+        cpu.gpr[3] = 31;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SRL_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 1);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SRA_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], u64::MAX);
+
+        cpu.gpr[2] = 0x8000_0001;
+        cpu.gpr[3] = 33;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_ROTR_W, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], sx32(0xC000_0000));
+
+        cpu.gpr[2] = 1;
+        cpu.gpr[3] = 65;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SLL_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 2);
+
+        cpu.gpr[2] = 0x8000_0000_0000_0000;
+        cpu.gpr[3] = 63;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SRL_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 1);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_SRA_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], u64::MAX);
+
+        cpu.gpr[2] = 1;
+        cpu.gpr[3] = 65;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_ROTR_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x8000_0000_0000_0000);
+    }
+
+    #[test]
+    fn translator_executes_round14_divide_edge_matrix() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 321;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 321);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+
+        cpu.gpr[2] = i64::MIN as u64;
+        cpu.gpr[3] = (-1i64) as u64;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], i64::MIN as u64);
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_D, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+
+        cpu.gpr[2] = 0x8000_0000;
+        cpu.gpr[3] = 0;
+        assert_eq!(run_la(&mut cpu, &[r3(OP_DIV_WU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], sx32(0x8000_0000));
+        assert_eq!(run_la(&mut cpu, &[r3(OP_MOD_WU, 3, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0);
+    }
+
+    #[test]
+    fn translator_executes_round14_count_and_reversal_matrix() {
+        let mut cpu = LoongArchCpu::new();
+
+        cpu.gpr[2] = 0;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_CLZ_W, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 32);
+
+        cpu.gpr[2] = 0xFFFF_0000;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_CLO_W, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 16);
+
+        cpu.gpr[2] = 0x0000_8000;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_CTZ_W, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 15);
+
+        cpu.gpr[2] = 0x0000_00FF;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_CTO_W, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 8);
+
+        cpu.gpr[2] = 1;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_CLZ_D, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 63);
+
+        cpu.gpr[2] = 0xFFFF_FFFF_FFFF_FFFE;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_CLO_D, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 63);
+
+        cpu.gpr[2] = 0x1000;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_CTZ_D, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 12);
+
+        cpu.gpr[2] = 0x0FFF;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_CTO_D, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 12);
+
+        cpu.gpr[2] = 0x80FF_0001;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_REVB_2H, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], sx32(0xFF80_0100));
+
+        cpu.gpr[2] = 0x0123_4567_89AB_CDEF;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_REVB_4H, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x2301_6745_AB89_EFCD);
+        assert_eq!(run_la(&mut cpu, &[r2(OP_REVB_2W, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x6745_2301_EFCD_AB89);
+        assert_eq!(run_la(&mut cpu, &[r2(OP_REVB_D, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0xEFCD_AB89_6745_2301);
+
+        cpu.gpr[2] = 1;
+        assert_eq!(run_la(&mut cpu, &[r2(OP_BITREV_W, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], sx32(0x8000_0000));
+        assert_eq!(run_la(&mut cpu, &[r2(OP_BITREV_D, 2, 1)]), 0);
+        assert_eq!(cpu.gpr[1], 0x8000_0000_0000_0000);
+    }
+
+    #[test]
+    fn translator_executes_round14_alu_r0_suppression_matrix() {
+        let mut cpu = LoongArchCpu::new();
+        cpu.gpr[2] = 0xFFFF_FFFF_FFFF_FFFF;
+        cpu.gpr[3] = 0x1234_5678_9ABC_DEF0;
+        let insns = [
+            r3(OP_ADD_W, 3, 2, 0),
+            r3(OP_SUB_D, 3, 2, 0),
+            r3(OP_XOR, 3, 2, 0),
+            r3(OP_SLTU, 3, 2, 0),
+            r3(OP_ROTR_D, 3, 2, 0),
+            r2(OP_CLZ_D, 2, 0),
+            r2(OP_REVB_D, 2, 0),
+            r2(OP_BITREV_D, 2, 0),
+        ];
+
+        assert_eq!(run_la(&mut cpu, &insns), 0);
+        assert_eq!(cpu.gpr[0], 0);
     }
 }

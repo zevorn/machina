@@ -19,14 +19,8 @@ impl HostCodeGen for X86_64CodeGen {
         }
         // mov TCG_AREG0 (rbp), rdi
         emit_mov_rr(buf, true, Reg::Rbp, CALL_ARG_REGS[0]);
-        // Load guest_base into R14: mov r14, [rbp+520]
-        emit_load(
-            buf,
-            true,
-            Reg::R14,
-            Reg::Rbp,
-            520, // GUEST_BASE_OFFSET
-        );
+        // Load guest_base into R14: mov r14, [rbp+guest_base_offset]
+        emit_load(buf, true, Reg::R14, Reg::Rbp, self.guest_base_offset);
         // sub rsp, STACK_ADDEND
         emit_arith_ri(buf, ArithOp::Sub, true, Reg::Rsp, STACK_ADDEND as i32);
         // jmp *rsi (TB code pointer)
@@ -320,8 +314,13 @@ impl HostCodeGen for X86_64CodeGen {
                 self.emit_exit_tb(buf, encoded);
             }
             Opcode::GotoTb => {
+                let slot = usize::try_from(cargs[0])
+                    .expect("goto_tb slot must fit usize");
+                assert!(slot < 2, "goto_tb slot {slot} out of range");
                 let (jmp, reset) = self.emit_goto_tb(buf);
-                self.goto_tb_info.lock().unwrap().push((jmp, reset));
+                let mut info = self.goto_tb_info.lock().unwrap();
+                assert!(info[slot].is_none(), "duplicate goto_tb slot {slot}");
+                info[slot] = Some((jmp, reset));
             }
             // -- Rotates: same pattern as shifts --
             Opcode::RotL | Opcode::RotR => {
@@ -691,12 +690,12 @@ impl HostCodeGen for X86_64CodeGen {
         self.neg_align_off
     }
 
-    fn goto_tb_offsets(&self) -> Vec<(usize, usize)> {
-        self.goto_tb_info.lock().unwrap().clone()
+    fn goto_tb_offsets(&self) -> [Option<(usize, usize)>; 2] {
+        *self.goto_tb_info.lock().unwrap()
     }
 
     fn clear_goto_tb_offsets(&self) {
-        self.goto_tb_info.lock().unwrap().clear();
+        *self.goto_tb_info.lock().unwrap() = [None; 2];
     }
 }
 

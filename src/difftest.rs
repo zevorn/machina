@@ -670,9 +670,11 @@ fn tb_gen_single<B: HostCodeGen>(
     let offsets = shared.backend.goto_tb_offsets();
     unsafe {
         let tb = shared.tb_store.get_mut(tb_idx);
-        for (i, &(jmp, reset)) in offsets.iter().enumerate().take(2) {
-            tb.set_jmp_insn_offset(i, jmp as u32);
-            tb.set_jmp_reset_offset(i, reset as u32);
+        for (i, offset) in offsets.iter().enumerate() {
+            if let Some((jmp, reset)) = offset {
+                tb.set_jmp_insn_offset(i, *jmp as u32);
+                tb.set_jmp_reset_offset(i, *reset as u32);
+            }
         }
     }
 

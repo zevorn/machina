@@ -47,9 +47,19 @@ mod hw_uart;
 #[cfg(test)]
 mod integration;
 #[cfg(test)]
+mod loongarch_atomic;
+#[cfg(test)]
+mod loongarch_branch;
+#[cfg(test)]
 mod loongarch_decode;
 #[cfg(test)]
+mod loongarch_difftest;
+#[cfg(test)]
 mod loongarch_fpu;
+#[cfg(test)]
+mod loongarch_memory;
+#[cfg(test)]
+mod loongarch_memory_branch_atomic;
 #[cfg(test)]
 mod loongarch_priv;
 #[cfg(test)]

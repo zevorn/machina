@@ -1356,8 +1356,8 @@ fn test_dbar_translation() {
 #[test]
 fn test_amadd_d_translation() {
     use machina_guest_loongarch::DisasJumpType;
-    // AMADD.D rd=1, rj=2, rk=3: opcode=00111000011000010
-    let insn: u32 = (0b00111000011000010 << 15) | (3 << 10) | (2 << 5) | 1;
+    // AMADD.D rd=1, rj=2, rk=3: opcode=00111000011000011
+    let insn: u32 = (0b00111000011000011 << 15) | (3 << 10) | (2 << 5) | 1;
     let (ops, jmp) = translate_one(insn);
     assert_eq!(jmp, DisasJumpType::Next);
     assert!(ops > 3, "AMADD.D must emit QemuLd+Add+QemuSt (got {ops})");
@@ -1371,11 +1371,11 @@ fn test_all_atomic_handlers_set_contains_atomic() {
         ("SC.D", (0b00100011u32 << 24) | (1 << 10) | (2 << 5) | 3),
         (
             "AMADD.W",
-            (0b00111000011000001u32 << 15) | (3 << 10) | (2 << 5) | 1,
+            (0b00111000011000010u32 << 15) | (3 << 10) | (2 << 5) | 1,
         ),
         (
             "AMADD.D",
-            (0b00111000011000010u32 << 15) | (3 << 10) | (2 << 5) | 1,
+            (0b00111000011000011u32 << 15) | (3 << 10) | (2 << 5) | 1,
         ),
         (
             "AMSWAP.W",
@@ -1383,7 +1383,7 @@ fn test_all_atomic_handlers_set_contains_atomic() {
         ),
         (
             "AMSWAP.D",
-            (0b00111000011000011u32 << 15) | (3 << 10) | (2 << 5) | 1,
+            (0b00111000011000001u32 << 15) | (3 << 10) | (2 << 5) | 1,
         ),
         (
             "AMAND.W",

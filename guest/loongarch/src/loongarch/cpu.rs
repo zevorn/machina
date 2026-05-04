@@ -260,6 +260,17 @@ impl LoongArchCpu {
     }
 
     #[must_use]
+    pub const fn read_gpr(&self, idx: usize) -> u64 {
+        self.gpr[idx]
+    }
+
+    pub fn write_gpr(&mut self, idx: usize, val: u64) {
+        if idx != 0 {
+            self.gpr[idx] = val;
+        }
+    }
+
+    #[must_use]
     pub const fn dmw(&self, idx: usize) -> u64 {
         self.dmw[idx]
     }

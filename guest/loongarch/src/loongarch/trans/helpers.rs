@@ -7,77 +7,67 @@
 
 #[no_mangle]
 pub extern "C" fn loongarch_helper_div_d(a: i64, b: i64) -> i64 {
-    if b == 0 || (a == i64::MIN && b == -1) {
-        0
+    let divisor = if b == 0 || (a == i64::MIN && b == -1) {
+        1
     } else {
-        a.wrapping_div(b)
-    }
+        b
+    };
+    a / divisor
 }
 
 #[no_mangle]
 pub extern "C" fn loongarch_helper_mod_d(a: i64, b: i64) -> i64 {
-    if b == 0 || (a == i64::MIN && b == -1) {
-        0
+    let divisor = if b == 0 || (a == i64::MIN && b == -1) {
+        1
     } else {
-        a.wrapping_rem(b)
-    }
+        b
+    };
+    a % divisor
 }
 
 #[no_mangle]
 pub extern "C" fn loongarch_helper_div_du(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        0
-    } else {
-        a / b
-    }
+    let divisor = if b == 0 { 1 } else { b };
+    a / divisor
 }
 
 #[no_mangle]
 pub extern "C" fn loongarch_helper_mod_du(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        0
-    } else {
-        a % b
-    }
+    let divisor = if b == 0 { 1 } else { b };
+    a % divisor
 }
 
 #[no_mangle]
 pub extern "C" fn loongarch_helper_div_w(a: i64, b: i64) -> i64 {
-    let a32 = a as i32;
-    let b32 = b as i32;
-    let result = if b32 == 0 || (a32 == i32::MIN && b32 == -1) {
-        0i32
-    } else {
-        a32.wrapping_div(b32)
-    };
-    i64::from(result)
+    let a32 = i64::from(a as i32);
+    let b32 = i64::from(b as i32);
+    let divisor = if b32 == 0 { 1 } else { b32 };
+    i64::from((a32 / divisor) as i32)
 }
 
 #[no_mangle]
 pub extern "C" fn loongarch_helper_mod_w(a: i64, b: i64) -> i64 {
-    let a32 = a as i32;
-    let b32 = b as i32;
-    let result = if b32 == 0 || (a32 == i32::MIN && b32 == -1) {
-        0i32
-    } else {
-        a32.wrapping_rem(b32)
-    };
-    i64::from(result)
+    let a32 = i64::from(a as i32);
+    let b32 = i64::from(b as i32);
+    let divisor = if b32 == 0 { 1 } else { b32 };
+    i64::from((a32 % divisor) as i32)
 }
 
 #[no_mangle]
 pub extern "C" fn loongarch_helper_div_wu(a: u64, b: u64) -> i64 {
-    let a32 = a as u32;
-    let b32 = b as u32;
-    let result = if b32 == 0 { 0u32 } else { a32 / b32 };
+    let a32 = u64::from(a as u32);
+    let b32 = u64::from(b as u32);
+    let divisor = if b32 == 0 { 1 } else { b32 };
+    let result = (a32 / divisor) as u32;
     i64::from(result as i32)
 }
 
 #[no_mangle]
 pub extern "C" fn loongarch_helper_mod_wu(a: u64, b: u64) -> i64 {
-    let a32 = a as u32;
-    let b32 = b as u32;
-    let result = if b32 == 0 { 0u32 } else { a32 % b32 };
+    let a32 = u64::from(a as u32);
+    let b32 = u64::from(b as u32);
+    let divisor = if b32 == 0 { 1 } else { b32 };
+    let result = (a32 % divisor) as u32;
     i64::from(result as i32)
 }
 
