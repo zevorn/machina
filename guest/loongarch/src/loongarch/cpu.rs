@@ -115,6 +115,82 @@ pub struct LoongArchCpu {
     pub(crate) cfg: LoongArchCfg,
 }
 
+pub struct LoongArchCpuInterruptState {
+    hwi_pending: AtomicU32,
+    ipi_pending: AtomicBool,
+}
+
+impl Default for LoongArchCpuInterruptState {
+    fn default() -> Self {
+        Self {
+            hwi_pending: AtomicU32::new(0),
+            ipi_pending: AtomicBool::new(false),
+        }
+    }
+}
+
+impl LoongArchCpuInterruptState {
+    pub fn set_hwi_interrupt_pending(&self, hwi: u8, pending: bool) {
+        if hwi >= 8 {
+            return;
+        }
+        let mask = 1_u32 << hwi;
+        if pending {
+            self.hwi_pending
+                .fetch_or(mask, std::sync::atomic::Ordering::Release);
+        } else {
+            self.hwi_pending
+                .fetch_and(!mask, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    pub fn set_ipi_interrupt_pending(&self, pending: bool) {
+        self.ipi_pending
+            .store(pending, std::sync::atomic::Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn has_pending_irq(&self) -> bool {
+        self.hwi_pending.load(std::sync::atomic::Ordering::Acquire) != 0
+            || self.ipi_pending.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn pending_interrupt(&self, cpu: &LoongArchCpu) -> bool {
+        if cpu.crmd & CRMD_IE == 0 {
+            return false;
+        }
+        cpu.masked_interrupt_line_for_estat(
+            cpu.estat | self.pending_estat_bits(),
+        )
+        .is_some()
+    }
+
+    pub fn apply_to_cpu(&self, cpu: &mut LoongArchCpu) {
+        let hwi = self.hwi_pending.load(std::sync::atomic::Ordering::Acquire);
+        for line in 0..8 {
+            cpu.set_hwi_interrupt_pending(line, hwi & (1_u32 << line) != 0);
+        }
+        cpu.set_ipi_interrupt_pending(
+            self.ipi_pending.load(std::sync::atomic::Ordering::Acquire),
+        );
+    }
+
+    fn pending_estat_bits(&self) -> u64 {
+        let mut bits = 0;
+        let hwi = self.hwi_pending.load(std::sync::atomic::Ordering::Acquire);
+        for line in 0..8 {
+            if hwi & (1_u32 << line) != 0 {
+                bits |= 1_u64 << (2 + line);
+            }
+        }
+        if self.ipi_pending.load(std::sync::atomic::Ordering::Acquire) {
+            bits |= 1_u64 << 12;
+        }
+        bits
+    }
+}
+
 pub const GPR_OFFSET: usize = offset_of!(LoongArchCpu, gpr);
 pub const PC_OFFSET: usize = offset_of!(LoongArchCpu, pc);
 pub const GUEST_BASE_OFFSET: usize = offset_of!(LoongArchCpu, guest_base);
@@ -486,7 +562,11 @@ impl LoongArchCpu {
 
     #[must_use]
     pub fn masked_interrupt_line(&self) -> Option<u32> {
-        let pending = self.estat & self.ecfg & ESTAT_IS_MASK;
+        self.masked_interrupt_line_for_estat(self.estat)
+    }
+
+    fn masked_interrupt_line_for_estat(&self, estat: u64) -> Option<u32> {
+        let pending = estat & self.ecfg & ESTAT_IS_MASK;
         if pending == 0 {
             None
         } else {

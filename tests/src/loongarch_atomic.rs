@@ -1,5 +1,5 @@
 use machina_accel::code_buffer::CodeBuffer;
-use machina_accel::ir::tb::EXCP_UNDEF;
+use machina_accel::ir::tb::{EXCP_LOONGARCH_DONE, EXCP_UNDEF};
 use machina_accel::ir::Context;
 use machina_accel::translate::translate_and_execute;
 use machina_accel::{HostCodeGen, X86_64CodeGen};
@@ -7,8 +7,11 @@ use machina_guest_loongarch::loongarch::cpu::{
     LoongArchCpu, GUEST_BASE_CPU_OFFSET,
 };
 use machina_guest_loongarch::loongarch::csr::{
-    CRMD_DA, CSR_CRMD, CSR_ERA, CSR_PRMD, CSR_TLBRERA, CSR_TLBRPRMD,
+    CRMD_DA, CRMD_PG, CSR_BADV, CSR_CRMD, CSR_ERA, CSR_ESTAT, CSR_PRMD,
+    CSR_TLBEHI, CSR_TLBELO0, CSR_TLBELO1, CSR_TLBIDX, CSR_TLBRERA,
+    CSR_TLBRPRMD,
 };
+use machina_guest_loongarch::loongarch::exception::ECODE_PME;
 use machina_guest_loongarch::loongarch::ext::LoongArchCfg;
 use machina_guest_loongarch::loongarch::trans::{
     LoongArchDisasContext, LoongArchTranslator,
@@ -89,6 +92,30 @@ fn read_u64(mem: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(mem[off..off + 8].try_into().unwrap())
 }
 
+fn tlbelo_test(ppn: u64, v: bool, d: bool, plv: u8) -> u64 {
+    u64::from(v)
+        | (u64::from(d) << 1)
+        | (u64::from(plv & 0x3) << 2)
+        | ((ppn & 0xF_FFFF_FFFF) << 12)
+        | (1 << 6)
+}
+
+fn write_test_tlb_entry(
+    cpu: &mut LoongArchCpu,
+    index: usize,
+    va: u64,
+    page_size: u8,
+    elo0: u64,
+    elo1: u64,
+) {
+    let pair_mask = !((1_u64 << (u32::from(page_size) + 1)) - 1);
+    cpu.csr_write(CSR_TLBEHI, (va & pair_mask) & !0x1FFF);
+    cpu.csr_write(CSR_TLBELO0, elo0);
+    cpu.csr_write(CSR_TLBELO1, elo1);
+    cpu.csr_write(CSR_TLBIDX, (u64::from(page_size) << 24) | index as u64);
+    cpu.tlb_write(index);
+}
+
 #[test]
 fn loongarch_ll_sc_pairs_update_memory_and_status() {
     let mut mem = [0u8; 64];
@@ -146,6 +173,67 @@ fn loongarch_sc_fails_without_or_after_lost_reservation() {
     assert_eq!(cpu.read_gpr(5), 0);
     assert_eq!(cpu.read_gpr(6), 0);
     assert_eq!(read_u32(&mem, 8), 0xBBBB_BBBB);
+}
+
+#[test]
+fn task83_store_conditional_dirty_fault_traps_instead_of_failing() {
+    let cases = [
+        ("sc.w", 4usize, OP_LL_W, OP_SC_W, 0x1122_3344_u64, 0x55_u64),
+        (
+            "sc.d",
+            8usize,
+            OP_LL_D,
+            OP_SC_D,
+            0x1122_3344_5566_7788_u64,
+            0x66_u64,
+        ),
+    ];
+
+    for (name, size, ll_op, sc_op, initial, replacement) in cases {
+        let va = 0x4000_u64;
+        let mut mem = [0u8; 64];
+        mem[..size].copy_from_slice(&initial.to_le_bytes()[..size]);
+
+        let mut cpu = LoongArchCpu::new();
+        cpu.set_guest_base(mem.as_mut_ptr() as u64);
+        cpu.set_ram_base(0);
+        cpu.set_ram_end(mem.len() as u64);
+        cpu.csr_write(CSR_CRMD, CRMD_PG);
+        cpu.write_gpr(2, va);
+
+        write_test_tlb_entry(
+            &mut cpu,
+            machina_guest_loongarch::loongarch::mmu::mtlb_flat_index(0)
+                .unwrap(),
+            va,
+            12,
+            tlbelo_test(0, true, false, 0),
+            tlbelo_test(1, true, true, 0),
+        );
+
+        let exit = run_la(
+            &mut cpu,
+            &[
+                r2_si14(ll_op, 0, 2, 5),
+                r2_si12(OP_ADDI_D, replacement as i16, 0, 5),
+                r2_si14(sc_op, 0, 2, 5),
+            ],
+        );
+
+        assert_eq!(exit, EXCP_LOONGARCH_DONE as usize, "{name}");
+        assert_eq!(cpu.read_gpr(5), replacement, "{name}");
+        assert_eq!(
+            &mem[..size],
+            &initial.to_le_bytes()[..size],
+            "{name} must not write dirty page"
+        );
+        assert_eq!(cpu.csr_read(CSR_BADV), va, "{name}");
+        assert_eq!(
+            (cpu.csr_read(CSR_ESTAT) >> 16) & 0x3F,
+            u64::from(ECODE_PME),
+            "{name}"
+        );
+    }
 }
 
 #[test]

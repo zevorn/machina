@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use machina_guest_loongarch::loongarch::cpu::LoongArchCpu;
+use machina_guest_loongarch::loongarch::cpu::{
+    LoongArchCpu, LoongArchCpuInterruptState,
+};
 use machina_hw_char::uart::Uart16550;
 use machina_hw_core::bus::SysBusError;
 use machina_hw_core::irq::{InterruptSource, IrqLine, IrqSink};
@@ -64,6 +66,23 @@ impl LoongArchInterruptCascade {
             hwi,
             InterruptSource::new(
                 Arc::new(LoongArchCpuHwiSink { cpu }) as Arc<dyn IrqSink>,
+                u32::from(hwi),
+            ),
+        );
+    }
+
+    pub fn connect_cpu_hwi_async(
+        &self,
+        cpu_id: u32,
+        hwi: u8,
+        interrupts: Arc<LoongArchCpuInterruptState>,
+    ) {
+        self.eiointc.connect_hwi_output(
+            cpu_id,
+            hwi,
+            InterruptSource::new(
+                Arc::new(LoongArchCpuAsyncHwiSink { interrupts })
+                    as Arc<dyn IrqSink>,
                 u32::from(hwi),
             ),
         );
@@ -157,6 +176,16 @@ impl IrqSink for LoongArchCpuHwiSink {
             .lock()
             .unwrap()
             .set_hwi_interrupt_pending(irq as u8, level);
+    }
+}
+
+struct LoongArchCpuAsyncHwiSink {
+    interrupts: Arc<LoongArchCpuInterruptState>,
+}
+
+impl IrqSink for LoongArchCpuAsyncHwiSink {
+    fn set_irq(&self, irq: u32, level: bool) {
+        self.interrupts.set_hwi_interrupt_pending(irq as u8, level);
     }
 }
 

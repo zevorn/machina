@@ -28,7 +28,7 @@ use machina_system::cpus::{
     machina_mem_read, machina_mem_write, FullSystemCpu,
 };
 use machina_system::loongarch_cpu::{
-    loongarch_soft_mmu_config, SharedLoongArchFullSystemCpu,
+    loongarch_soft_mmu_config, LoongArchFullSystemCpu,
 };
 use machina_system::{CpuManager, FirmwareCallFn};
 
@@ -575,14 +575,23 @@ fn run_loongarch_machine_cycle(
 
     let mut cpu_mgr = CpuManager::new();
     let stop_flag = cpu_mgr.running_flag();
+    let (cpu_state, interrupts) = match machine.take_runtime_cpu_state() {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("machina: runtime CPU setup failed: {}", e);
+            machina_hw_core::chardev::restore_terminal();
+            process::exit(1);
+        }
+    };
     let cpu = unsafe {
-        SharedLoongArchFullSystemCpu::new(
-            machine.cpu(),
+        LoongArchFullSystemCpu::new_with_interrupts(
+            cpu_state,
             machine.ram_block().as_ptr(),
             0,
             ram_size,
             machine.address_space() as *const _ as u64,
             Arc::clone(&stop_flag),
+            interrupts,
         )
     };
     cpu_mgr.add_loongarch_cpu(cpu);

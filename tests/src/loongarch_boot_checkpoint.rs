@@ -25,7 +25,6 @@ use machina_hw_loongarch::virt_machine::{
 };
 use machina_system::loongarch_cpu::{
     loongarch_soft_mmu_config, LoongArchFullSystemCpu,
-    SharedLoongArchFullSystemCpu,
 };
 use machina_system::CpuManager;
 
@@ -342,14 +341,16 @@ fn task47_long_kernel_tb_does_not_overflow_spill_area_for_cp3() {
 
     let mut manager = CpuManager::new();
     let stop_flag = manager.running_flag();
+    let (cpu_state, interrupts) = machine.take_runtime_cpu_state().unwrap();
     let cpu = unsafe {
-        SharedLoongArchFullSystemCpu::new(
-            machine.cpu(),
+        LoongArchFullSystemCpu::new_with_interrupts(
+            cpu_state,
             machine.ram_block().as_ptr(),
             0,
             opts.ram_size,
             machine.address_space() as *const _ as u64,
             Arc::clone(&stop_flag),
+            interrupts,
         )
     };
     manager.add_loongarch_cpu(cpu);

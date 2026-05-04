@@ -18,11 +18,11 @@ use machina_accel::GuestCpu;
 use machina_accel::HostCodeGen;
 use machina_core::wfi::WfiWaker;
 
-use crate::loongarch_cpu::SharedLoongArchFullSystemCpu;
+use crate::loongarch_cpu::LoongArchFullSystemCpu;
 
 enum ManagedCpu {
     Riscv(Box<FullSystemCpu>),
-    LoongArch(SharedLoongArchFullSystemCpu),
+    LoongArch(Box<LoongArchFullSystemCpu>),
 }
 
 pub struct CpuManager {
@@ -67,8 +67,18 @@ impl CpuManager {
     }
 
     /// Add a LoongArch CPU to be managed. Ownership is transferred.
-    pub fn add_loongarch_cpu(&mut self, cpu: SharedLoongArchFullSystemCpu) {
-        self.cpus.push(ManagedCpu::LoongArch(cpu));
+    pub fn add_loongarch_cpu(&mut self, cpu: LoongArchFullSystemCpu) {
+        self.cpus.push(ManagedCpu::LoongArch(Box::new(cpu)));
+    }
+
+    /// Access a managed LoongArch CPU by index.
+    pub fn loongarch_cpu(&self, idx: usize) -> &LoongArchFullSystemCpu {
+        match &self.cpus[idx] {
+            ManagedCpu::LoongArch(cpu) => cpu.as_ref(),
+            ManagedCpu::Riscv(_) => {
+                panic!("managed CPU {idx} is not a LoongArch CPU")
+            }
+        }
     }
 
     /// Access a managed CPU by index.
@@ -193,7 +203,7 @@ impl CpuManager {
     unsafe fn run_loongarch_cpu<B>(
         shared: &SharedState<B>,
         running: &Arc<AtomicBool>,
-        cpu: &mut SharedLoongArchFullSystemCpu,
+        cpu: &mut LoongArchFullSystemCpu,
     ) -> ExitReason
     where
         B: HostCodeGen,

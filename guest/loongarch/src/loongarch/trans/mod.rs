@@ -2926,20 +2926,26 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         a: &insn_decode::ArgsR2Si14,
     ) -> bool {
         ir.contains_atomic = true;
-        use gen_common::{gpr_get, gpr_set};
+        use gen_common::gpr_get;
+        use machina_accel::ir::Cond;
         let base = gpr_get(&self.gpr, ir, a.rj as u8);
         let off = ir.new_const(Type::I64, (a.si14 << 2) as u64);
         let addr = ir.new_temp(Type::I64);
         ir.gen_add(Type::I64, addr, base, off);
         let val = gpr_get(&self.gpr, ir, a.rd as u8);
         let env_tmp = self.env;
-        let d = ir.new_temp(Type::I64);
+        let rd = ir.new_const(Type::I64, a.rd as u64);
+        let trap = ir.new_temp(Type::I64);
         ir.gen_call(
-            d,
+            trap,
             helpers::loongarch_helper_sc_w as *const () as u64,
-            &[env_tmp, addr, val],
+            &[env_tmp, addr, val, rd],
         );
-        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, trap, zero, Cond::Eq, label_ok);
+        ir.gen_exit_tb(EXCP_LOONGARCH_DONE);
+        ir.gen_set_label(label_ok);
         true
     }
 
@@ -2949,20 +2955,26 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         a: &insn_decode::ArgsR2Si14,
     ) -> bool {
         ir.contains_atomic = true;
-        use gen_common::{gpr_get, gpr_set};
+        use gen_common::gpr_get;
+        use machina_accel::ir::Cond;
         let base = gpr_get(&self.gpr, ir, a.rj as u8);
         let off = ir.new_const(Type::I64, (a.si14 << 2) as u64);
         let addr = ir.new_temp(Type::I64);
         ir.gen_add(Type::I64, addr, base, off);
         let val = gpr_get(&self.gpr, ir, a.rd as u8);
         let env_tmp = self.env;
-        let d = ir.new_temp(Type::I64);
+        let rd = ir.new_const(Type::I64, a.rd as u64);
+        let trap = ir.new_temp(Type::I64);
         ir.gen_call(
-            d,
+            trap,
             helpers::loongarch_helper_sc_d as *const () as u64,
-            &[env_tmp, addr, val],
+            &[env_tmp, addr, val, rd],
         );
-        gpr_set(&self.gpr, ir, a.rd as u8, d);
+        let zero = ir.new_const(Type::I64, 0);
+        let label_ok = ir.new_label();
+        ir.gen_brcond(Type::I64, trap, zero, Cond::Eq, label_ok);
+        ir.gen_exit_tb(EXCP_LOONGARCH_DONE);
+        ir.gen_set_label(label_ok);
         true
     }
 

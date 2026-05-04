@@ -30,6 +30,22 @@ fn clear_ll_sc_reservation(cpu: &mut LoongArchCpu) {
     cpu.ll_res_val = 0;
 }
 
+fn enter_store_translation_fault(
+    cpu: &mut LoongArchCpu,
+    addr: u64,
+    fault: TlbLookupResult,
+) -> u64 {
+    let fault_pc = cpu.fault_pc_val();
+    let vector = cpu.enter_address_translation_exception(
+        addr,
+        AccessType::Store,
+        fault,
+        fault_pc,
+    );
+    cpu.set_pc(vector);
+    1
+}
+
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
@@ -2788,6 +2804,7 @@ pub unsafe extern "C" fn loongarch_helper_sc_w(
     env: *mut u8,
     addr: u64,
     val: u64,
+    rd: u64,
 ) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     let llbit = cpu.llbctl;
@@ -2797,25 +2814,31 @@ pub unsafe extern "C" fn loongarch_helper_sc_w(
     cpu.ll_res_addr = u64::MAX;
     cpu.ll_res_val = 0;
     if llbit == 0 || res_addr != addr {
+        cpu.write_gpr(rd as usize, 0);
         return 0;
     }
     let pa = match cpu.translate_address(addr, AccessType::Store) {
         TlbLookupResult::Hit { pa, .. } => pa,
-        _ => return 0,
+        fault => return enter_store_translation_fault(cpu, addr, fault),
     };
     let end = match pa.checked_add(4) {
         Some(e) if pa >= cpu.ram_base && e <= cpu.ram_end => e,
-        _ => return 0,
+        _ => {
+            cpu.write_gpr(rd as usize, 0);
+            return 0;
+        }
     };
     let _ = end;
     let host_ptr = (cpu.guest_base as *const u8).add(pa as usize);
     let current = (host_ptr as *const u32).read_unaligned();
     if i64::from(current as i32) != res_val as i64 {
+        cpu.write_gpr(rd as usize, 0);
         return 0;
     }
     let host_wptr = (cpu.guest_base as *mut u8).add(pa as usize);
     (host_wptr as *mut u32).write_unaligned(val as u32);
-    1
+    cpu.write_gpr(rd as usize, 1);
+    0
 }
 
 /// # Safety
@@ -2825,6 +2848,7 @@ pub unsafe extern "C" fn loongarch_helper_sc_d(
     env: *mut u8,
     addr: u64,
     val: u64,
+    rd: u64,
 ) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     let llbit = cpu.llbctl;
@@ -2834,23 +2858,29 @@ pub unsafe extern "C" fn loongarch_helper_sc_d(
     cpu.ll_res_addr = u64::MAX;
     cpu.ll_res_val = 0;
     if llbit == 0 || res_addr != addr {
+        cpu.write_gpr(rd as usize, 0);
         return 0;
     }
     let pa = match cpu.translate_address(addr, AccessType::Store) {
         TlbLookupResult::Hit { pa, .. } => pa,
-        _ => return 0,
+        fault => return enter_store_translation_fault(cpu, addr, fault),
     };
     let end = match pa.checked_add(8) {
         Some(e) if pa >= cpu.ram_base && e <= cpu.ram_end => e,
-        _ => return 0,
+        _ => {
+            cpu.write_gpr(rd as usize, 0);
+            return 0;
+        }
     };
     let _ = end;
     let host_ptr = (cpu.guest_base as *const u8).add(pa as usize);
     let current = (host_ptr as *const u64).read_unaligned();
     if current != res_val {
+        cpu.write_gpr(rd as usize, 0);
         return 0;
     }
     let host_wptr = (cpu.guest_base as *mut u8).add(pa as usize);
     (host_wptr as *mut u64).write_unaligned(val);
-    1
+    cpu.write_gpr(rd as usize, 1);
+    0
 }

@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts, MachineState};
-use machina_guest_loongarch::loongarch::cpu::LoongArchCpu;
+use machina_guest_loongarch::loongarch::cpu::{
+    LoongArchCpu, LoongArchCpuInterruptState,
+};
 use machina_guest_loongarch::loongarch::csr::{CRMD_DA, CSR_CRMD};
 use machina_hw_char::uart::{Uart16550, Uart16550Mmio};
 use machina_hw_core::bus::{SysBus, SysBusError};
@@ -120,6 +122,32 @@ impl LoongArchVirtMachine {
     #[must_use]
     pub fn uart(&self) -> Arc<Uart16550> {
         Arc::clone(self.uart.as_ref().expect("machine not initialized"))
+    }
+
+    pub fn take_runtime_cpu_state(
+        &mut self,
+    ) -> Result<
+        (LoongArchCpu, Arc<LoongArchCpuInterruptState>),
+        Box<dyn std::error::Error>,
+    > {
+        let interrupts = Arc::new(LoongArchCpuInterruptState::default());
+        self.ipi()
+            .connect_output(0, runtime_ipi_source(Arc::clone(&interrupts)));
+        self.interrupt_cascade
+            .as_ref()
+            .expect("machine not initialized")
+            .connect_cpu_hwi_async(
+                0,
+                LOONGARCH_DEVICE_HWI,
+                Arc::clone(&interrupts),
+            );
+
+        let cpu_arc = self.cpu();
+        let mut guard = cpu_arc.lock().unwrap();
+        let cpu = std::mem::replace(&mut *guard, LoongArchCpu::new());
+        drop(guard);
+
+        Ok((cpu, interrupts))
     }
 
     #[must_use]
@@ -444,4 +472,23 @@ impl IrqSink for LoongArchCpuIpiSink {
     fn set_irq(&self, _irq: u32, level: bool) {
         self.cpu.lock().unwrap().set_ipi_interrupt_pending(level);
     }
+}
+
+struct LoongArchCpuAsyncIpiSink {
+    interrupts: Arc<LoongArchCpuInterruptState>,
+}
+
+impl IrqSink for LoongArchCpuAsyncIpiSink {
+    fn set_irq(&self, _irq: u32, level: bool) {
+        self.interrupts.set_ipi_interrupt_pending(level);
+    }
+}
+
+fn runtime_ipi_source(
+    interrupts: Arc<LoongArchCpuInterruptState>,
+) -> InterruptSource {
+    InterruptSource::new(
+        Arc::new(LoongArchCpuAsyncIpiSink { interrupts }) as Arc<dyn IrqSink>,
+        0,
+    )
 }

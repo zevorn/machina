@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use machina_accel::ir::context::Context;
 use machina_accel::ir::tb::{EXCP_LOONGARCH_DONE, EXCP_LOONGARCH_WFI};
@@ -7,7 +7,8 @@ use machina_accel::x86_64::emitter::SoftMmuConfig;
 use machina_accel::{ArchExitAction, GuestCpu};
 use machina_core::address::GPA;
 use machina_guest_loongarch::loongarch::cpu::{
-    LoongArchCpu, FAST_TLB_PTR_OFFSET, FAULT_PC_OFFSET, MEM_FAULT_CAUSE_OFFSET,
+    LoongArchCpu, LoongArchCpuInterruptState, FAST_TLB_PTR_OFFSET,
+    FAULT_PC_OFFSET, MEM_FAULT_CAUSE_OFFSET,
 };
 use machina_guest_loongarch::loongarch::csr::*;
 use machina_guest_loongarch::loongarch::ext::LoongArchCfg;
@@ -50,6 +51,7 @@ pub fn loongarch_soft_mmu_config() -> SoftMmuConfig {
 pub struct LoongArchFullSystemCpu {
     pub cpu: LoongArchCpu,
     stop_flag: Arc<AtomicBool>,
+    interrupts: Option<Arc<LoongArchCpuInterruptState>>,
 }
 
 unsafe impl Send for LoongArchFullSystemCpu {}
@@ -72,7 +74,54 @@ impl LoongArchFullSystemCpu {
             ram_size,
             address_space_ptr,
         );
-        Self { cpu, stop_flag }
+        Self {
+            cpu,
+            stop_flag,
+            interrupts: None,
+        }
+    }
+
+    /// # Safety
+    /// `ram_ptr` must point to valid memory of `ram_size` bytes.
+    pub unsafe fn new_with_interrupts(
+        mut cpu: LoongArchCpu,
+        ram_ptr: *const u8,
+        ram_base: u64,
+        ram_size: u64,
+        address_space_ptr: u64,
+        stop_flag: Arc<AtomicBool>,
+        interrupts: Arc<LoongArchCpuInterruptState>,
+    ) -> Self {
+        configure_cpu_memory(
+            &mut cpu,
+            ram_ptr,
+            ram_base,
+            ram_size,
+            address_space_ptr,
+        );
+        Self {
+            cpu,
+            stop_flag,
+            interrupts: Some(interrupts),
+        }
+    }
+
+    fn apply_async_interrupts(&mut self) {
+        if let Some(interrupts) = &self.interrupts {
+            interrupts.apply_to_cpu(&mut self.cpu);
+        }
+    }
+
+    fn async_pending_interrupt(&self) -> bool {
+        self.interrupts
+            .as_ref()
+            .is_some_and(|interrupts| interrupts.pending_interrupt(&self.cpu))
+    }
+
+    fn async_has_pending_irq(&self) -> bool {
+        self.interrupts
+            .as_ref()
+            .is_some_and(|interrupts| interrupts.has_pending_irq())
     }
 }
 
@@ -88,6 +137,7 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
+        self.apply_async_interrupts();
         loongarch_gen_code(&mut self.cpu, ir, pc, max_insns)
     }
 
@@ -96,11 +146,12 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn pending_interrupt(&self) -> bool {
-        self.cpu.pending_interrupt()
+        self.cpu.pending_interrupt() || self.async_pending_interrupt()
     }
 
     fn has_pending_irq(&self) -> bool {
         self.cpu.masked_interrupt_line().is_some()
+            || self.async_has_pending_irq()
             || loongarch_timer_counting(&self.cpu)
     }
 
@@ -113,10 +164,12 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn set_pc(&mut self, pc: u64) {
+        self.apply_async_interrupts();
         self.cpu.set_pc(pc);
     }
 
     fn handle_interrupt(&mut self) {
+        self.apply_async_interrupts();
         loongarch_handle_interrupt(&mut self.cpu);
     }
 
@@ -125,10 +178,12 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
+        self.apply_async_interrupts();
         loongarch_handle_arch_exit(&mut self.cpu, code)
     }
 
     fn check_mem_fault(&mut self) -> bool {
+        self.apply_async_interrupts();
         self.cpu.timer_tick(RUNTIME_TIMER_TICK);
         self.cpu.take_translation_fault_pending()
     }
@@ -138,7 +193,11 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn reset_exit_request(&mut self) {
-        self.cpu.reset_exit_request();
+        if self.interrupts.is_some() {
+            self.cpu.set_exit_request();
+        } else {
+            self.cpu.reset_exit_request();
+        }
     }
 
     fn last_phys_pc(&self) -> u64 {
@@ -157,132 +216,8 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn take_tb_flush_pending(&mut self) -> bool {
+        self.apply_async_interrupts();
         self.cpu.take_tb_flush()
-    }
-}
-
-pub struct SharedLoongArchFullSystemCpu {
-    cpu: Arc<Mutex<LoongArchCpu>>,
-    stop_flag: Arc<AtomicBool>,
-}
-
-unsafe impl Send for SharedLoongArchFullSystemCpu {}
-
-impl SharedLoongArchFullSystemCpu {
-    /// # Safety
-    /// `ram_ptr` must point to valid memory of `ram_size` bytes.
-    pub unsafe fn new(
-        cpu: Arc<Mutex<LoongArchCpu>>,
-        ram_ptr: *const u8,
-        ram_base: u64,
-        ram_size: u64,
-        address_space_ptr: u64,
-        stop_flag: Arc<AtomicBool>,
-    ) -> Self {
-        configure_cpu_memory(
-            &mut cpu.lock().unwrap(),
-            ram_ptr,
-            ram_base,
-            ram_size,
-            address_space_ptr,
-        );
-        Self { cpu, stop_flag }
-    }
-
-    #[must_use]
-    pub fn cpu(&self) -> Arc<Mutex<LoongArchCpu>> {
-        Arc::clone(&self.cpu)
-    }
-}
-
-impl GuestCpu for SharedLoongArchFullSystemCpu {
-    type IrContext = Context;
-
-    fn get_pc(&self) -> u64 {
-        self.cpu.lock().unwrap().pc()
-    }
-
-    fn get_flags(&self) -> u32 {
-        loongarch_tb_flags(&self.cpu.lock().unwrap())
-    }
-
-    fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
-        loongarch_gen_code(&mut self.cpu.lock().unwrap(), ir, pc, max_insns)
-    }
-
-    fn env_ptr(&mut self) -> *mut u8 {
-        self.cpu.lock().unwrap().env_ptr()
-    }
-
-    fn pending_interrupt(&self) -> bool {
-        self.cpu.lock().unwrap().pending_interrupt()
-    }
-
-    fn has_pending_irq(&self) -> bool {
-        let cpu = self.cpu.lock().unwrap();
-        cpu.masked_interrupt_line().is_some() || loongarch_timer_counting(&cpu)
-    }
-
-    fn is_halted(&self) -> bool {
-        self.cpu.lock().unwrap().is_halted()
-    }
-
-    fn set_halted(&mut self, halted: bool) {
-        self.cpu.lock().unwrap().set_halted_flag(halted);
-    }
-
-    fn set_pc(&mut self, pc: u64) {
-        self.cpu.lock().unwrap().set_pc(pc);
-    }
-
-    fn handle_interrupt(&mut self) {
-        loongarch_handle_interrupt(&mut self.cpu.lock().unwrap());
-    }
-
-    fn handle_exception(&mut self, _cause: u64, _tval: u64) {
-        loongarch_handle_exception(&mut self.cpu.lock().unwrap());
-    }
-
-    fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
-        loongarch_handle_arch_exit(&mut self.cpu.lock().unwrap(), code)
-    }
-
-    fn check_mem_fault(&mut self) -> bool {
-        let mut cpu = self.cpu.lock().unwrap();
-        cpu.timer_tick(RUNTIME_TIMER_TICK);
-        cpu.take_translation_fault_pending()
-    }
-
-    fn set_exit_request(&mut self) {
-        self.cpu.lock().unwrap().set_exit_request();
-    }
-
-    fn reset_exit_request(&mut self) {
-        self.cpu.lock().unwrap().reset_exit_request();
-    }
-
-    fn last_phys_pc(&self) -> u64 {
-        self.cpu.lock().unwrap().last_phys_pc_val()
-    }
-
-    fn translate_pc(&self, vpc: u64) -> u64 {
-        match self
-            .cpu
-            .lock()
-            .unwrap()
-            .translate_address(vpc, mmu::AccessType::Fetch)
-        {
-            mmu::TlbLookupResult::Hit { pa, .. } => pa,
-            _ => u64::MAX,
-        }
-    }
-
-    fn should_exit(&self) -> bool {
-        !self.stop_flag.load(Ordering::Relaxed)
-    }
-
-    fn take_tb_flush_pending(&mut self) -> bool {
-        self.cpu.lock().unwrap().take_tb_flush()
     }
 }
 
