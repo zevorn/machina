@@ -9,7 +9,7 @@ use std::process;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use machina_accel::exec::ExecEnv;
+use machina_accel::exec::{ExecEnv, ExitReason};
 use machina_accel::x86_64::emitter::SoftMmuConfig;
 use machina_accel::X86_64CodeGen;
 #[cfg(unix)]
@@ -599,8 +599,21 @@ fn run_loongarch_machine_cycle(
     };
     cpu_mgr.add_loongarch_cpu(cpu);
 
-    let _exit = unsafe { cpu_mgr.run(&shared) };
-    None
+    let exit = unsafe { cpu_mgr.run(&shared) };
+    loongarch_shutdown_reason(exit)
+}
+
+fn loongarch_shutdown_reason(exit: ExitReason) -> Option<ShutdownReason> {
+    match exit {
+        ExitReason::Halted => None,
+        ExitReason::Exit(code) => Some(ShutdownReason::Fail(
+            u32::try_from(code).unwrap_or(u32::MAX),
+        )),
+        ExitReason::Ecall { priv_level } => {
+            Some(ShutdownReason::Fail(0xec00 | u32::from(priv_level)))
+        }
+        ExitReason::BufferFull => Some(ShutdownReason::Fail(0xffff_fffe)),
+    }
 }
 
 fn main() {

@@ -16,7 +16,9 @@ const EFI_SYSTEM_TABLE_SIGNATURE: u64 = 0x5453_5953_2049_4249;
 const EFI_SYSTEM_TABLE_HEADER_SIZE: u32 = 120;
 const EFI_CONFIG_TABLE_SIZE: u64 = 24;
 const EFI_MEMORY_DESCRIPTOR_SIZE: u64 = 40;
+const EFI_RESERVED_MEMORY: u32 = 0;
 const EFI_CONVENTIONAL_MEMORY: u32 = 7;
+const EFI_PAGE_SIZE: u64 = 4096;
 
 const DEVICE_TREE_GUID: [u8; 16] = [
     0xd5, 0x21, 0xb6, 0xb1, 0x9c, 0xf1, 0xa5, 0x41, 0x83, 0x0b, 0xd9, 0x15,
@@ -119,6 +121,99 @@ fn read_guest_be_u32(machine: &LoongArchVirtMachine, addr: u64) -> u32 {
 
 fn read_guest_u64(machine: &LoongArchVirtMachine, addr: u64) -> u64 {
     u64::from_le_bytes(read_bytes(machine, addr, 8).try_into().unwrap())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EfiMemDesc {
+    ty: u32,
+    phys: u64,
+    pages: u64,
+}
+
+fn align_down_page(addr: u64) -> u64 {
+    addr & !(EFI_PAGE_SIZE - 1)
+}
+
+fn align_up_page(addr: u64) -> u64 {
+    addr.saturating_add(EFI_PAGE_SIZE - 1) & !(EFI_PAGE_SIZE - 1)
+}
+
+fn expected_low_ram_reserved_ranges(ram_size: u64) -> Vec<(u64, u64)> {
+    let mut ranges: Vec<(u64, u64)> = [
+        (VIRT_IPI_BASE, VIRT_IPI_SIZE),
+        (VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE),
+        (VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE),
+        (VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE),
+        (VIRT_UART_BASE, VIRT_UART_SIZE),
+    ]
+    .into_iter()
+    .filter_map(|(base, size)| {
+        let start = align_down_page(base).min(ram_size);
+        let end = align_up_page(base + size).min(ram_size);
+        (start < end).then_some((start, end))
+    })
+    .collect();
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some((_, last_end)) = merged.last_mut() {
+            if start <= *last_end {
+                *last_end = (*last_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+        .into_iter()
+        .map(|(start, end)| (start, end - start))
+        .collect()
+}
+
+fn expected_low_ram_usable_ranges(ram_size: u64) -> Vec<(u64, u64)> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    for (hole_start, hole_size) in expected_low_ram_reserved_ranges(ram_size) {
+        if cursor < hole_start {
+            ranges.push((cursor, hole_start - cursor));
+        }
+        cursor = cursor.max(hole_start + hole_size);
+    }
+    if cursor < ram_size {
+        ranges.push((cursor, ram_size - cursor));
+    }
+    ranges
+}
+
+fn read_efi_memmap(
+    machine: &LoongArchVirtMachine,
+    memmap_guest: u64,
+) -> Vec<EfiMemDesc> {
+    let desc_size = read_guest_u64(machine, memmap_guest);
+    let map_size = read_guest_u64(machine, memmap_guest + 8);
+    assert_eq!(desc_size, EFI_MEMORY_DESCRIPTOR_SIZE);
+    assert_eq!(map_size % desc_size, 0);
+    assert_eq!(read_guest_u32(machine, memmap_guest + 16), 1);
+
+    (0..map_size / desc_size)
+        .map(|index| {
+            let desc = memmap_guest + 40 + index * desc_size;
+            EfiMemDesc {
+                ty: read_guest_u32(machine, desc),
+                phys: read_guest_u64(machine, desc + 8),
+                pages: read_guest_u64(machine, desc + 24),
+            }
+        })
+        .collect()
+}
+
+fn desc_ranges(descs: &[EfiMemDesc], ty: u32) -> Vec<(u64, u64)> {
+    descs
+        .iter()
+        .filter(|desc| desc.ty == ty)
+        .map(|desc| (desc.phys, desc.pages * EFI_PAGE_SIZE))
+        .collect()
 }
 
 fn read_be_u32(data: &[u8], offset: usize) -> u32 {
@@ -339,23 +434,16 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
         LINUX_EFI_BOOT_MEMMAP_GUID,
     );
     let memmap_guest = boot_guest_addr(memmap_addr);
+    let memmap_descs = read_efi_memmap(&machine, memmap_guest);
+    let expected_memory = expected_low_ram_usable_ranges(opts.ram_size);
+    let expected_reserved = expected_low_ram_reserved_ranges(opts.ram_size);
     assert_eq!(
-        read_guest_u64(&machine, memmap_guest),
-        EFI_MEMORY_DESCRIPTOR_SIZE
+        desc_ranges(&memmap_descs, EFI_CONVENTIONAL_MEMORY),
+        expected_memory
     );
     assert_eq!(
-        read_guest_u64(&machine, memmap_guest + 8),
-        EFI_MEMORY_DESCRIPTOR_SIZE
-    );
-    assert_eq!(read_guest_u32(&machine, memmap_guest + 16), 1);
-    assert_eq!(
-        read_guest_u32(&machine, memmap_guest + 40),
-        EFI_CONVENTIONAL_MEMORY
-    );
-    assert_eq!(read_guest_u64(&machine, memmap_guest + 48), 0);
-    assert_eq!(
-        read_guest_u64(&machine, memmap_guest + 64),
-        opts.ram_size / 4096
+        desc_ranges(&memmap_descs, EFI_RESERVED_MEMORY),
+        expected_reserved
     );
 
     let fdt_addr =
@@ -374,7 +462,7 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
     );
     assert_eq!(
         fdt_prop(&props, "/memory@0", "reg"),
-        cells_for_pairs(&[(0, opts.ram_size)]).as_slice()
+        cells_for_pairs(&expected_memory).as_slice()
     );
     assert_eq!(
         fdt_prop(&props, "/cpus", "#address-cells"),
@@ -497,7 +585,17 @@ fn task47_direct_boot_exposes_physical_boot_data_addresses() {
         "EFI config entries must expose physical table addresses"
     );
     let memmap_guest = boot_guest_addr(memmap_addr);
-    assert_eq!(read_guest_u64(&machine, memmap_guest + 48), 0);
+    let memmap_descs = read_efi_memmap(&machine, memmap_guest);
+    let expected_memory = expected_low_ram_usable_ranges(opts.ram_size);
+    let expected_reserved = expected_low_ram_reserved_ranges(opts.ram_size);
+    assert_eq!(
+        desc_ranges(&memmap_descs, EFI_CONVENTIONAL_MEMORY),
+        expected_memory
+    );
+    assert_eq!(
+        desc_ranges(&memmap_descs, EFI_RESERVED_MEMORY),
+        expected_reserved
+    );
 
     let fdt_addr =
         config_table_ptr(&machine, system_table_guest, DEVICE_TREE_GUID);
@@ -507,7 +605,7 @@ fn task47_direct_boot_exposes_physical_boot_data_addresses() {
     let props = parse_fdt_props(&read_bytes(&machine, fdt_guest, fdt_size));
     assert_eq!(
         fdt_prop(&props, "/memory@0", "reg"),
-        cells_for_pairs(&[(0, opts.ram_size)]).as_slice()
+        cells_for_pairs(&expected_memory).as_slice()
     );
 
     let initrd_table_addr = config_table_ptr(

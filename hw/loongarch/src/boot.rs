@@ -40,7 +40,9 @@ const EFI_CONFIG_TABLE_SIZE: usize = 24;
 const EFI_BOOT_MEMMAP_SIZE: usize = 40;
 const EFI_MEMORY_DESC_SIZE: usize = 40;
 const EFI_MEMORY_DESC_VERSION: u32 = 1;
+const EFI_RESERVED_MEMORY: u32 = 0;
 const EFI_CONVENTIONAL_MEMORY: u32 = 7;
+const EFI_PAGE_SIZE: u64 = 4096;
 const ELF64_EHDR_SIZE: usize = 64;
 const ELF64_PHDR_SIZE: usize = 56;
 const ET_EXEC: u16 = 2;
@@ -447,6 +449,61 @@ fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
+fn align_up_low_page(value: u64) -> u64 {
+    value.saturating_add(EFI_PAGE_SIZE - 1) & !(EFI_PAGE_SIZE - 1)
+}
+
+fn low_ram_reserved_ranges(ram_size: u64) -> Vec<(u64, u64)> {
+    let apertures = [
+        (VIRT_IPI_BASE, VIRT_IPI_SIZE),
+        (VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE),
+        (VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE),
+        (VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE),
+        (VIRT_UART_BASE, VIRT_UART_SIZE),
+    ];
+    let mut ranges: Vec<(u64, u64)> = apertures
+        .into_iter()
+        .filter_map(|(base, size)| {
+            let start = align_down(base, EFI_PAGE_SIZE).min(ram_size);
+            let end =
+                align_up_low_page(base.saturating_add(size)).min(ram_size);
+            (start < end).then_some((start, end))
+        })
+        .collect();
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some((_, last_end)) = merged.last_mut() {
+            if start <= *last_end {
+                *last_end = (*last_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+
+    merged
+        .into_iter()
+        .map(|(start, end)| (start, end - start))
+        .collect()
+}
+
+fn low_ram_usable_ranges(ram_size: u64) -> Vec<(u64, u64)> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    for (hole_start, hole_size) in low_ram_reserved_ranges(ram_size) {
+        if cursor < hole_start {
+            ranges.push((cursor, hole_start - cursor));
+        }
+        cursor = cursor.max(hole_start + hole_size);
+    }
+    if cursor < ram_size {
+        ranges.push((cursor, ram_size - cursor));
+    }
+    ranges
+}
+
 fn reject_overlap(
     range: GuestRange,
     reserved: &[GuestRange],
@@ -537,7 +594,7 @@ fn build_fdt(
 
     fdt.begin_node("memory@0");
     fdt.property_string("device_type", "memory");
-    property_reg(&mut fdt, &[(0, ram_size)]);
+    property_reg(&mut fdt, &low_ram_usable_ranges(ram_size));
     fdt.end_node();
 
     fdt.begin_node(&format!("ipi@{VIRT_IPI_BASE:x}"));
@@ -610,15 +667,27 @@ fn append_config_table(entries: &mut Vec<u8>, guid: [u8; 16], table: u64) {
 }
 
 fn build_boot_memmap(ram_size: u64) -> Vec<u8> {
-    let mut memmap = vec![0u8; EFI_BOOT_MEMMAP_SIZE + EFI_MEMORY_DESC_SIZE];
+    let mut descriptors = Vec::new();
+    for (base, size) in low_ram_usable_ranges(ram_size) {
+        descriptors.push((base, size, EFI_CONVENTIONAL_MEMORY));
+    }
+    for (base, size) in low_ram_reserved_ranges(ram_size) {
+        descriptors.push((base, size, EFI_RESERVED_MEMORY));
+    }
+    descriptors.sort_unstable_by_key(|(base, _, _)| *base);
+
+    let map_size = descriptors.len() * EFI_MEMORY_DESC_SIZE;
+    let mut memmap = vec![0u8; EFI_BOOT_MEMMAP_SIZE + map_size];
     push_le_u64(&mut memmap, 0, EFI_MEMORY_DESC_SIZE as u64);
-    push_le_u64(&mut memmap, 8, EFI_MEMORY_DESC_SIZE as u64);
+    push_le_u64(&mut memmap, 8, map_size as u64);
     push_le_u32(&mut memmap, 16, EFI_MEMORY_DESC_VERSION);
 
-    let desc = EFI_BOOT_MEMMAP_SIZE;
-    push_le_u32(&mut memmap, desc, EFI_CONVENTIONAL_MEMORY);
-    push_le_u64(&mut memmap, desc + 8, 0);
-    push_le_u64(&mut memmap, desc + 24, ram_size / 4096);
+    for (index, (base, size, ty)) in descriptors.into_iter().enumerate() {
+        let desc = EFI_BOOT_MEMMAP_SIZE + index * EFI_MEMORY_DESC_SIZE;
+        push_le_u32(&mut memmap, desc, ty);
+        push_le_u64(&mut memmap, desc + 8, base);
+        push_le_u64(&mut memmap, desc + 24, size / EFI_PAGE_SIZE);
+    }
     memmap
 }
 
