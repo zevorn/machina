@@ -45,6 +45,8 @@ mod hw_uart;
 #[cfg(test)]
 mod integration;
 #[cfg(test)]
+mod loongarch_decode;
+#[cfg(test)]
 mod memory_region;
 #[cfg(test)]
 mod monitor;

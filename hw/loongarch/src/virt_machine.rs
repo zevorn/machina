@@ -1,0 +1,7 @@
+pub const VIRT_UART_BASE: u64 = 0x1FE0_01E0;
+pub const VIRT_UART_SIZE: u64 = 0x8;
+pub const VIRT_IPI_BASE: u64 = 0x0100_0000;
+pub const VIRT_EIOINTC_BASE: u64 = 0x0200_0000;
+pub const VIRT_PCH_PIC_BASE: u64 = 0x1000_0000;
+pub const VIRT_VIRTIO_BASE: u64 = 0x1000_8000;
+pub const VIRT_RAM_BASE: u64 = 0x9000_0000_0000_0000;

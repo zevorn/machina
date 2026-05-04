@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 machina-accel = { workspace = true }
 machina-guest-riscv = { workspace = true }
+machina-guest-loongarch = { workspace = true }
 machina-decode = { workspace = true }
 machina-system = { workspace = true }
 machina-memory = { workspace = true }

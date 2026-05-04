@@ -10,6 +10,7 @@ members = [
     "core",
     "accel",
     "guest/riscv",
+    "guest/loongarch",
     "decode",
     "disas",
     "tests",
@@ -24,6 +25,7 @@ members = [
     "hw/intc",
     "hw/char",
     "hw/riscv",
+    "hw/loongarch",
     "hw/virtio",
     "tests/mtest",
     "tools/difftest",
@@ -44,12 +46,14 @@ machina-hw-core     = { version = "0.1.2", path = "hw/core" }
 machina-monitor     = { version = "0.1.2", path = "monitor" }
 machina-accel       = { version = "0.1.2", path = "accel" }
 machina-guest-riscv = { version = "0.1.2", path = "guest/riscv" }
+machina-guest-loongarch = { version = "0.1.2", path = "guest/loongarch" }
 machina-hw-char     = { version = "0.1.2", path = "hw/char" }
 machina-hw-intc     = { version = "0.1.2", path = "hw/intc" }
 machina-hw-virtio   = { version = "0.1.2", path = "hw/virtio" }
 machina-system      = { version = "0.1.2", path = "system" }
 machina-gdbstub     = { version = "0.1.2", path = "gdbstub" }
 machina-hw-riscv    = { version = "0.1.2", path = "hw/riscv" }
+machina-hw-loongarch = { version = "0.1.2", path = "hw/loongarch" }
 machina-tests       = { version = "0.1.2", path = "tests" }
 machina-mtest       = { version = "0.1.2", path = "tests/mtest" }
 machina-irdump      = { version = "0.1.2", path = "tools/irdump" }
