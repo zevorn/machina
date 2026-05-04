@@ -67,8 +67,14 @@ pub struct LoongArchCpu {
 
     pub(crate) interrupt_request: AtomicU32,
     pub(crate) halted: AtomicBool,
+    pub(crate) neg_align: i32,
+    pub(crate) last_phys_pc: u64,
 
     pub(crate) mmu: LoongArchMmu,
+
+    pub(crate) ipi_status: u64,
+    pub(crate) ipi_enable: u64,
+    pub(crate) ipi_mailbox: [u64; 4],
 
     pub(crate) as_ptr: u64,
     pub(crate) ram_base: u64,
@@ -161,7 +167,12 @@ impl LoongArchCpu {
             save: [0; NUM_SAVE],
             interrupt_request: AtomicU32::new(0),
             halted: AtomicBool::new(false),
+            neg_align: 0,
+            last_phys_pc: 0,
             mmu: LoongArchMmu::new(),
+            ipi_status: 0,
+            ipi_enable: 0,
+            ipi_mailbox: [0; 4],
             as_ptr: 0,
             ram_base: 0,
             ram_end: 0,
@@ -489,6 +500,60 @@ impl LoongArchCpu {
         self.estat = val;
     }
 
+    #[must_use]
+    pub fn is_halted(&self) -> bool {
+        self.halted.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn set_halted_flag(&mut self, val: bool) {
+        self.halted.store(val, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn take_tb_flush(&mut self) -> bool {
+        let p = self.tb_flush_pending;
+        self.tb_flush_pending = false;
+        p
+    }
+
+    #[must_use]
+    pub fn guest_base_val(&self) -> u64 {
+        self.guest_base
+    }
+
+    pub fn set_guest_base(&mut self, val: u64) {
+        self.guest_base = val;
+    }
+
+    pub fn set_ram_base(&mut self, val: u64) {
+        self.ram_base = val;
+    }
+
+    pub fn set_ram_end(&mut self, val: u64) {
+        self.ram_end = val;
+    }
+
+    pub fn set_exit_request(&mut self) {
+        self.neg_align = -1;
+    }
+
+    pub fn reset_exit_request(&mut self) {
+        self.neg_align = 0;
+    }
+
+    #[must_use]
+    pub fn neg_align_val(&self) -> i32 {
+        self.neg_align
+    }
+
+    pub fn set_last_phys_pc(&mut self, val: u64) {
+        self.last_phys_pc = val;
+    }
+
+    #[must_use]
+    pub fn last_phys_pc_val(&self) -> u64 {
+        self.last_phys_pc
+    }
+
     pub fn set_badv_raw(&mut self, val: u64) {
         self.badv = val;
     }
@@ -496,6 +561,191 @@ impl LoongArchCpu {
     #[must_use]
     pub fn tval(&self) -> u64 {
         self.tval
+    }
+
+    pub fn iocsr_read(&self, addr: u32, width: u32) -> u64 {
+        let mask: u64 = match width {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            4 => 0xFFFF_FFFF,
+            _ => u64::MAX,
+        };
+        let (reg_val, byte_off) = self.iocsr_reg_read(addr);
+        let shift = u64::from(byte_off) * 8;
+        (reg_val >> shift) & mask
+    }
+
+    fn iocsr_reg_read(&self, addr: u32) -> (u64, u32) {
+        let base = addr & !0x7;
+        let off = addr & 0x7;
+        let val = match base {
+            0x1000 => self.ipi_status | (self.ipi_enable << 32),
+            0x1008 => 0,
+            0x1020 => self.ipi_mailbox[0],
+            0x1028 => self.ipi_mailbox[1],
+            0x1030 => self.ipi_mailbox[2],
+            0x1038 => self.ipi_mailbox[3],
+            _ => 0,
+        };
+        (val, off)
+    }
+
+    pub fn iocsr_write(&mut self, addr: u32, val: u64, width: u32) {
+        let mask: u64 = match width {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            4 => 0xFFFF_FFFF,
+            _ => u64::MAX,
+        };
+        let masked_val = val & mask;
+        match addr {
+            a if (0x1000..0x1004).contains(&a) => {
+                // Status: read-only, writes ignored
+            }
+            a if (0x1004..0x1008).contains(&a) => {
+                let off = a - 0x1004;
+                let shift = u64::from(off) * 8;
+                let wmask = mask << shift;
+                let wval = masked_val << shift;
+                self.ipi_enable = (self.ipi_enable & !wmask) | wval;
+                self.update_ipi_interrupt();
+            }
+            a if (0x1008..0x100C).contains(&a) => {
+                let off = a - 0x1008;
+                let shift = u64::from(off) * 8;
+                self.ipi_status |= masked_val << shift;
+                self.update_ipi_interrupt();
+            }
+            a if (0x100C..0x1010).contains(&a) => {
+                let off = a - 0x100C;
+                let shift = u64::from(off) * 8;
+                self.ipi_status &= !(masked_val << shift);
+                self.update_ipi_interrupt();
+            }
+            0x1040 => {
+                let target = (masked_val >> 16) & 0x3FF;
+                let vector = (masked_val & 0x1F) as u32;
+                if target == 0 {
+                    self.ipi_status |= 1u64 << vector;
+                    self.update_ipi_interrupt();
+                }
+            }
+            0x1048 => {
+                let dest = 0x1020 + (masked_val as u32 & 0x1C);
+                self.send_ipi_data(dest, masked_val);
+            }
+            0x1158 => {
+                let dest = (masked_val & 0xFFFF) as u32;
+                self.send_ipi_data(dest, masked_val);
+            }
+            a if (0x1020..0x1040).contains(&a) => {
+                let mb_off = a - 0x1020;
+                let mb_idx = (mb_off / 8) as usize;
+                let byte_off = mb_off % 8;
+                if mb_idx < 4 {
+                    let shift = u64::from(byte_off) * 8;
+                    let wmask = mask << shift;
+                    let wval = masked_val << shift;
+                    let old = self.ipi_mailbox[mb_idx];
+                    self.ipi_mailbox[mb_idx] = (old & !wmask) | wval;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn send_ipi_data(&mut self, dest_addr: u32, val: u64) {
+        let target = (val >> 16) & 0x3FF;
+        if target != 0 {
+            return;
+        }
+        let data = (val >> 32) as u32;
+        let byte_mask = ((val >> 27) & 0xF) as u32;
+        let merged = self.merge_ipi_word(dest_addr, data, byte_mask);
+        self.write_local_iocsr_word(dest_addr, merged);
+    }
+
+    fn merge_ipi_word(&self, dest_addr: u32, data: u32, byte_mask: u32) -> u32 {
+        let old = self.read_local_iocsr_word(dest_addr);
+        let mut word = old;
+        for b in 0..4u32 {
+            if byte_mask & (1 << b) == 0 {
+                let s = b * 8;
+                word = (word & !(0xFF << s)) | ((data >> s & 0xFF) << s);
+            }
+        }
+        word
+    }
+
+    fn read_local_iocsr_word(&self, addr: u32) -> u32 {
+        match addr {
+            a if (0x1000..0x1004).contains(&a) => self.ipi_status as u32,
+            a if (0x1004..0x1008).contains(&a) => self.ipi_enable as u32,
+            a if (0x1020..0x1040).contains(&a) => {
+                let off = a - 0x1020;
+                let idx = (off / 8) as usize;
+                let hi = (off / 4) & 1 != 0;
+                if idx < 4 {
+                    let shift = if hi { 32 } else { 0 };
+                    ((self.ipi_mailbox[idx] >> shift) & 0xFFFF_FFFF) as u32
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    fn write_local_iocsr_word(&mut self, addr: u32, val: u32) {
+        match addr {
+            a if (0x1000..0x1004).contains(&a) => {}
+            a if (0x1004..0x1008).contains(&a) => {
+                self.ipi_enable = u64::from(val);
+                self.update_ipi_interrupt();
+            }
+            a if (0x1008..0x100C).contains(&a) => {
+                self.ipi_status |= u64::from(val);
+                self.update_ipi_interrupt();
+            }
+            a if (0x100C..0x1010).contains(&a) => {
+                self.ipi_status &= !u64::from(val);
+                self.update_ipi_interrupt();
+            }
+            a if (0x1020..0x1040).contains(&a) => {
+                let off = a - 0x1020;
+                let idx = (off / 8) as usize;
+                let hi = (off / 4) & 1 != 0;
+                if idx < 4 {
+                    let shift = if hi { 32 } else { 0 };
+                    let cleared =
+                        self.ipi_mailbox[idx] & !(0xFFFF_FFFF_u64 << shift);
+                    self.ipi_mailbox[idx] = cleared | (u64::from(val) << shift);
+                }
+            }
+            0x1040 => {
+                let target = (val >> 16) & 0x3FF;
+                if target == 0 {
+                    let vector = val & 0x1F;
+                    self.ipi_status |= 1u64 << vector;
+                    self.update_ipi_interrupt();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn update_ipi_interrupt(&mut self) {
+        let was_pending = self.estat & (1 << 12) != 0;
+        if self.ipi_status & self.ipi_enable != 0 {
+            self.estat |= 1 << 12;
+            if !was_pending {
+                self.halted
+                    .store(false, std::sync::atomic::Ordering::Release);
+                self.neg_align = -1;
+            }
+        } else {
+            self.estat &= !(1 << 12);
+        }
     }
 }
 

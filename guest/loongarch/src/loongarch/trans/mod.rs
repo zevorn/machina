@@ -2,7 +2,7 @@ pub mod gen_common;
 pub mod gen_float;
 pub mod helpers;
 
-use machina_accel::ir::tb::{EXCP_UNDEF, TB_EXIT_IDX0};
+use machina_accel::ir::tb::{EXCP_ARCH_DONE, EXCP_UNDEF, TB_EXIT_IDX0};
 use machina_accel::ir::{Context, TempIdx, Type};
 
 use super::cpu::{gpr_offset, NUM_GPRS, PC_OFFSET};
@@ -2265,7 +2265,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let csr_num = ir.new_const(Type::I64, a.csr_num as u64);
         let d = ir.new_temp(Type::I64);
@@ -2298,7 +2298,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let csr_num = ir.new_const(Type::I64, a.csr_num as u64);
         let val = gpr_get(&self.gpr, ir, a.rd as u8);
@@ -2340,7 +2340,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let csr_num = ir.new_const(Type::I64, a.csr_num as u64);
         let val = gpr_get(&self.gpr, ir, a.rd as u8);
@@ -2395,7 +2395,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
             &[env_tmp, ecode, code],
         );
         ir.gen_mov(Type::I64, self.pc, d);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -2417,7 +2417,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
             &[env_tmp, ecode, code],
         );
         ir.gen_mov(Type::I64, self.pc, d);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -2441,7 +2441,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let d = ir.new_temp(Type::I64);
         ir.gen_call(
@@ -2450,7 +2450,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
             &[env_tmp],
         );
         ir.gen_mov(Type::I64, self.pc, d);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -2474,7 +2474,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let d = ir.new_temp(Type::I64);
         ir.gen_call(
@@ -2484,7 +2484,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         );
         let pc_next = ir.new_const(Type::I64, self.base.pc_next);
         ir.gen_mov(Type::I64, self.pc, pc_next);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(machina_accel::ir::tb::EXCP_WFI);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -2508,7 +2508,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let d = ir.new_temp(Type::I64);
         ir.gen_call(
@@ -2538,7 +2538,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let d = ir.new_temp(Type::I64);
         ir.gen_call(
@@ -2568,7 +2568,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let d = ir.new_temp(Type::I64);
         ir.gen_call(
@@ -2598,7 +2598,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let d = ir.new_temp(Type::I64);
         ir.gen_call(
@@ -2629,7 +2629,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_ok = ir.new_label();
         ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
         ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_ok);
         let op = ir.new_const(Type::I64, a.rd as u64);
         let asid_val = gpr_get(&self.gpr, ir, a.rj as u8);
@@ -2644,7 +2644,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         let label_done = ir.new_label();
         ir.gen_brcond(Type::I64, d, zero2, Cond::Eq, label_done);
         ir.gen_mov(Type::I64, self.pc, d);
-        ir.gen_exit_tb(EXCP_UNDEF);
+        ir.gen_exit_tb(EXCP_ARCH_DONE);
         ir.gen_set_label(label_done);
         true
     }
@@ -2652,27 +2652,9 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
     fn trans_iocsrrd_b(
         &mut self,
         ir: &mut Context,
-        _a: &insn_decode::ArgsR2,
+        a: &insn_decode::ArgsR2,
     ) -> bool {
-        use machina_accel::ir::Cond;
-        let env_tmp = self.env;
-        let pc_val = ir.new_const(Type::I64, self.base.pc_next - 4);
-        ir.gen_mov(Type::I64, self.pc, pc_val);
-        let chk = ir.new_temp(Type::I64);
-        ir.gen_call(
-            chk,
-            helpers::loongarch_helper_check_plv as *const () as u64,
-            &[env_tmp],
-        );
-        let zero = ir.new_const(Type::I64, 0);
-        let label_ok = ir.new_label();
-        ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
-        ir.gen_mov(Type::I64, self.pc, chk);
-        ir.gen_exit_tb(EXCP_UNDEF);
-        ir.gen_set_label(label_ok);
-        ir.gen_exit_tb(EXCP_UNDEF);
-        self.base.is_jmp = DisasJumpType::NoReturn;
-        true
+        gen_iocsr_rd(self, ir, a, 1)
     }
 
     fn trans_iocsrrd_h(
@@ -2680,7 +2662,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR2,
     ) -> bool {
-        self.trans_iocsrrd_b(ir, a)
+        gen_iocsr_rd(self, ir, a, 2)
     }
 
     fn trans_iocsrrd_w(
@@ -2688,7 +2670,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR2,
     ) -> bool {
-        self.trans_iocsrrd_b(ir, a)
+        gen_iocsr_rd(self, ir, a, 4)
     }
 
     fn trans_iocsrrd_d(
@@ -2696,7 +2678,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR2,
     ) -> bool {
-        self.trans_iocsrrd_b(ir, a)
+        gen_iocsr_rd(self, ir, a, 8)
     }
 
     fn trans_iocsrwr_b(
@@ -2704,7 +2686,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR2,
     ) -> bool {
-        self.trans_iocsrrd_b(ir, a)
+        gen_iocsr_wr(self, ir, a, 1)
     }
 
     fn trans_iocsrwr_h(
@@ -2712,7 +2694,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR2,
     ) -> bool {
-        self.trans_iocsrrd_b(ir, a)
+        gen_iocsr_wr(self, ir, a, 2)
     }
 
     fn trans_iocsrwr_w(
@@ -2720,7 +2702,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR2,
     ) -> bool {
-        self.trans_iocsrrd_b(ir, a)
+        gen_iocsr_wr(self, ir, a, 4)
     }
 
     fn trans_iocsrwr_d(
@@ -2728,7 +2710,7 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
         ir: &mut Context,
         a: &insn_decode::ArgsR2,
     ) -> bool {
-        self.trans_iocsrrd_b(ir, a)
+        gen_iocsr_wr(self, ir, a, 8)
     }
 
     // FP load/store
@@ -4028,6 +4010,78 @@ impl insn_decode::Decode<Context> for LoongArchDisasContext {
     ) -> bool {
         self.trans_fcmp_cune_d(ir, a)
     }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn gen_iocsr_rd(
+    ctx: &mut LoongArchDisasContext,
+    ir: &mut Context,
+    a: &insn_decode::ArgsR2,
+    width: u64,
+) -> bool {
+    use gen_common::{gpr_get, gpr_set};
+    use machina_accel::ir::Cond;
+    let env_tmp = ctx.env;
+    let pc_val = ir.new_const(Type::I64, ctx.base.pc_next - 4);
+    ir.gen_mov(Type::I64, ctx.pc, pc_val);
+    let chk = ir.new_temp(Type::I64);
+    ir.gen_call(
+        chk,
+        helpers::loongarch_helper_check_plv as *const () as u64,
+        &[env_tmp],
+    );
+    let zero = ir.new_const(Type::I64, 0);
+    let label_ok = ir.new_label();
+    ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+    ir.gen_mov(Type::I64, ctx.pc, chk);
+    ir.gen_exit_tb(EXCP_ARCH_DONE);
+    ir.gen_set_label(label_ok);
+    let addr = gpr_get(&ctx.gpr, ir, a.rj as u8);
+    let w = ir.new_const(Type::I64, width);
+    let d = ir.new_temp(Type::I64);
+    ir.gen_call(
+        d,
+        helpers::loongarch_helper_iocsrrd as *const () as u64,
+        &[env_tmp, addr, w],
+    );
+    gpr_set(&ctx.gpr, ir, a.rd as u8, d);
+    true
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn gen_iocsr_wr(
+    ctx: &mut LoongArchDisasContext,
+    ir: &mut Context,
+    a: &insn_decode::ArgsR2,
+    width: u64,
+) -> bool {
+    use gen_common::gpr_get;
+    use machina_accel::ir::Cond;
+    let env_tmp = ctx.env;
+    let pc_val = ir.new_const(Type::I64, ctx.base.pc_next - 4);
+    ir.gen_mov(Type::I64, ctx.pc, pc_val);
+    let chk = ir.new_temp(Type::I64);
+    ir.gen_call(
+        chk,
+        helpers::loongarch_helper_check_plv as *const () as u64,
+        &[env_tmp],
+    );
+    let zero = ir.new_const(Type::I64, 0);
+    let label_ok = ir.new_label();
+    ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
+    ir.gen_mov(Type::I64, ctx.pc, chk);
+    ir.gen_exit_tb(EXCP_ARCH_DONE);
+    ir.gen_set_label(label_ok);
+    let addr = gpr_get(&ctx.gpr, ir, a.rj as u8);
+    let val = gpr_get(&ctx.gpr, ir, a.rd as u8);
+    let w = ir.new_const(Type::I64, width);
+    let d = ir.new_temp(Type::I64);
+    ir.gen_call(
+        d,
+        helpers::loongarch_helper_iocsrwr as *const () as u64,
+        &[env_tmp, addr, val, w],
+    );
+    true
 }
 
 fn decode_insn(

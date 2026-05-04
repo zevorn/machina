@@ -6,9 +6,10 @@ use super::{ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING};
 use crate::cpu::GuestCpu;
 use crate::ir::context::Context;
 use crate::ir::tb::{
-    cflags::CF_SINGLE_STEP, decode_tb_exit, TranslationBlock, EXCP_EBREAK,
-    EXCP_ECALL, EXCP_FENCE_I, EXCP_MRET, EXCP_PRIV_CSR, EXCP_SFENCE_VMA,
-    EXCP_SRET, EXCP_UNDEF, EXCP_WFI, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
+    cflags::CF_SINGLE_STEP, decode_tb_exit, TranslationBlock, EXCP_ARCH_DONE,
+    EXCP_EBREAK, EXCP_ECALL, EXCP_FENCE_I, EXCP_MRET, EXCP_PRIV_CSR,
+    EXCP_SFENCE_VMA, EXCP_SRET, EXCP_UNDEF, EXCP_WFI, EXIT_TARGET_NONE,
+    TB_EXIT_NOCHAIN,
 };
 use crate::translate::translate;
 use crate::HostCodeGen;
@@ -410,6 +411,10 @@ where
                 // tval=0 per RISC-V spec (mtval is either 0
                 // or the faulting insn word; we use 0).
                 cpu.handle_exception(2, 0);
+            }
+            v if v == EXCP_ARCH_DONE as usize => {
+                // Helper already handled the architectural event
+                // (set CSR state, updated PC). Just continue.
             }
             _ => {
                 per_cpu.stats.real_exit += 1;

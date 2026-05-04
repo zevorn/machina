@@ -4,6 +4,7 @@ pub mod builtin;
 pub mod cpus;
 pub mod gdb;
 pub mod gdb_csr;
+pub mod loongarch_cpu;
 
 pub use builtin::FirmwareCallFn;
 pub use cpus::FullSystemCpu;

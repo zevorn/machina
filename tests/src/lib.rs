@@ -27,6 +27,8 @@ mod hw_chardev;
 #[cfg(test)]
 mod hw_clock;
 #[cfg(test)]
+mod hw_eiointc;
+#[cfg(test)]
 mod hw_fdt;
 #[cfg(test)]
 mod hw_irq;
@@ -50,6 +52,8 @@ mod loongarch_decode;
 mod loongarch_fpu;
 #[cfg(test)]
 mod loongarch_priv;
+#[cfg(test)]
+mod loongarch_system;
 #[cfg(test)]
 mod memory_region;
 #[cfg(test)]

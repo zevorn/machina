@@ -499,3 +499,258 @@ fn dmw_no_match_wrong_plv() {
     let result = mmu::dmw_match(&cpu, va);
     assert_eq!(result, None);
 }
+
+#[test]
+fn iocsr_width_byte_read() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1020, 0xDEAD_BEEF_1234_5678, 8);
+    assert_eq!(cpu.iocsr_read(0x1020, 1), 0x78);
+    assert_eq!(cpu.iocsr_read(0x1020, 2), 0x5678);
+    assert_eq!(cpu.iocsr_read(0x1020, 4), 0x1234_5678);
+    assert_eq!(cpu.iocsr_read(0x1020, 8), 0xDEAD_BEEF_1234_5678);
+}
+
+#[test]
+fn iocsr_ipi_set_asserts_estat_is12() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0x1, 4); // enable bit 0
+    cpu.iocsr_write(0x1008, 0x1, 4); // set bit 0
+    assert_ne!(cpu.csr_read(CSR_ESTAT) & (1 << 12), 0);
+}
+
+#[test]
+fn iocsr_ipi_clear_deasserts_estat_is12() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0x1, 4);
+    cpu.iocsr_write(0x1008, 0x1, 4);
+    assert_ne!(cpu.csr_read(CSR_ESTAT) & (1 << 12), 0);
+    cpu.iocsr_write(0x100C, 0x1, 4); // clear
+    assert_eq!(cpu.csr_read(CSR_ESTAT) & (1 << 12), 0);
+}
+
+#[test]
+fn iocsr_ipi_masked_no_interrupt() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0x0, 4); // enable=0
+    cpu.iocsr_write(0x1008, 0x1, 4); // set bit 0
+    assert_eq!(cpu.csr_read(CSR_ESTAT) & (1 << 12), 0);
+}
+
+#[test]
+fn iocsr_partial_write_preserves_upper_bits() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1020, 0xDEAD_BEEF_1234_5678, 8);
+    cpu.iocsr_write(0x1020, 0xAA, 1); // byte write
+    assert_eq!(cpu.iocsr_read(0x1020, 8), 0xDEAD_BEEF_1234_56AA);
+}
+
+#[test]
+fn iocsr_word_write_preserves_upper_word() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1020, 0xFFFF_FFFF_0000_0000, 8);
+    cpu.iocsr_write(0x1020, 0x1234_5678, 4);
+    assert_eq!(cpu.iocsr_read(0x1020, 8), 0xFFFF_FFFF_1234_5678);
+}
+
+#[test]
+fn iocsr_ipi_send_triggers_self_ipi() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0x3, 4); // enable bits 0,1
+                                     // Send vector=0 to CPU 0: val = (0 << 16) | 0
+    cpu.iocsr_write(0x1040, 0x0, 4);
+    assert_eq!(cpu.iocsr_read(0x1000, 4), 1); // bit 0 set
+    assert_ne!(cpu.csr_read(CSR_ESTAT) & (1 << 12), 0);
+}
+
+#[test]
+fn iocsr_ipi_send_vector_decode() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0xFF, 4); // enable bits 0-7
+                                      // Send vector=3 to CPU 0: val = 3
+    cpu.iocsr_write(0x1040, 3, 4);
+    assert_eq!(cpu.iocsr_read(0x1000, 4) & (1 << 3), 1 << 3);
+}
+
+#[test]
+fn iocsr_mailbox_high_lane() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1020, 0xAAAA_BBBB, 4); // low word
+    cpu.iocsr_write(0x1024, 0xCCCC_DDDD, 4); // high word
+    assert_eq!(cpu.iocsr_read(0x1020, 4), 0xAAAA_BBBB);
+    assert_eq!(cpu.iocsr_read(0x1024, 4), 0xCCCC_DDDD);
+    assert_eq!(cpu.iocsr_read(0x1020, 8), 0xCCCC_DDDD_AAAA_BBBB);
+}
+
+#[test]
+fn iocsr_ipi_send_nonzero_target_no_effect() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0xFF, 4);
+    // Send vector=0 to target CPU 1: val = (1 << 16) | 0
+    cpu.iocsr_write(0x1040, 1 << 16, 4);
+    assert_eq!(cpu.iocsr_read(0x1000, 4), 0); // no self-delivery
+    assert_eq!(cpu.csr_read(CSR_ESTAT) & (1 << 12), 0);
+}
+
+#[test]
+fn iocsr_mail_send_writes_all_bytes() {
+    let mut cpu = LoongArchCpu::new();
+    // mask=0x0 means write ALL bytes (no preserve)
+    let data: u64 = 0xDEAD_BEEF;
+    let byte_mask: u64 = 0x0;
+    let val = (data << 32) | (byte_mask << 27);
+    cpu.iocsr_write(0x1048, val, 8);
+    assert_eq!(cpu.iocsr_read(0x1020, 4), 0xDEAD_BEEF);
+}
+
+#[test]
+fn iocsr_mail_send_partial_mask_preserves() {
+    let mut cpu = LoongArchCpu::new();
+    // Seed mailbox with known value
+    cpu.iocsr_write(0x1020, 0xAAAA_BBBB, 4);
+    // mask=0x5 preserves bytes 0 and 2, writes bytes 1 and 3
+    // data=0x1122_3344
+    let data: u64 = 0x1122_3344;
+    let byte_mask: u64 = 0x5; // preserve byte 0 and byte 2
+    let val = (data << 32) | (byte_mask << 27);
+    cpu.iocsr_write(0x1048, val, 8);
+    // byte0 preserved (0xBB), byte1 written (0x33),
+    // byte2 preserved (0xAA), byte3 written (0x11)
+    assert_eq!(cpu.iocsr_read(0x1020, 4), 0x11AA_33BB);
+}
+
+#[test]
+fn iocsr_byte_offset_read() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1020, 0xDEAD_BEEF_1234_5678, 8);
+    assert_eq!(cpu.iocsr_read(0x1021, 1), 0x56);
+    assert_eq!(cpu.iocsr_read(0x1022, 2), 0x1234);
+    assert_eq!(cpu.iocsr_read(0x1024, 4), 0xDEAD_BEEF);
+}
+
+#[test]
+fn iocsr_byte_offset_write() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1020, 0x0000_0000_0000_0000, 8);
+    cpu.iocsr_write(0x1021, 0xAB, 1);
+    assert_eq!(cpu.iocsr_read(0x1020, 8), 0x0000_0000_0000_AB00);
+}
+
+#[test]
+fn iocsr_enable_byte_offset() {
+    let mut cpu = LoongArchCpu::new();
+    // Enable is at offset 4 within the 0x1000 block
+    cpu.iocsr_write(0x1004, 0xFF, 4);
+    assert_eq!(cpu.iocsr_read(0x1004, 4), 0xFF);
+    // Read byte 5 (first byte of enable)
+    assert_eq!(cpu.iocsr_read(0x1005, 1), 0);
+}
+
+#[test]
+fn iocsr_any_send_writes_mailbox() {
+    let mut cpu = LoongArchCpu::new();
+    // ANY_SEND to address 0x1020 (lane 0 low word), mask=0, data=0x4242
+    let data: u64 = 0x4242_4242;
+    let byte_mask: u64 = 0x0;
+    let addr: u64 = 0x1020;
+    let val = (data << 32) | (byte_mask << 27) | addr;
+    cpu.iocsr_write(0x1158, val, 8);
+    assert_eq!(cpu.iocsr_read(0x1020, 4), 0x4242_4242);
+}
+
+#[test]
+fn iocsr_any_send_to_high_lane() {
+    let mut cpu = LoongArchCpu::new();
+    // ANY_SEND to address 0x1024 (lane 0 high word)
+    let data: u64 = 0xBEEF_CAFE;
+    let byte_mask: u64 = 0x0;
+    let addr: u64 = 0x1024;
+    let val = (data << 32) | (byte_mask << 27) | addr;
+    cpu.iocsr_write(0x1158, val, 8);
+    assert_eq!(cpu.iocsr_read(0x1024, 4), 0xBEEF_CAFE);
+}
+
+#[test]
+fn iocsr_any_send_to_set_register() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0xFF, 4); // enable
+                                      // ANY_SEND to CORE_SET (0x1008), data=0x01, mask=0
+    let data: u64 = 0x0000_0001;
+    let addr: u64 = 0x1008;
+    let val = (data << 32) | addr;
+    cpu.iocsr_write(0x1158, val, 8);
+    assert_eq!(cpu.iocsr_read(0x1000, 4) & 1, 1);
+    assert_ne!(cpu.csr_read(CSR_ESTAT) & (1 << 12), 0);
+}
+
+#[test]
+fn iocsr_any_send_to_ipi_send_register() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0xFF, 4); // enable
+                                      // ANY_SEND to 0x1040 (IPI_SEND), data encodes target=0, vector=2
+    let data: u64 = 2; // target=0(bits[25:16]=0), vector=2(bits[4:0]=2)
+    let addr: u64 = 0x1040;
+    let val = (data << 32) | addr;
+    cpu.iocsr_write(0x1158, val, 8);
+    assert_eq!(cpu.iocsr_read(0x1000, 4) & (1 << 2), 1 << 2);
+    assert_ne!(cpu.csr_read(CSR_ESTAT) & (1 << 12), 0);
+}
+
+#[test]
+fn iocsr_any_send_to_ipi_send_nonzero_target() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0xFF, 4);
+    // ANY_SEND to 0x1040, merged data has target=1, vector=2
+    let data: u64 = (1 << 16) | 2; // target=1, vector=2
+    let addr: u64 = 0x1040;
+    let val = (data << 32) | addr;
+    cpu.iocsr_write(0x1158, val, 8);
+    // Should NOT self-deliver because target != 0
+    assert_eq!(cpu.iocsr_read(0x1000, 4), 0);
+    assert_eq!(cpu.csr_read(CSR_ESTAT) & (1 << 12), 0);
+}
+
+#[test]
+fn ipi_pending_transition_wakes_halted() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.set_halted_flag(true);
+    cpu.iocsr_write(0x1004, 0x1, 4); // enable bit 0
+    cpu.iocsr_write(0x1008, 0x1, 4); // set bit 0 → pending
+    assert!(!cpu.is_halted());
+}
+
+#[test]
+fn ipi_pending_transition_requests_chain_break() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0x1, 4);
+    cpu.iocsr_write(0x1008, 0x1, 4);
+    // neg_align should be -1 after pending transition
+    assert_eq!(cpu.neg_align_val(), -1);
+}
+
+#[test]
+fn iocsr_status_write_is_noop() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1004, 0x1, 4); // enable
+    cpu.iocsr_write(0x1008, 0x1, 4); // set → status=1
+    assert_eq!(cpu.iocsr_read(0x1000, 4), 1);
+    cpu.iocsr_write(0x1000, 0xFF, 4); // write to status: no-op
+    assert_eq!(cpu.iocsr_read(0x1000, 4), 1);
+}
+
+#[test]
+fn iocsr_set_byte_offset() {
+    let mut cpu = LoongArchCpu::new();
+    // Byte write to set register at offset 1 (0x1009)
+    cpu.iocsr_write(0x1009, 0x01, 1); // sets bit 8 in status
+    assert_eq!(cpu.iocsr_read(0x1000, 4) & 0x100, 0x100);
+}
+
+#[test]
+fn iocsr_clear_byte_offset() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.iocsr_write(0x1008, 0xFFFF, 4); // set bits 0-15
+    assert_eq!(cpu.iocsr_read(0x1000, 4), 0xFFFF);
+    // Clear byte at offset 1 (0x100D) = clear bits 8-15
+    cpu.iocsr_write(0x100D, 0xFF, 1);
+    assert_eq!(cpu.iocsr_read(0x1000, 4), 0x00FF);
+}

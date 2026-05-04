@@ -4,7 +4,7 @@
     clippy::cast_possible_wrap
 )]
 
-use machina_accel::ir::tb::EXCP_UNDEF;
+use machina_accel::ir::tb::EXCP_ARCH_DONE;
 use machina_accel::ir::{Cond, Context, TempIdx, Type};
 
 use super::helpers;
@@ -84,7 +84,7 @@ pub fn check_fpe(ctx: &mut LoongArchDisasContext, ir: &mut Context) -> bool {
     let label_ok = ir.new_label();
     ir.gen_brcond(Type::I64, chk, zero, Cond::Eq, label_ok);
     ir.gen_mov(Type::I64, ctx.pc, chk);
-    ir.gen_exit_tb(EXCP_UNDEF);
+    ir.gen_exit_tb(EXCP_ARCH_DONE);
     ir.gen_set_label(label_ok);
     true
 }

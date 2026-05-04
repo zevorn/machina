@@ -540,6 +540,32 @@ pub extern "C" fn loongarch_helper_fcvt_d_s(a: u64) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_iocsrrd(
+    env: *mut u8,
+    addr: u64,
+    width: u64,
+) -> u64 {
+    let cpu = &*(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.iocsr_read(addr as u32, width as u32)
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
+pub unsafe extern "C" fn loongarch_helper_iocsrwr(
+    env: *mut u8,
+    addr: u64,
+    val: u64,
+    width: u64,
+) -> u64 {
+    let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
+    cpu.iocsr_write(addr as u32, val, width as u32);
+    0
+}
+
+/// # Safety
+/// `env` must point to a valid `LoongArchCpu`.
+#[no_mangle]
 pub unsafe extern "C" fn loongarch_helper_cpucfg(
     _env: *mut u8,
     index: u64,
