@@ -375,7 +375,7 @@ impl Machine for LoongArchVirtMachine {
                 Box::new(blk),
                 cascade.virtio_irq_line(0),
                 ram_block.as_ptr(),
-                VIRT_RAM_BASE,
+                0,
                 opts.ram_size,
             );
             mmio.attach_to_bus(&mut sysbus)?;

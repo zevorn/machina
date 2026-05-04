@@ -140,6 +140,31 @@ fn task87_virt_board_rejects_unsupported_virtio_net_options() {
 }
 
 #[test]
+fn task88_virtio_dma_uses_guest_low_ram_base() {
+    let mut image = tempfile::NamedTempFile::new().unwrap();
+    image.write_all(&[0u8; 512]).unwrap();
+
+    let mut opts = default_opts();
+    opts.drive = Some(image.path().to_path_buf());
+
+    let mut machine = LoongArchVirtMachine::new();
+    machine.init(&opts).expect("init loongarch virt with drive");
+
+    let (_ram_ptr, ram_base, ram_size) = machine
+        .virtio_mmio()
+        .expect("virtio-mmio0")
+        .shared_state()
+        .lock()
+        .unwrap()
+        .ram_info();
+    assert_eq!(
+        ram_base, 0,
+        "virtio DMA must use the low physical RAM base visible to Linux"
+    );
+    assert_eq!(ram_size, opts.ram_size);
+}
+
+#[test]
 fn task42_virt_board_installs_iocsr_and_uart_cascade() {
     let mut machine = LoongArchVirtMachine::new();
     machine.init(&default_opts()).expect("init loongarch virt");
