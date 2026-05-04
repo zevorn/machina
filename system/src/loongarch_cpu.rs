@@ -22,9 +22,6 @@ pub const LOONGARCH_TB_FLAG_DA: u32 = 1 << 2;
 pub const LOONGARCH_TB_FLAG_PG: u32 = 1 << 3;
 pub const LOONGARCH_TB_FLAG_FPE: u32 = 1 << 4;
 
-const ECFG_VS_SHIFT: u64 = 16;
-const ECFG_VS_MASK: u64 = 0x7;
-const EXCCODE_EXTERNAL_INT: u32 = 64;
 const TARGET_PAGE_SIZE: u64 = 0x1000;
 const TARGET_PAGE_MASK: u64 = !(TARGET_PAGE_SIZE - 1);
 const TARGET_PAGE_OFFSET_MASK: u64 = TARGET_PAGE_SIZE - 1;
@@ -159,9 +156,7 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn has_pending_irq(&self) -> bool {
-        let estat = self.cpu.estat();
-        let ecfg = self.cpu.ecfg();
-        (estat & ecfg & 0x1FFF) != 0
+        self.cpu.masked_interrupt_line().is_some()
     }
 
     fn is_halted(&self) -> bool {
@@ -177,12 +172,9 @@ impl GuestCpu for LoongArchFullSystemCpu {
     }
 
     fn handle_interrupt(&mut self) {
-        if !self.cpu.pending_interrupt() {
+        let Some(irq) = self.cpu.pending_interrupt_line() else {
             return;
-        }
-        let pending = self.cpu.estat() & self.cpu.ecfg() & ESTAT_IS_MASK;
-        let irq = 63_u32 - pending.leading_zeros();
-        let vs = (self.cpu.ecfg() >> ECFG_VS_SHIFT) & ECFG_VS_MASK;
+        };
         let vec = unsafe {
             machina_guest_loongarch::loongarch::trans::helpers
                 ::loongarch_helper_raise_exception(
@@ -191,14 +183,8 @@ impl GuestCpu for LoongArchFullSystemCpu {
                     0,
                 )
         };
-        let pc = if vs == 0 {
-            vec
-        } else {
-            self.cpu.csr_read(CSR_EENTRY).wrapping_add(
-                u64::from(EXCCODE_EXTERNAL_INT + irq) * ((1_u64 << vs) * 4),
-            )
-        };
-        self.cpu.set_pc(pc);
+        self.cpu
+            .set_pc(self.cpu.external_interrupt_vector(irq, vec));
     }
 
     fn handle_exception(&mut self, _cause: u64, _tval: u64) {

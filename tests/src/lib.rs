@@ -31,9 +31,13 @@ mod hw_eiointc;
 #[cfg(test)]
 mod hw_fdt;
 #[cfg(test)]
+mod hw_ipi;
+#[cfg(test)]
 mod hw_irq;
 #[cfg(test)]
 mod hw_loader;
+#[cfg(test)]
+mod hw_pch_pic;
 #[cfg(test)]
 mod hw_plic;
 #[cfg(test)]
@@ -56,6 +60,14 @@ mod loongarch_decode;
 mod loongarch_difftest;
 #[cfg(test)]
 mod loongarch_fpu;
+#[cfg(test)]
+mod loongarch_interrupt;
+#[cfg(test)]
+mod loongarch_interrupt_matrix;
+#[cfg(test)]
+mod loongarch_iocsr;
+#[cfg(test)]
+mod loongarch_irq_cascade;
 #[cfg(test)]
 mod loongarch_memory;
 #[cfg(test)]

@@ -22,6 +22,7 @@ pub const NUM_SAVE: usize = 8;
 const TIMER_INTERRUPT_BIT: u64 = 1 << 11;
 const ECFG_VS_SHIFT: u64 = 16;
 const ECFG_VS_MASK: u64 = 0x7;
+const EXCCODE_EXTERNAL_INT: u32 = 64;
 const TLBENTRY_HUGE: u64 = 1 << 6;
 const TLBENTRY_HGLOBAL: u64 = 1 << 12;
 const TLBENTRY_LEVEL_SHIFT: u64 = 13;
@@ -100,6 +101,7 @@ pub struct LoongArchCpu {
     pub(crate) ipi_status: u64,
     pub(crate) ipi_enable: u64,
     pub(crate) ipi_mailbox: [u64; 4],
+    pub(crate) iocsr_dispatcher: IocsrDispatcher,
 
     pub(crate) as_ptr: u64,
     pub(crate) ram_base: u64,
@@ -154,6 +156,80 @@ const fn fcsr_subregister_mask(idx: u32) -> u32 {
         2 => FCSR_FLAGS_MASK | FCSR_CAUSE_MASK,
         3 => FCSR_RM_MASK,
         _ => 0,
+    }
+}
+
+fn mask_iocsr_width(val: u64, width: u32) -> u64 {
+    match width {
+        1 => val & 0xff,
+        2 => val & 0xffff,
+        4 => val & 0xffff_ffff,
+        _ => val,
+    }
+}
+
+pub type IocsrReadFn = unsafe extern "C" fn(
+    opaque: *mut (),
+    cpu_id: u32,
+    addr: u32,
+    width: u32,
+    out: *mut u64,
+) -> bool;
+pub type IocsrWriteFn = unsafe extern "C" fn(
+    opaque: *mut (),
+    cpu_id: u32,
+    addr: u32,
+    width: u32,
+    val: u64,
+) -> bool;
+
+#[derive(Clone, Copy)]
+pub struct IocsrDispatcher {
+    opaque: usize,
+    read: Option<IocsrReadFn>,
+    write: Option<IocsrWriteFn>,
+}
+
+impl IocsrDispatcher {
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            opaque: 0,
+            read: None,
+            write: None,
+        }
+    }
+
+    #[must_use]
+    pub fn new(
+        opaque: *mut (),
+        read: IocsrReadFn,
+        write: IocsrWriteFn,
+    ) -> Self {
+        Self {
+            opaque: opaque as usize,
+            read: Some(read),
+            write: Some(write),
+        }
+    }
+
+    fn read(&self, cpu_id: u32, addr: u32, width: u32) -> Option<u64> {
+        let read = self.read?;
+        let mut out = 0;
+        if unsafe {
+            read(self.opaque as *mut (), cpu_id, addr, width, &mut out)
+        } {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    fn write(&self, cpu_id: u32, addr: u32, width: u32, val: u64) -> bool {
+        let Some(write) = self.write else {
+            return false;
+        };
+        unsafe { write(self.opaque as *mut (), cpu_id, addr, width, val) }
     }
 }
 
@@ -228,6 +304,7 @@ impl LoongArchCpu {
             ipi_status: 0,
             ipi_enable: 0,
             ipi_mailbox: [0; 4],
+            iocsr_dispatcher: IocsrDispatcher::none(),
             as_ptr: 0,
             ram_base: 0,
             ram_end: 0,
@@ -248,10 +325,12 @@ impl LoongArchCpu {
 
     pub(crate) fn set_crmd(&mut self, val: u64) {
         let old = self.crmd;
+        let was_pending = self.pending_interrupt();
         self.crmd = val;
         if (old ^ val) & (CRMD_PLV_MASK | CRMD_DA | CRMD_PG) != 0 {
             self.flush_fast_tlb();
         }
+        self.wake_if_new_enabled_interrupt(was_pending);
     }
 
     pub(crate) fn set_asid_low(&mut self, val: u64) {
@@ -275,6 +354,14 @@ impl LoongArchCpu {
     #[must_use]
     pub const fn era(&self) -> u64 {
         self.era
+    }
+
+    pub fn set_cpuid(&mut self, cpuid: u64) {
+        self.cpuid = cpuid;
+    }
+
+    pub fn set_iocsr_dispatcher(&mut self, dispatcher: IocsrDispatcher) {
+        self.iocsr_dispatcher = dispatcher;
     }
 
     pub(crate) const fn set_era(&mut self, val: u64) {
@@ -352,12 +439,42 @@ impl LoongArchCpu {
     }
 
     #[must_use]
-    pub fn pending_interrupt(&self) -> bool {
-        use super::csr::CRMD_IE;
-        if self.crmd & CRMD_IE == 0 {
-            return false;
+    pub fn masked_interrupt_line(&self) -> Option<u32> {
+        let pending = self.estat & self.ecfg & ESTAT_IS_MASK;
+        if pending == 0 {
+            None
+        } else {
+            Some(63_u32 - pending.leading_zeros())
         }
-        (self.estat & self.ecfg & 0x1FFF) != 0
+    }
+
+    #[must_use]
+    pub fn pending_interrupt_line(&self) -> Option<u32> {
+        if self.crmd & CRMD_IE == 0 {
+            return None;
+        }
+        self.masked_interrupt_line()
+    }
+
+    #[must_use]
+    pub fn pending_interrupt(&self) -> bool {
+        self.pending_interrupt_line().is_some()
+    }
+
+    #[must_use]
+    pub fn external_interrupt_vector(
+        &self,
+        irq: u32,
+        default_vector: u64,
+    ) -> u64 {
+        let vs = (self.ecfg >> ECFG_VS_SHIFT) & ECFG_VS_MASK;
+        if vs == 0 {
+            default_vector
+        } else {
+            self.eentry.wrapping_add(
+                u64::from(EXCCODE_EXTERNAL_INT + irq) * ((1_u64 << vs) * 4),
+            )
+        }
     }
 
     pub fn read_fcsr(&self) -> u32 {
@@ -928,7 +1045,9 @@ impl LoongArchCpu {
     }
 
     pub fn set_estat_hw(&mut self, val: u64) {
+        let was_pending = self.pending_interrupt();
         self.estat = val;
+        self.wake_if_new_enabled_interrupt(was_pending);
     }
 
     #[must_use]
@@ -1039,6 +1158,15 @@ impl LoongArchCpu {
     }
 
     pub fn iocsr_read(&self, addr: u32, width: u32) -> u64 {
+        if let Some(val) =
+            self.iocsr_dispatcher.read(self.cpuid as u32, addr, width)
+        {
+            return mask_iocsr_width(val, width);
+        }
+        self.local_iocsr_read(addr, width)
+    }
+
+    fn local_iocsr_read(&self, addr: u32, width: u32) -> u64 {
         let mask: u64 = match width {
             1 => 0xFF,
             2 => 0xFFFF,
@@ -1066,6 +1194,16 @@ impl LoongArchCpu {
     }
 
     pub fn iocsr_write(&mut self, addr: u32, val: u64, width: u32) {
+        if self
+            .iocsr_dispatcher
+            .write(self.cpuid as u32, addr, width, val)
+        {
+            return;
+        }
+        self.local_iocsr_write(addr, val, width);
+    }
+
+    fn local_iocsr_write(&mut self, addr: u32, val: u64, width: u32) {
         let mask: u64 = match width {
             1 => 0xFF,
             2 => 0xFFFF,
@@ -1214,27 +1352,51 @@ impl LoongArchCpu {
         if self.ipi_status & self.ipi_enable != 0 {
             self.estat |= 1 << 12;
             if !was_pending {
-                self.halted
-                    .store(false, std::sync::atomic::Ordering::Release);
-                self.neg_align = -1;
+                self.wake_for_interrupt_request();
             }
         } else {
             self.estat &= !(1 << 12);
         }
     }
 
+    pub fn set_hwi_interrupt_pending(&mut self, hwi: u8, pending: bool) {
+        if hwi >= 8 {
+            return;
+        }
+        self.set_interrupt_bit_pending(2 + u32::from(hwi), pending);
+    }
+
+    pub fn set_ipi_interrupt_pending(&mut self, pending: bool) {
+        self.set_interrupt_bit_pending(12, pending);
+    }
+
     pub(crate) fn set_timer_interrupt_pending(&mut self, pending: bool) {
-        let was_pending = self.estat & TIMER_INTERRUPT_BIT != 0;
+        self.set_interrupt_bit_pending(11, pending);
+    }
+
+    fn set_interrupt_bit_pending(&mut self, bit: u32, pending: bool) {
+        let mask = 1_u64 << bit;
+        let was_pending = self.estat & mask != 0;
         if pending {
-            self.estat |= TIMER_INTERRUPT_BIT;
+            self.estat |= mask;
             if !was_pending {
-                self.halted
-                    .store(false, std::sync::atomic::Ordering::Release);
-                self.neg_align = -1;
+                self.wake_for_interrupt_request();
             }
         } else {
-            self.estat &= !TIMER_INTERRUPT_BIT;
+            self.estat &= !mask;
         }
+    }
+
+    pub(crate) fn wake_if_new_enabled_interrupt(&mut self, was_pending: bool) {
+        if !was_pending && self.pending_interrupt() {
+            self.wake_for_interrupt_request();
+        }
+    }
+
+    fn wake_for_interrupt_request(&mut self) {
+        self.halted
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.set_exit_request();
     }
 }
 

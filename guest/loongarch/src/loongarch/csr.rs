@@ -204,11 +204,17 @@ impl LoongArchCpu {
             CSR_CRMD => self.set_crmd(val),
             CSR_PRMD => self.prmd = val,
             CSR_EUEN => self.euen = val,
-            CSR_ECFG => self.ecfg = val,
+            CSR_ECFG => {
+                let was_pending = self.pending_interrupt();
+                self.ecfg = val;
+                self.wake_if_new_enabled_interrupt(was_pending);
+            }
             CSR_ESTAT => {
+                let was_pending = self.pending_interrupt();
                 // Only IS[1:0] writable; preserve hardware-set bits
                 self.estat =
                     (self.estat & !ESTAT_WRITE_MASK) | (val & ESTAT_WRITE_MASK);
+                self.wake_if_new_enabled_interrupt(was_pending);
             }
             CSR_ERA => self.era = val,
             CSR_BADV => self.badv = val,
