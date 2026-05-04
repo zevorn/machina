@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use crate::code_buffer::CodeBuffer;
-use crate::x86_64::regs::Reg;
+use crate::x86_64::regs::{Reg, CALL_ARG_REGS};
 
 // -- Prefix flags (matching QEMU's P_* constants) --
 
@@ -1540,9 +1540,9 @@ impl X86_64CodeGen {
         }
 
         Self::emit_save_caller_regs(buf);
-        emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);
-        emit_load(buf, true, Reg::Rsi, Reg::Rsp, Self::MMIO_SCRATCH);
-        emit_mov_ri(buf, false, Reg::Rdx, size_bytes as u64);
+        emit_mov_rr(buf, true, CALL_ARG_REGS[0], Reg::Rbp);
+        emit_load(buf, true, CALL_ARG_REGS[1], Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_mov_ri(buf, false, CALL_ARG_REGS[2], size_bytes as u64);
         emit_mov_ri(buf, true, Reg::R11, cfg.load_helper);
         emit_call_reg(buf, Reg::R11);
 
@@ -1685,10 +1685,16 @@ impl X86_64CodeGen {
         }
 
         Self::emit_save_caller_regs(buf);
-        emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);
-        emit_load(buf, true, Reg::Rsi, Reg::Rsp, Self::MMIO_SCRATCH);
-        emit_load(buf, true, Reg::Rdx, Reg::Rsp, Self::MMIO_SCRATCH + 8);
-        emit_mov_ri(buf, false, Reg::Rcx, size_bytes as u64);
+        emit_mov_rr(buf, true, CALL_ARG_REGS[0], Reg::Rbp);
+        emit_load(buf, true, CALL_ARG_REGS[1], Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_load(
+            buf,
+            true,
+            CALL_ARG_REGS[2],
+            Reg::Rsp,
+            Self::MMIO_SCRATCH + 8,
+        );
+        emit_mov_ri(buf, false, CALL_ARG_REGS[3], size_bytes as u64);
         emit_mov_ri(buf, true, Reg::R11, cfg.store_helper);
         emit_call_reg(buf, Reg::R11);
         Self::emit_restore_caller_regs(buf);

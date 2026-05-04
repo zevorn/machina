@@ -3,7 +3,7 @@ use crate::constraint::OpConstraint;
 use crate::ir::{Cond, Context, Op, Opcode, Type};
 use crate::x86_64::emitter::*;
 use crate::x86_64::regs::{
-    Reg, CALLEE_SAVED, CALL_ARG_REGS, STACK_ADDEND, STATIC_CALL_ARGS_SIZE,
+    Reg, CALLEE_SAVED, STACK_ADDEND, STATIC_CALL_ARGS_SIZE, TB_ENTRY_ARG_REGS,
 };
 use crate::HostCodeGen;
 
@@ -17,14 +17,14 @@ impl HostCodeGen for X86_64CodeGen {
         for &reg in CALLEE_SAVED {
             emit_push(buf, reg);
         }
-        // mov TCG_AREG0 (rbp), rdi
-        emit_mov_rr(buf, true, Reg::Rbp, CALL_ARG_REGS[0]);
+        // Move the TB entry's first argument into TCG_AREG0 (RBP).
+        emit_mov_rr(buf, true, Reg::Rbp, TB_ENTRY_ARG_REGS[0]);
         // Load guest_base into R14: mov r14, [rbp+guest_base_offset]
         emit_load(buf, true, Reg::R14, Reg::Rbp, self.guest_base_offset);
         // sub rsp, STACK_ADDEND
         emit_arith_ri(buf, ArithOp::Sub, true, Reg::Rsp, STACK_ADDEND as i32);
-        // jmp *rsi (TB code pointer)
-        emit_jmp_reg(buf, CALL_ARG_REGS[1]);
+        // Jump to the TB pointer passed as the TB entry's second argument.
+        emit_jmp_reg(buf, TB_ENTRY_ARG_REGS[1]);
         self.code_gen_start = buf.offset();
     }
 

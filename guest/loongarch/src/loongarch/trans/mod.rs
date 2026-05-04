@@ -131,7 +131,7 @@ fn gen_predicate_addr(
     ir: &mut Context,
     rj: u8,
     rk: u8,
-    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64) -> u64,
+    helper: unsafe extern "sysv64" fn(*mut u8, u64, u64, u64) -> u64,
 ) -> TempIdx {
     gen_fp_predicate_assert(ctx, ir, rj, rk, helper);
     gen_common::gpr_get(&ctx.gpr, ir, rj)
@@ -186,7 +186,7 @@ fn gen_fp_predicate_assert(
     ir: &mut Context,
     rj: u8,
     rk: u8,
-    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64) -> u64,
+    helper: unsafe extern "sysv64" fn(*mut u8, u64, u64, u64) -> u64,
 ) {
     use machina_accel::ir::Cond;
 

@@ -102,7 +102,7 @@ pub fn gen_fp_arith_s(
     fd: u8,
     fj: u8,
     fk: u8,
-    helper: unsafe extern "C" fn(u64, u64) -> u64,
+    helper: unsafe extern "sysv64" fn(u64, u64) -> u64,
 ) {
     let a = fpr_get(ctx, ir, fj);
     let b = fpr_get(ctx, ir, fk);
@@ -117,7 +117,7 @@ pub fn gen_fp_arith_fcsr(
     fd: u8,
     fj: u8,
     fk: u8,
-    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64, u64) -> u64,
+    helper: unsafe extern "sysv64" fn(*mut u8, u64, u64, u64, u64) -> u64,
 ) {
     let a = fpr_get(ctx, ir, fj);
     let b = fpr_get(ctx, ir, fk);
@@ -137,7 +137,7 @@ pub fn gen_fp_unary(
     ir: &mut Context,
     fd: u8,
     fj: u8,
-    helper: unsafe extern "C" fn(u64) -> u64,
+    helper: unsafe extern "sysv64" fn(u64) -> u64,
 ) {
     let a = fpr_get(ctx, ir, fj);
     let d = ir.new_temp(Type::I64);
@@ -150,7 +150,7 @@ pub fn gen_fp_unary_fcsr(
     ir: &mut Context,
     fd: u8,
     fj: u8,
-    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64) -> u64,
+    helper: unsafe extern "sysv64" fn(*mut u8, u64, u64, u64) -> u64,
 ) {
     let a = fpr_get(ctx, ir, fj);
     let fd_tmp = ir.new_const(Type::I64, u64::from(fd));
@@ -166,7 +166,7 @@ pub fn gen_fp_cmp(
     cd: u8,
     fj: u8,
     fk: u8,
-    helper: unsafe extern "C" fn(u64, u64) -> u64,
+    helper: unsafe extern "sysv64" fn(u64, u64) -> u64,
 ) {
     let a = fpr_get(ctx, ir, fj);
     let b = fpr_get(ctx, ir, fk);
@@ -181,7 +181,7 @@ pub fn gen_fp_cmp_fcsr(
     cd: u8,
     fj: u8,
     fk: u8,
-    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64, u64) -> u64,
+    helper: unsafe extern "sysv64" fn(*mut u8, u64, u64, u64, u64) -> u64,
 ) {
     let a = fpr_get(ctx, ir, fj);
     let b = fpr_get(ctx, ir, fk);
@@ -203,7 +203,7 @@ pub fn gen_fp_fused_fcsr(
     fj: u8,
     fk: u8,
     fa: u8,
-    helper: unsafe extern "C" fn(*mut u8, u64, u64, u64, u64, u64) -> u64,
+    helper: unsafe extern "sysv64" fn(*mut u8, u64, u64, u64, u64, u64) -> u64,
 ) {
     let fj = fpr_get(ctx, ir, fj);
     let fk = fpr_get(ctx, ir, fk);

@@ -49,20 +49,20 @@ fn enter_store_translation_fault(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_rdtime_d(_env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_rdtime_d(_env: *mut u8) -> u64 {
     RDTIME_COUNTER.fetch_add(RDTIME_STEP, Ordering::Relaxed) + RDTIME_STEP
 }
 
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_tid(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_tid(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<LoongArchCpu>());
     cpu.csr_read(super::super::csr::CSR_TID)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_div_d(a: i64, b: i64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_div_d(a: i64, b: i64) -> i64 {
     let divisor = if b == 0 || (a == i64::MIN && b == -1) {
         1
     } else {
@@ -72,7 +72,7 @@ pub extern "C" fn loongarch_helper_div_d(a: i64, b: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_mod_d(a: i64, b: i64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_mod_d(a: i64, b: i64) -> i64 {
     let divisor = if b == 0 || (a == i64::MIN && b == -1) {
         1
     } else {
@@ -82,19 +82,19 @@ pub extern "C" fn loongarch_helper_mod_d(a: i64, b: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_div_du(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_div_du(a: u64, b: u64) -> u64 {
     let divisor = if b == 0 { 1 } else { b };
     a / divisor
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_mod_du(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_mod_du(a: u64, b: u64) -> u64 {
     let divisor = if b == 0 { 1 } else { b };
     a % divisor
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_div_w(a: i64, b: i64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_div_w(a: i64, b: i64) -> i64 {
     let a32 = i64::from(a as i32);
     let b32 = i64::from(b as i32);
     let divisor = if b32 == 0 { 1 } else { b32 };
@@ -102,7 +102,7 @@ pub extern "C" fn loongarch_helper_div_w(a: i64, b: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_mod_w(a: i64, b: i64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_mod_w(a: i64, b: i64) -> i64 {
     let a32 = i64::from(a as i32);
     let b32 = i64::from(b as i32);
     let divisor = if b32 == 0 { 1 } else { b32 };
@@ -110,7 +110,7 @@ pub extern "C" fn loongarch_helper_mod_w(a: i64, b: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_div_wu(a: u64, b: u64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_div_wu(a: u64, b: u64) -> i64 {
     let a32 = u64::from(a as u32);
     let b32 = u64::from(b as u32);
     let divisor = if b32 == 0 { 1 } else { b32 };
@@ -119,7 +119,7 @@ pub extern "C" fn loongarch_helper_div_wu(a: u64, b: u64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_mod_wu(a: u64, b: u64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_mod_wu(a: u64, b: u64) -> i64 {
     let a32 = u64::from(a as u32);
     let b32 = u64::from(b as u32);
     let divisor = if b32 == 0 { 1 } else { b32 };
@@ -128,17 +128,17 @@ pub extern "C" fn loongarch_helper_mod_wu(a: u64, b: u64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_mulh_d(a: i64, b: i64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_mulh_d(a: i64, b: i64) -> i64 {
     ((i128::from(a) * i128::from(b)) >> 64) as i64
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_mulh_du(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_mulh_du(a: u64, b: u64) -> u64 {
     ((u128::from(a) * u128::from(b)) >> 64) as u64
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_mulh_w(a: i64, b: i64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_mulh_w(a: i64, b: i64) -> i64 {
     let a32 = a as i32;
     let b32 = b as i32;
     let product = i64::from(a32) * i64::from(b32);
@@ -146,7 +146,7 @@ pub extern "C" fn loongarch_helper_mulh_w(a: i64, b: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_mulh_wu(a: u64, b: u64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_mulh_wu(a: u64, b: u64) -> i64 {
     let a32 = a as u32;
     let b32 = b as u32;
     let product = u64::from(a32) * u64::from(b32);
@@ -154,33 +154,33 @@ pub extern "C" fn loongarch_helper_mulh_wu(a: u64, b: u64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_revb_2h(a: u64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_revb_2h(a: u64) -> i64 {
     let lo = a as u32;
     let swapped = ((lo & 0x00FF_00FF) << 8) | ((lo & 0xFF00_FF00) >> 8);
     i64::from(swapped as i32)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_revb_4h(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_revb_4h(a: u64) -> u64 {
     ((a & 0x00FF_00FF_00FF_00FF) << 8) | ((a & 0xFF00_FF00_FF00_FF00) >> 8)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_revb_2w(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_revb_2w(a: u64) -> u64 {
     let lo = (a as u32).swap_bytes();
     let hi = ((a >> 32) as u32).swap_bytes();
     u64::from(hi) << 32 | u64::from(lo)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_revh_2w(a: u64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_revh_2w(a: u64) -> i64 {
     let lo = a as u32;
     let swapped = lo.rotate_right(16);
     i64::from(swapped as i32)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_revh_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_revh_d(a: u64) -> u64 {
     ((a & 0x0000_0000_0000_FFFF) << 48)
         | ((a & 0x0000_0000_FFFF_0000) << 16)
         | ((a & 0x0000_FFFF_0000_0000) >> 16)
@@ -188,7 +188,7 @@ pub extern "C" fn loongarch_helper_revh_d(a: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_bitrev_4b(a: u64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_bitrev_4b(a: u64) -> i64 {
     let mut v = a as u32;
     v = ((v & 0x5555_5555) << 1) | ((v & 0xAAAA_AAAA) >> 1);
     v = ((v & 0x3333_3333) << 2) | ((v & 0xCCCC_CCCC) >> 2);
@@ -197,7 +197,7 @@ pub extern "C" fn loongarch_helper_bitrev_4b(a: u64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_bitrev_8b(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_bitrev_8b(a: u64) -> u64 {
     let mut v = a;
     v = ((v & 0x5555_5555_5555_5555) << 1) | ((v & 0xAAAA_AAAA_AAAA_AAAA) >> 1);
     v = ((v & 0x3333_3333_3333_3333) << 2) | ((v & 0xCCCC_CCCC_CCCC_CCCC) >> 2);
@@ -206,13 +206,13 @@ pub extern "C" fn loongarch_helper_bitrev_8b(a: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_bitrev_w(a: u64) -> i64 {
+pub extern "sysv64" fn loongarch_helper_bitrev_w(a: u64) -> i64 {
     let v = (a as u32).reverse_bits();
     i64::from(v as i32)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_bitrev_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_bitrev_d(a: u64) -> u64 {
     a.reverse_bits()
 }
 
@@ -222,7 +222,7 @@ pub extern "C" fn loongarch_helper_bitrev_d(a: u64) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_check_fpe(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_check_fpe(env: *mut u8) -> u64 {
     use super::super::csr::EUEN_FPE;
     let cpu = &mut *(env.cast::<LoongArchCpu>());
     if cpu.euen & EUEN_FPE != 0 {
@@ -236,7 +236,7 @@ pub unsafe extern "C" fn loongarch_helper_check_fpe(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_movfcsr2gr(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_movfcsr2gr(env: *mut u8) -> u64 {
     let cpu = &*(env.cast::<super::super::cpu::LoongArchCpu>());
     u64::from(cpu.read_fcsr())
 }
@@ -244,7 +244,7 @@ pub unsafe extern "C" fn loongarch_helper_movfcsr2gr(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_movfcsr2gr_idx(
+pub unsafe extern "sysv64" fn loongarch_helper_movfcsr2gr_idx(
     env: *mut u8,
     fcsrs: u64,
 ) -> u64 {
@@ -255,7 +255,7 @@ pub unsafe extern "C" fn loongarch_helper_movfcsr2gr_idx(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_movgr2fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_movgr2fcsr(
     env: *mut u8,
     val: u64,
 ) -> u64 {
@@ -267,7 +267,7 @@ pub unsafe extern "C" fn loongarch_helper_movgr2fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_movgr2fcsr_idx(
+pub unsafe extern "sysv64" fn loongarch_helper_movgr2fcsr_idx(
     env: *mut u8,
     val: u64,
     fcsrd: u64,
@@ -708,7 +708,7 @@ fn fclass_d_bits(bits: u64) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_asrtgt_d(
+pub unsafe extern "sysv64" fn loongarch_helper_asrtgt_d(
     env: *mut u8,
     rj: u64,
     rk: u64,
@@ -727,7 +727,7 @@ pub unsafe extern "C" fn loongarch_helper_asrtgt_d(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_asrtle_d(
+pub unsafe extern "sysv64" fn loongarch_helper_asrtle_d(
     env: *mut u8,
     rj: u64,
     rk: u64,
@@ -859,225 +859,225 @@ fn finish_unary_conversion(
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fadd_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fadd_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     nanbox_s((fa + fb).to_bits())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fadd_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fadd_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     (fa + fb).to_bits()
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fsub_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fsub_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     nanbox_s((fa - fb).to_bits())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fsub_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fsub_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     (fa - fb).to_bits()
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fmul_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fmul_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     nanbox_s((fa * fb).to_bits())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fmul_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fmul_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     (fa * fb).to_bits()
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fdiv_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fdiv_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     nanbox_s((fa / fb).to_bits())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fdiv_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fdiv_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     (fa / fb).to_bits()
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fsqrt_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fsqrt_s(a: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     nanbox_s(fa.sqrt().to_bits())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fsqrt_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fsqrt_d(a: u64) -> u64 {
     let fa = f64::from_bits(a);
     fa.sqrt().to_bits()
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_caf_s(_a: u64, _b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_caf_s(_a: u64, _b: u64) -> u64 {
     0
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_caf_d(_a: u64, _b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_caf_d(_a: u64, _b: u64) -> u64 {
     0
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_ceq_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_ceq_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(fa == fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_ceq_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_ceq_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(fa == fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_clt_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_clt_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(fa < fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_clt_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_clt_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(fa < fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cle_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cle_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(fa <= fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cle_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cle_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(fa <= fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cun_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cun_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(fa.is_nan() || fb.is_nan())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cun_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cun_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(fa.is_nan() || fb.is_nan())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cueq_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cueq_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(fa.is_nan() || fb.is_nan() || fa == fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cueq_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cueq_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(fa.is_nan() || fb.is_nan() || fa == fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cult_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cult_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(fa.is_nan() || fb.is_nan() || fa < fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cult_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cult_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(fa.is_nan() || fb.is_nan() || fa < fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cule_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cule_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(fa.is_nan() || fb.is_nan() || fa <= fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cule_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cule_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(fa.is_nan() || fb.is_nan() || fa <= fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cne_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cne_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(!fa.is_nan() && !fb.is_nan() && fa != fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cne_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cne_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(!fa.is_nan() && !fb.is_nan() && fa != fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cor_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cor_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(!fa.is_nan() && !fb.is_nan())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cor_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cor_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(!fa.is_nan() && !fb.is_nan())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cune_s(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cune_s(a: u64, b: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     u64::from(fa.is_nan() || fb.is_nan() || fa != fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcmp_cune_d(a: u64, b: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcmp_cune_d(a: u64, b: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     u64::from(fa.is_nan() || fb.is_nan() || fa != fb)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fmadd_s(a: u64, b: u64, c: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fmadd_s(a: u64, b: u64, c: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     let fc = f32::from_bits(c as u32);
@@ -1085,7 +1085,7 @@ pub extern "C" fn loongarch_helper_fmadd_s(a: u64, b: u64, c: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fmadd_d(a: u64, b: u64, c: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fmadd_d(a: u64, b: u64, c: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     let fc = f64::from_bits(c);
@@ -1093,7 +1093,7 @@ pub extern "C" fn loongarch_helper_fmadd_d(a: u64, b: u64, c: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fmsub_s(a: u64, b: u64, c: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fmsub_s(a: u64, b: u64, c: u64) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     let fc = f32::from_bits(c as u32);
@@ -1101,7 +1101,7 @@ pub extern "C" fn loongarch_helper_fmsub_s(a: u64, b: u64, c: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fmsub_d(a: u64, b: u64, c: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fmsub_d(a: u64, b: u64, c: u64) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     let fc = f64::from_bits(c);
@@ -1109,7 +1109,11 @@ pub extern "C" fn loongarch_helper_fmsub_d(a: u64, b: u64, c: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fnmadd_s(a: u64, b: u64, c: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fnmadd_s(
+    a: u64,
+    b: u64,
+    c: u64,
+) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     let fc = f32::from_bits(c as u32);
@@ -1117,7 +1121,11 @@ pub extern "C" fn loongarch_helper_fnmadd_s(a: u64, b: u64, c: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fnmadd_d(a: u64, b: u64, c: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fnmadd_d(
+    a: u64,
+    b: u64,
+    c: u64,
+) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     let fc = f64::from_bits(c);
@@ -1125,7 +1133,11 @@ pub extern "C" fn loongarch_helper_fnmadd_d(a: u64, b: u64, c: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fnmsub_s(a: u64, b: u64, c: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fnmsub_s(
+    a: u64,
+    b: u64,
+    c: u64,
+) -> u64 {
     let fa = f32::from_bits(a as u32);
     let fb = f32::from_bits(b as u32);
     let fc = f32::from_bits(c as u32);
@@ -1133,7 +1145,11 @@ pub extern "C" fn loongarch_helper_fnmsub_s(a: u64, b: u64, c: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fnmsub_d(a: u64, b: u64, c: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fnmsub_d(
+    a: u64,
+    b: u64,
+    c: u64,
+) -> u64 {
     let fa = f64::from_bits(a);
     let fb = f64::from_bits(b);
     let fc = f64::from_bits(c);
@@ -1141,25 +1157,25 @@ pub extern "C" fn loongarch_helper_fnmsub_d(a: u64, b: u64, c: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ffint_s_w(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ffint_s_w(a: u64) -> u64 {
     let i = a as i32;
     nanbox_s((i as f32).to_bits())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ffint_d_w(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ffint_d_w(a: u64) -> u64 {
     let i = a as i32;
     (f64::from(i)).to_bits()
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ffint_s_l(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ffint_s_l(a: u64) -> u64 {
     let i = a as i64;
     nanbox_s((i as f32).to_bits())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ffint_d_l(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ffint_d_l(a: u64) -> u64 {
     let i = a as i64;
     (i as f64).to_bits()
 }
@@ -1232,113 +1248,113 @@ fn f64_to_i64_bits(a: u64, mode: FpIntRound) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrm_w_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrm_w_s(a: u64) -> u64 {
     f32_to_i32_bits(a, FpIntRound::Down)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrm_w_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrm_w_d(a: u64) -> u64 {
     f64_to_i32_bits(a, FpIntRound::Down)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrm_l_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrm_l_s(a: u64) -> u64 {
     f32_to_i64_bits(a, FpIntRound::Down)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrm_l_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrm_l_d(a: u64) -> u64 {
     f64_to_i64_bits(a, FpIntRound::Down)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrp_w_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrp_w_s(a: u64) -> u64 {
     f32_to_i32_bits(a, FpIntRound::Up)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrp_w_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrp_w_d(a: u64) -> u64 {
     f64_to_i32_bits(a, FpIntRound::Up)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrp_l_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrp_l_s(a: u64) -> u64 {
     f32_to_i64_bits(a, FpIntRound::Up)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrp_l_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrp_l_d(a: u64) -> u64 {
     f64_to_i64_bits(a, FpIntRound::Up)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrz_w_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrz_w_s(a: u64) -> u64 {
     f32_to_i32_bits(a, FpIntRound::Zero)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrz_w_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrz_w_d(a: u64) -> u64 {
     f64_to_i32_bits(a, FpIntRound::Zero)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrz_l_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrz_l_s(a: u64) -> u64 {
     f32_to_i64_bits(a, FpIntRound::Zero)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrz_l_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrz_l_d(a: u64) -> u64 {
     f64_to_i64_bits(a, FpIntRound::Zero)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrne_w_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrne_w_s(a: u64) -> u64 {
     f32_to_i32_bits(a, FpIntRound::NearestEven)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrne_w_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrne_w_d(a: u64) -> u64 {
     f64_to_i32_bits(a, FpIntRound::NearestEven)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrne_l_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrne_l_s(a: u64) -> u64 {
     f32_to_i64_bits(a, FpIntRound::NearestEven)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftintrne_l_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftintrne_l_d(a: u64) -> u64 {
     f64_to_i64_bits(a, FpIntRound::NearestEven)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftint_w_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftint_w_s(a: u64) -> u64 {
     f32_to_i32_bits(a, FpIntRound::NearestEven)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftint_w_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftint_w_d(a: u64) -> u64 {
     f64_to_i32_bits(a, FpIntRound::NearestEven)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftint_l_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftint_l_s(a: u64) -> u64 {
     f32_to_i64_bits(a, FpIntRound::NearestEven)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_ftint_l_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_ftint_l_d(a: u64) -> u64 {
     f64_to_i64_bits(a, FpIntRound::NearestEven)
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcvt_s_d(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcvt_s_d(a: u64) -> u64 {
     let f = f64::from_bits(a);
     nanbox_s((f as f32).to_bits())
 }
 
 #[no_mangle]
-pub extern "C" fn loongarch_helper_fcvt_d_s(a: u64) -> u64 {
+pub extern "sysv64" fn loongarch_helper_fcvt_d_s(a: u64) -> u64 {
     let f = f32::from_bits(a as u32);
     (f64::from(f)).to_bits()
 }
@@ -1346,7 +1362,7 @@ pub extern "C" fn loongarch_helper_fcvt_d_s(a: u64) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fadd_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fadd_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1366,7 +1382,7 @@ pub unsafe extern "C" fn loongarch_helper_fadd_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fadd_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fadd_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1386,7 +1402,7 @@ pub unsafe extern "C" fn loongarch_helper_fadd_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fsub_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fsub_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1406,7 +1422,7 @@ pub unsafe extern "C" fn loongarch_helper_fsub_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fsub_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fsub_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1426,7 +1442,7 @@ pub unsafe extern "C" fn loongarch_helper_fsub_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fmul_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fmul_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1446,7 +1462,7 @@ pub unsafe extern "C" fn loongarch_helper_fmul_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fmul_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fmul_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1466,7 +1482,7 @@ pub unsafe extern "C" fn loongarch_helper_fmul_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fdiv_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fdiv_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1486,7 +1502,7 @@ pub unsafe extern "C" fn loongarch_helper_fdiv_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fdiv_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fdiv_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1508,7 +1524,7 @@ macro_rules! fmaxmin_s_helper {
         /// # Safety
         /// `env` must point to a valid `LoongArchCpu`.
         #[no_mangle]
-        pub unsafe extern "C" fn $name(
+        pub unsafe extern "sysv64" fn $name(
             env: *mut u8,
             fd: u64,
             a: u64,
@@ -1528,7 +1544,7 @@ macro_rules! fmaxmin_d_helper {
         /// # Safety
         /// `env` must point to a valid `LoongArchCpu`.
         #[no_mangle]
-        pub unsafe extern "C" fn $name(
+        pub unsafe extern "sysv64" fn $name(
             env: *mut u8,
             fd: u64,
             a: u64,
@@ -1554,7 +1570,7 @@ fmaxmin_d_helper!(loongarch_helper_fmina_d_fcsr, false, true);
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fscaleb_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fscaleb_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1571,7 +1587,7 @@ pub unsafe extern "C" fn loongarch_helper_fscaleb_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fscaleb_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fscaleb_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1588,7 +1604,7 @@ pub unsafe extern "C" fn loongarch_helper_fscaleb_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fcopysign_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fcopysign_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1603,7 +1619,7 @@ pub unsafe extern "C" fn loongarch_helper_fcopysign_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fcopysign_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fcopysign_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1618,7 +1634,7 @@ pub unsafe extern "C" fn loongarch_helper_fcopysign_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fsqrt_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fsqrt_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1636,7 +1652,7 @@ pub unsafe extern "C" fn loongarch_helper_fsqrt_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fsqrt_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fsqrt_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1652,7 +1668,7 @@ pub unsafe extern "C" fn loongarch_helper_fsqrt_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_frecip_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_frecip_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1671,7 +1687,7 @@ pub unsafe extern "C" fn loongarch_helper_frecip_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_frecip_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_frecip_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1690,7 +1706,7 @@ pub unsafe extern "C" fn loongarch_helper_frecip_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_frsqrt_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_frsqrt_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1713,7 +1729,7 @@ pub unsafe extern "C" fn loongarch_helper_frsqrt_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_frsqrt_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_frsqrt_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1734,7 +1750,7 @@ pub unsafe extern "C" fn loongarch_helper_frsqrt_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_frint_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_frint_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1752,7 +1768,7 @@ pub unsafe extern "C" fn loongarch_helper_frint_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_frint_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_frint_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1770,7 +1786,7 @@ pub unsafe extern "C" fn loongarch_helper_frint_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_flogb_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_flogb_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1807,7 +1823,7 @@ pub unsafe extern "C" fn loongarch_helper_flogb_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_flogb_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_flogb_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1840,7 +1856,7 @@ pub unsafe extern "C" fn loongarch_helper_flogb_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fclass_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fclass_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1853,7 +1869,7 @@ pub unsafe extern "C" fn loongarch_helper_fclass_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fclass_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fclass_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1866,7 +1882,7 @@ pub unsafe extern "C" fn loongarch_helper_fclass_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fmadd_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fmadd_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1882,7 +1898,7 @@ pub unsafe extern "C" fn loongarch_helper_fmadd_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fmadd_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fmadd_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1898,7 +1914,7 @@ pub unsafe extern "C" fn loongarch_helper_fmadd_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fmsub_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fmsub_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1914,7 +1930,7 @@ pub unsafe extern "C" fn loongarch_helper_fmsub_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fmsub_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fmsub_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1930,7 +1946,7 @@ pub unsafe extern "C" fn loongarch_helper_fmsub_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fnmadd_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fnmadd_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1946,7 +1962,7 @@ pub unsafe extern "C" fn loongarch_helper_fnmadd_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fnmadd_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fnmadd_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1962,7 +1978,7 @@ pub unsafe extern "C" fn loongarch_helper_fnmadd_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fnmsub_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fnmsub_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1978,7 +1994,7 @@ pub unsafe extern "C" fn loongarch_helper_fnmsub_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fnmsub_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fnmsub_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -1996,7 +2012,7 @@ macro_rules! fcmp_fcsr_helper {
         /// # Safety
         /// `env` must point to a valid `LoongArchCpu`.
         #[no_mangle]
-        pub unsafe extern "C" fn $name(
+        pub unsafe extern "sysv64" fn $name(
             env: *mut u8,
             cd: u64,
             a: u64,
@@ -2279,7 +2295,7 @@ fcmp_fcsr_helper!(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ftint_w_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_ftint_w_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2296,7 +2312,7 @@ pub unsafe extern "C" fn loongarch_helper_ftint_w_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ftint_w_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_ftint_w_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2311,7 +2327,7 @@ pub unsafe extern "C" fn loongarch_helper_ftint_w_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ftint_l_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_ftint_l_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2328,7 +2344,7 @@ pub unsafe extern "C" fn loongarch_helper_ftint_l_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ftint_l_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_ftint_l_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2345,7 +2361,7 @@ macro_rules! fixed_ftint_fcsr_helper {
         /// # Safety
         /// `env` must point to a valid `LoongArchCpu`.
         #[no_mangle]
-        pub unsafe extern "C" fn $name(
+        pub unsafe extern "sysv64" fn $name(
             env: *mut u8,
             fd: u64,
             a: u64,
@@ -2457,7 +2473,7 @@ fixed_ftint_fcsr_helper!(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fcvt_s_d_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fcvt_s_d_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2472,7 +2488,7 @@ pub unsafe extern "C" fn loongarch_helper_fcvt_s_d_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_fcvt_d_s_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_fcvt_d_s_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2490,7 +2506,7 @@ pub unsafe extern "C" fn loongarch_helper_fcvt_d_s_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ffint_s_w_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_ffint_s_w_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2504,7 +2520,7 @@ pub unsafe extern "C" fn loongarch_helper_ffint_s_w_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ffint_d_w_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_ffint_d_w_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2518,7 +2534,7 @@ pub unsafe extern "C" fn loongarch_helper_ffint_d_w_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ffint_s_l_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_ffint_s_l_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2532,7 +2548,7 @@ pub unsafe extern "C" fn loongarch_helper_ffint_s_l_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ffint_d_l_fcsr(
+pub unsafe extern "sysv64" fn loongarch_helper_ffint_d_l_fcsr(
     env: *mut u8,
     fd: u64,
     a: u64,
@@ -2546,7 +2562,7 @@ pub unsafe extern "C" fn loongarch_helper_ffint_d_l_fcsr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_iocsrrd(
+pub unsafe extern "sysv64" fn loongarch_helper_iocsrrd(
     env: *mut u8,
     addr: u64,
     width: u64,
@@ -2558,7 +2574,7 @@ pub unsafe extern "C" fn loongarch_helper_iocsrrd(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_iocsrwr(
+pub unsafe extern "sysv64" fn loongarch_helper_iocsrwr(
     env: *mut u8,
     addr: u64,
     val: u64,
@@ -2572,7 +2588,7 @@ pub unsafe extern "C" fn loongarch_helper_iocsrwr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_cpucfg(
+pub unsafe extern "sysv64" fn loongarch_helper_cpucfg(
     env: *mut u8,
     index: u64,
 ) -> u64 {
@@ -2597,7 +2613,7 @@ pub unsafe extern "C" fn loongarch_helper_cpucfg(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_tlbsrch(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_tlbsrch(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     if let Some(idx) = cpu.tlb_search() {
         cpu.tlbidx = (cpu.tlbidx & !(0xFFF | (1 << 31))) | (idx as u64);
@@ -2610,7 +2626,7 @@ pub unsafe extern "C" fn loongarch_helper_tlbsrch(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_tlbrd(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_tlbrd(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     let idx = (cpu.tlbidx & 0xFFF) as usize;
     cpu.tlb_read(idx);
@@ -2620,7 +2636,7 @@ pub unsafe extern "C" fn loongarch_helper_tlbrd(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_tlbwr(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_tlbwr(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     let idx = (cpu.tlbidx & 0xFFF) as usize;
     cpu.tlb_write(idx);
@@ -2630,7 +2646,7 @@ pub unsafe extern "C" fn loongarch_helper_tlbwr(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_tlbfill(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_tlbfill(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     cpu.tlb_fill();
     0
@@ -2639,7 +2655,7 @@ pub unsafe extern "C" fn loongarch_helper_tlbfill(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_tlbclr(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_tlbclr(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     cpu.tlb_clear_by_index();
     0
@@ -2648,7 +2664,7 @@ pub unsafe extern "C" fn loongarch_helper_tlbclr(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_tlbflush(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_tlbflush(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     cpu.tlb_flush_by_index();
     0
@@ -2657,7 +2673,7 @@ pub unsafe extern "C" fn loongarch_helper_tlbflush(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_lddir(
+pub unsafe extern "sysv64" fn loongarch_helper_lddir(
     env: *mut u8,
     base: u64,
     level: u64,
@@ -2669,7 +2685,7 @@ pub unsafe extern "C" fn loongarch_helper_lddir(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ldpte(
+pub unsafe extern "sysv64" fn loongarch_helper_ldpte(
     env: *mut u8,
     base: u64,
     odd: u64,
@@ -2684,7 +2700,7 @@ pub unsafe extern "C" fn loongarch_helper_ldpte(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_invtlb(
+pub unsafe extern "sysv64" fn loongarch_helper_invtlb(
     env: *mut u8,
     op: u64,
     asid_val: u64,
@@ -2704,7 +2720,7 @@ pub unsafe extern "C" fn loongarch_helper_invtlb(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_check_plv(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_check_plv(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<LoongArchCpu>());
     if cpu.crmd & CRMD_PLV_MASK != CRMD_PLV_MASK {
         return 0;
@@ -2715,7 +2731,7 @@ pub unsafe extern "C" fn loongarch_helper_check_plv(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_raise_exception(
+pub unsafe extern "sysv64" fn loongarch_helper_raise_exception(
     env: *mut u8,
     ecode: u64,
     esubcode: u64,
@@ -2727,7 +2743,7 @@ pub unsafe extern "C" fn loongarch_helper_raise_exception(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_raise_exception_with_badv(
+pub unsafe extern "sysv64" fn loongarch_helper_raise_exception_with_badv(
     env: *mut u8,
     ecode: u64,
     esubcode: u64,
@@ -2740,7 +2756,7 @@ pub unsafe extern "C" fn loongarch_helper_raise_exception_with_badv(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ertn(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_ertn(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<LoongArchCpu>());
     let pc = if cpu.tlbrera & 1 != 0 {
         // Return from TLB refill: restore PLV/IE, clear DA, set PG
@@ -2762,7 +2778,7 @@ pub unsafe extern "C" fn loongarch_helper_ertn(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_idle(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_idle(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     cpu.halted.store(true, std::sync::atomic::Ordering::Release);
     0
@@ -2771,7 +2787,7 @@ pub unsafe extern "C" fn loongarch_helper_idle(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_ibar(env: *mut u8) -> u64 {
+pub unsafe extern "sysv64" fn loongarch_helper_ibar(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<super::super::cpu::LoongArchCpu>());
     cpu.request_tb_flush();
     0
@@ -2780,7 +2796,7 @@ pub unsafe extern "C" fn loongarch_helper_ibar(env: *mut u8) -> u64 {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_csrrd(
+pub unsafe extern "sysv64" fn loongarch_helper_csrrd(
     env: *mut u8,
     csr_num: u64,
 ) -> u64 {
@@ -2791,7 +2807,7 @@ pub unsafe extern "C" fn loongarch_helper_csrrd(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_csrwr(
+pub unsafe extern "sysv64" fn loongarch_helper_csrwr(
     env: *mut u8,
     csr_num: u64,
     val: u64,
@@ -2805,7 +2821,7 @@ pub unsafe extern "C" fn loongarch_helper_csrwr(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu`.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_csrxchg(
+pub unsafe extern "sysv64" fn loongarch_helper_csrxchg(
     env: *mut u8,
     csr_num: u64,
     val: u64,
@@ -2818,7 +2834,7 @@ pub unsafe extern "C" fn loongarch_helper_csrxchg(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu` with correct guest_base/ram fields.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_sc_w(
+pub unsafe extern "sysv64" fn loongarch_helper_sc_w(
     env: *mut u8,
     addr: u64,
     val: u64,
@@ -2862,7 +2878,7 @@ pub unsafe extern "C" fn loongarch_helper_sc_w(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu` with correct guest_base/ram fields.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_helper_sc_d(
+pub unsafe extern "sysv64" fn loongarch_helper_sc_d(
     env: *mut u8,
     addr: u64,
     val: u64,

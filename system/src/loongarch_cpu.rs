@@ -517,7 +517,7 @@ fn split_page_access(gva: u64, size: u32) -> Option<(u32, u64, u32)> {
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu` for the duration of the call.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_mem_read(
+pub unsafe extern "sysv64" fn loongarch_mem_read(
     env: *mut u8,
     gva: u64,
     size: u32,
@@ -544,7 +544,7 @@ pub unsafe extern "C" fn loongarch_mem_read(
 /// # Safety
 /// `env` must point to a valid `LoongArchCpu` for the duration of the call.
 #[no_mangle]
-pub unsafe extern "C" fn loongarch_mem_write(
+pub unsafe extern "sysv64" fn loongarch_mem_write(
     env: *mut u8,
     gva: u64,
     val: u64,

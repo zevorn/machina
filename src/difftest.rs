@@ -491,8 +491,10 @@ fn exec_one_insn<B: HostCodeGen>(
         let tb = shared.tb_store.get(tb_idx);
         let tb_ptr = shared.code_buf().ptr_at(tb.host_offset);
         let env_ptr = cpu.env_ptr();
-        let prologue_fn: unsafe extern "C" fn(*mut u8, *const u8) -> usize =
-            core::mem::transmute(shared.code_buf().base_ptr());
+        let prologue_fn: unsafe extern "sysv64" fn(
+            *mut u8,
+            *const u8,
+        ) -> usize = core::mem::transmute(shared.code_buf().base_ptr());
         prologue_fn(env_ptr, tb_ptr)
     };
 
