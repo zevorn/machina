@@ -128,16 +128,25 @@ fn test_gpio_key_lifecycle() {
     let key = GpioKey::new(irq, clock.clone());
     assert!(!key.realized());
 
+    // Reject realize before bus attach
+    let err = key.realize().unwrap_err();
+    assert!(err.to_string().contains("parent bus"));
+
     let mut bus = SysBus::new("sysbus");
     key.attach_to_bus(&mut bus).unwrap();
     key.realize().unwrap();
     assert!(key.realized());
 
+    // Double realize rejected
     let err = key.realize().unwrap_err();
     assert!(err.to_string().contains("already realized"));
 
     key.unrealize().unwrap();
     assert!(!key.realized());
+
+    // Double unrealize rejected
+    let err = key.unrealize().unwrap_err();
+    assert!(err.to_string().contains("not realized"));
 }
 
 // ---- GpioPwr ----
@@ -206,14 +215,23 @@ fn test_gpio_pwr_lifecycle() {
     let pwr = GpioPwr::new();
     assert!(!pwr.realized());
 
+    // Reject realize before bus attach
+    let err = pwr.realize().unwrap_err();
+    assert!(err.to_string().contains("parent bus"));
+
     let mut bus = SysBus::new("sysbus");
     pwr.attach_to_bus(&mut bus).unwrap();
     pwr.realize().unwrap();
     assert!(pwr.realized());
 
+    // Double realize rejected
     let err = pwr.realize().unwrap_err();
     assert!(err.to_string().contains("already realized"));
 
     pwr.unrealize().unwrap();
     assert!(!pwr.realized());
+
+    // Double unrealize rejected
+    let err = pwr.unrealize().unwrap_err();
+    assert!(err.to_string().contains("not realized"));
 }

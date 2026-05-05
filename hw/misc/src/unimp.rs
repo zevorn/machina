@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use machina_core::address::GPA;
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::mdev::MDevice;
+use machina_hw_core::mdev::{MDevice, MDeviceError};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
@@ -55,6 +55,11 @@ impl Unimp {
         bus: &mut SysBus,
         address_space: &mut AddressSpace,
     ) -> Result<(), SysBusError> {
+        if self.size == 0 {
+            return Err(SysBusError::Device(MDeviceError::LateMutation(
+                "unimp size must be non-zero",
+            )));
+        }
         self.state.lock().realize_onto(bus, address_space)
     }
 

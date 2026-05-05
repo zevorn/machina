@@ -101,14 +101,20 @@ impl VirtCtrl {
         f(&*guard)
     }
 
-    pub fn do_read(&self, offset: u64, _size: u32) -> u64 {
+    pub fn do_read(&self, offset: u64, size: u32) -> u64 {
+        if size > 4 {
+            return 0;
+        }
         match offset {
             REG_FEATURES => u64::from(FEAT_POWER_CTRL),
             _ => 0,
         }
     }
 
-    pub fn do_write(&self, offset: u64, _size: u32, val: u64) {
+    pub fn do_write(&self, offset: u64, size: u32, val: u64) {
+        if size > 4 {
+            return;
+        }
         if offset == REG_CMD {
             let cmd = val as u32;
             let action = match cmd {

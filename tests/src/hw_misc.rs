@@ -81,15 +81,23 @@ fn test_sifive_e_prci_lifecycle() {
     assert!(!prci.realized());
 
     let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x1000_0000);
+
+    // Pre-realize: address space has no mapping
+    assert_eq!(aspace.read(base, 4), 0);
+
     prci.attach_to_bus(&mut bus).unwrap();
     let region = MemoryRegion::io(
         "e-prci",
         0x1000,
         Arc::new(SifiveEPRCIMmio(prci.clone())),
     );
-    prci.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    prci.register_mmio(region, base).unwrap();
     prci.realize_onto(&mut bus, &mut aspace).unwrap();
     assert!(prci.realized());
+
+    // Realized: address space reads return register defaults
+    assert_eq!(aspace.read(base, 4) as u32, 0xC000_0000);
 
     // Late mutation rejected
     let region2 = MemoryRegion::io(
@@ -99,11 +107,15 @@ fn test_sifive_e_prci_lifecycle() {
     );
     assert!(prci.register_mmio(region2, GPA(0x2000_0000)).is_err());
 
-    // Second realize_onto fails (MMIO already consumed)
-    assert!(prci.realize_onto(&mut bus, &mut aspace).is_err());
+    // Second realize_onto fails (mapping already recorded in bus)
+    let err = prci.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("overlaps"));
 
     prci.unrealize_from(&mut bus, &mut aspace).unwrap();
     assert!(!prci.realized());
+
+    // Post-unrealize: address space read returns 0 (unmapped)
+    assert_eq!(aspace.read(base, 4), 0);
 
     let err = prci.unrealize_from(&mut bus, &mut aspace).unwrap_err();
     assert!(err.to_string().contains("not realized"));
@@ -182,26 +194,64 @@ fn test_sifive_u_prci_reset_runtime() {
 }
 
 #[test]
+fn test_sifive_u_prci_reset_preserves_untouched_regs() {
+    let prci = SifiveUPRCI::new();
+    // Write values to registers the reference reset does NOT touch.
+    prci.do_write(0x10, 4, 0xCAFE_0000); // DDRPLLCFG1
+    prci.do_write(0x20, 4, 0xBEEF_0000); // GEMGXLPLLCFG1
+    prci.do_write(0x28, 4, 0x0000_00FF); // DEVICESRESET
+    prci.do_write(0x2C, 4, 0x0000_00AB); // CLKMUXSTATUS
+    prci.reset_runtime();
+    // Reference-reset registers are restored.
+    assert_eq!(prci.do_read(0x00, 4) as u32, 0xC000_0000);
+    let pllcfg0 = (1 << 0) | (31 << 6) | (3 << 15) | (1 << 25) | (1 << 31);
+    assert_eq!(prci.do_read(0x04, 4) as u32, pllcfg0);
+    assert_eq!(prci.do_read(0x0C, 4) as u32, pllcfg0);
+    assert_eq!(prci.do_read(0x1C, 4) as u32, pllcfg0);
+    assert_eq!(prci.do_read(0x24, 4) as u32, 1 << 0);
+    // Untouched registers preserve their written values.
+    assert_eq!(prci.do_read(0x10, 4) as u32, 0xCAFE_0000);
+    assert_eq!(prci.do_read(0x20, 4) as u32, 0xBEEF_0000);
+    assert_eq!(prci.do_read(0x28, 4) as u32, 0x0000_00FF);
+    assert_eq!(prci.do_read(0x2C, 4) as u32, 0x0000_00AB);
+}
+
+#[test]
 fn test_sifive_u_prci_lifecycle() {
     let prci = SifiveUPRCI::new();
     assert!(!prci.realized());
 
     let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x1000_0000);
+
+    // Pre-realize: unmapped
+    assert_eq!(aspace.read(base, 4), 0);
+
     prci.attach_to_bus(&mut bus).unwrap();
     let region = MemoryRegion::io(
         "u-prci",
         0x1000,
         Arc::new(SifiveUPRCIMmio(prci.clone())),
     );
-    prci.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    prci.register_mmio(region, base).unwrap();
     prci.realize_onto(&mut bus, &mut aspace).unwrap();
     assert!(prci.realized());
 
-    // Second realize_onto fails (MMIO already consumed)
-    assert!(prci.realize_onto(&mut bus, &mut aspace).is_err());
+    // Realized: address space read returns register defaults
+    assert_eq!(aspace.read(base, 4) as u32, 0xC000_0000);
+
+    // Second realize_onto fails (mapping already recorded in bus)
+    let err = prci.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("overlaps"));
 
     prci.unrealize_from(&mut bus, &mut aspace).unwrap();
     assert!(!prci.realized());
+
+    // Post-unrealize: unmapped
+    assert_eq!(aspace.read(base, 4), 0);
+
+    let err = prci.unrealize_from(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("not realized"));
 }
 
 // ---- Pvpanic ----
@@ -307,18 +357,30 @@ fn test_pvpanic_lifecycle() {
     assert!(!pvp.realized());
 
     let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x1000_0000);
+
+    // Pre-realize: unmapped
+    assert_eq!(aspace.read(base, 1), 0);
+
     pvp.attach_to_bus(&mut bus).unwrap();
     let region =
         MemoryRegion::io("pvpanic", 0x2, Arc::new(PvpanicMmio(pvp.clone())));
-    pvp.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    pvp.register_mmio(region, base).unwrap();
     pvp.realize_onto(&mut bus, &mut aspace).unwrap();
     assert!(pvp.realized());
 
-    // Second realize_onto fails (MMIO already consumed)
-    assert!(pvp.realize_onto(&mut bus, &mut aspace).is_err());
+    // Realized: read returns events mask
+    assert_eq!(aspace.read(base, 1) as u8, PvpanicEvent::PANICKED);
+
+    // Second realize_onto fails (mapping already recorded in bus)
+    let err = pvp.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("overlaps"));
 
     pvp.unrealize_from(&mut bus, &mut aspace).unwrap();
     assert!(!pvp.realized());
+
+    // Post-unrealize: unmapped
+    assert_eq!(aspace.read(base, 1), 0);
 }
 
 // ---- Unimp ----
@@ -372,17 +434,45 @@ fn test_unimp_lifecycle() {
     assert!(!unimp.realized());
 
     let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x1000_0000);
+
+    // Pre-realize: unmapped
+    assert_eq!(aspace.read(base, 4), 0);
+
     unimp.attach_to_bus(&mut bus).unwrap();
     let region =
         MemoryRegion::io("unimp", 0x1000, Arc::new(UnimpMmio(unimp.clone())));
-    unimp.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    unimp.register_mmio(region, base).unwrap();
     unimp.realize_onto(&mut bus, &mut aspace).unwrap();
     assert!(unimp.realized());
 
-    // Second realize_onto fails (MMIO already consumed)
-    assert!(unimp.realize_onto(&mut bus, &mut aspace).is_err());
+    // Realized: reads return 0 and writes don't panic
+    assert_eq!(aspace.read(base, 4), 0);
+    aspace.write(base, 4, 0xDEAD_BEEF);
+
+    // Second realize_onto fails (mapping already recorded in bus)
+    let err = unimp.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("overlaps"));
 
     unimp.unrealize_from(&mut bus, &mut aspace).unwrap();
+    assert!(!unimp.realized());
+
+    // Post-unrealize: unmapped
+    assert_eq!(aspace.read(base, 4), 0);
+}
+
+#[test]
+fn test_unimp_rejects_zero_size_realize() {
+    let unimp = Unimp::new("zero-device", 0);
+    assert!(!unimp.realized());
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    unimp.attach_to_bus(&mut bus).unwrap();
+    let region =
+        MemoryRegion::io("zero", 0, Arc::new(UnimpMmio(unimp.clone())));
+    unimp.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    let err = unimp.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("must be non-zero"));
     assert!(!unimp.realized());
 }
 
@@ -582,19 +672,53 @@ fn test_virt_ctrl_lifecycle() {
     assert!(!vc.realized());
 
     let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x1000_0000);
+
+    // Pre-realize: unmapped
+    assert_eq!(aspace.read(base, 4), 0);
+
     vc.attach_to_bus(&mut bus).unwrap();
     let region = MemoryRegion::io(
         "virt_ctrl",
         0x100,
         Arc::new(VirtCtrlMmio(vc.clone())),
     );
-    vc.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    vc.register_mmio(region, base).unwrap();
     vc.realize_onto(&mut bus, &mut aspace).unwrap();
     assert!(vc.realized());
 
-    // Second realize_onto fails (MMIO already consumed)
-    assert!(vc.realize_onto(&mut bus, &mut aspace).is_err());
+    // Realized: read returns FEATURES
+    assert_eq!(aspace.read(base, 4) as u32, 0x0000_0001);
+
+    // Second realize_onto fails (mapping already recorded in bus)
+    let err = vc.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("overlaps"));
 
     vc.unrealize_from(&mut bus, &mut aspace).unwrap();
     assert!(!vc.realized());
+
+    // Post-unrealize: unmapped
+    assert_eq!(aspace.read(base, 4), 0);
+}
+
+#[test]
+fn test_virt_ctrl_rejects_large_access() {
+    let vc = VirtCtrl::new();
+    // 1/2/4-byte reads work
+    assert_eq!(vc.do_read(0x00, 1) as u32, 0x0000_0001);
+    assert_eq!(vc.do_read(0x00, 2) as u32, 0x0000_0001);
+    assert_eq!(vc.do_read(0x00, 4) as u32, 0x0000_0001);
+    // 8-byte read returns 0
+    assert_eq!(vc.do_read(0x00, 8), 0);
+    // 8-byte write to CMD is ignored
+    {
+        use std::sync::Mutex;
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let actions_clone = Arc::clone(&actions);
+        vc.set_action_handler(Box::new(move |action| {
+            actions_clone.lock().unwrap().push(action);
+        }));
+        vc.do_write(0x04, 8, 1); // CMD_RESET in 8-byte access
+        assert!(actions.lock().unwrap().is_empty());
+    }
 }

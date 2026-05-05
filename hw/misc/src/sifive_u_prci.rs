@@ -111,15 +111,14 @@ impl SifiveUPRCI {
     }
 
     pub fn reset_runtime(&self) {
+        // Reference reset only assigns these five registers;
+        // ddrpllcfg1, gemgxlpllcfg1, devicesreset, and
+        // clkmuxstatus are left untouched.
         self.hfxosccfg.set(HFXOSCCFG_RDY | HFXOSCCFG_EN);
         self.corepllcfg0.set(PLLCFG0_DEFAULT);
         self.ddrpllcfg0.set(PLLCFG0_DEFAULT);
-        self.ddrpllcfg1.set(0);
         self.gemgxlpllcfg0.set(PLLCFG0_DEFAULT);
-        self.gemgxlpllcfg1.set(0);
         self.coreclksel.set(CORECLKSEL_HFCLK);
-        self.devicesreset.set(0);
-        self.clkmuxstatus.set(0);
     }
 
     pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {

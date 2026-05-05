@@ -70,6 +70,14 @@ impl GpioPwr {
     pub fn realize(
         self: &Arc<Self>,
     ) -> Result<(), machina_hw_core::mdev::MDeviceError> {
+        {
+            let guard = self.state.lock();
+            if guard.device().parent_bus().is_none() {
+                return Err(machina_hw_core::mdev::MDeviceError::LateMutation(
+                    "must attach to parent bus before realize",
+                ));
+            }
+        }
         self.state.lock().device_mut().mark_realized()
     }
 

@@ -466,15 +466,31 @@ fn test_runtime_oracle_perm_denied_returns_error() {
 
 // -- Batch 1 Device Oracle Tests -----------------------------------
 
-/// Helper: build RuntimeOracle from a fixture, check reset against
-/// `actual` registers, and accept Skip (probe not found) or Pass.
-/// Panics on Mismatch or Error.
-fn check_batch1_reset(fixture: &OracleFixture, actual: &RegSnapshot) {
+/// Resolve the probe command from MACHINA_QEMU_HW_PROBE env var.
+fn probe_command() -> String {
+    std::env::var("MACHINA_QEMU_HW_PROBE")
+        .unwrap_or_else(|_| "/usr/local/bin/machina-qemu-hw-probe".into())
+}
+
+/// Build a RuntimeOracle from a fixture, check reset and all scenarios
+/// against the probe. Assert Pass when the probe is available; accept
+/// Skip only on NOT_FOUND (probe binary genuinely missing). Panics
+/// on Mismatch, Error, or non-NOT_FOUND Skip.
+fn check_batch1_oracle(fixture: &OracleFixture, actual: &RegSnapshot) {
     let json = serde_json::to_vec(fixture).unwrap();
-    let oracle =
-        RuntimeOracle::new(&json, "/nonexistent/probe/command", &[]).unwrap();
+    let probe = probe_command();
+    let oracle = RuntimeOracle::new(&json, &probe, &[]).unwrap();
+
+    // Reset check.
     match oracle.check_reset(actual, &BTreeMap::new()) {
-        OracleCheckResult::Skip(_) | OracleCheckResult::Pass { .. } => {}
+        OracleCheckResult::Pass { .. } => {}
+        OracleCheckResult::Skip(reason) => {
+            assert!(
+                reason.contains("NOT_FOUND"),
+                "unexpected Skip for {}: {reason}",
+                fixture.device,
+            );
+        }
         OracleCheckResult::Mismatch(r) => {
             panic!(
                 "oracle mismatch for {}: {}/{} mismatched: {:?}",
@@ -485,7 +501,37 @@ fn check_batch1_reset(fixture: &OracleFixture, actual: &RegSnapshot) {
             panic!("oracle error for {}: {e}", fixture.device);
         }
     }
+
+    // Scenario checks.
+    if fixture.scenarios.is_empty() {
+        return;
+    }
+    for result in
+        oracle.check_scenarios(&|_scenario| (BTreeMap::new(), BTreeMap::new()))
+    {
+        match result {
+            OracleCheckResult::Pass { .. } => {}
+            OracleCheckResult::Skip(reason) => {
+                assert!(
+                    reason.contains("NOT_FOUND"),
+                    "unexpected scenario Skip for {}: {reason}",
+                    fixture.device,
+                );
+            }
+            OracleCheckResult::Mismatch(r) => {
+                panic!(
+                    "oracle scenario mismatch for {}: {:?}",
+                    fixture.device, r.details
+                );
+            }
+            OracleCheckResult::Error(e) => {
+                panic!("oracle scenario error for {}: {e}", fixture.device);
+            }
+        }
+    }
 }
+
+// -- sifive_e_prci --
 
 #[test]
 fn test_oracle_batch1_sifive_e_prci() {
@@ -499,7 +545,16 @@ fn test_oracle_batch1_sifive_e_prci() {
             m.insert("PLLOUTDIV".into(), 0x0000_0100);
             m
         },
-        scenarios: vec![],
+        scenarios: vec![OracleScenario {
+            name: "write PLLCFG".into(),
+            writes: vec![(0x08, 0x1234_5678, 4)],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("PLLCFG".into(), 0x1234_5678);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
         quirks: vec![],
     };
     let mut actual = BTreeMap::new();
@@ -507,8 +562,10 @@ fn test_oracle_batch1_sifive_e_prci() {
     actual.insert("HFXOSCCFG".into(), 0xC000_0000);
     actual.insert("PLLCFG".into(), 0x8006_0000);
     actual.insert("PLLOUTDIV".into(), 0x0000_0100);
-    check_batch1_reset(&fixture, &actual);
+    check_batch1_oracle(&fixture, &actual);
 }
+
+// -- sifive_u_prci --
 
 #[test]
 fn test_oracle_batch1_sifive_u_prci() {
@@ -529,7 +586,16 @@ fn test_oracle_batch1_sifive_u_prci() {
             m.insert("CLKMUXSTATUS".into(), 0);
             m
         },
-        scenarios: vec![],
+        scenarios: vec![OracleScenario {
+            name: "write COREPLLCFG0".into(),
+            writes: vec![(0x04, 0x0ABC_DEF0, 4)],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("COREPLLCFG0".into(), 0x0ABC_DEF0);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
         quirks: vec![],
     };
     let mut actual = BTreeMap::new();
@@ -542,12 +608,13 @@ fn test_oracle_batch1_sifive_u_prci() {
     actual.insert("CORECLKSEL".into(), 1);
     actual.insert("DEVICESRESET".into(), 0);
     actual.insert("CLKMUXSTATUS".into(), 0);
-    check_batch1_reset(&fixture, &actual);
+    check_batch1_oracle(&fixture, &actual);
 }
+
+// -- pvpanic (ISA) --
 
 #[test]
 fn test_oracle_batch1_pvpanic() {
-    // PANICKED = 1 << 0
     let fixture = OracleFixture {
         device: "pvpanic".into(),
         reset_regs: {
@@ -555,24 +622,71 @@ fn test_oracle_batch1_pvpanic() {
             m.insert("EVENTS".into(), 1);
             m
         },
-        scenarios: vec![],
+        scenarios: vec![OracleScenario {
+            name: "write PANICKED".into(),
+            writes: vec![(0x00, 1, 1)],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("EVENTS".into(), 1);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
         quirks: vec![],
     };
     let mut actual = BTreeMap::new();
     actual.insert("EVENTS".into(), 1);
-    check_batch1_reset(&fixture, &actual);
+    check_batch1_oracle(&fixture, &actual);
 }
+
+// -- pvpanic-mmio --
+
+#[test]
+fn test_oracle_batch1_pvpanic_mmio() {
+    // pvpanic-mmio defaults to PANICKED | CRASH_LOADED.
+    let fixture = OracleFixture {
+        device: "pvpanic-mmio".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("EVENTS".into(), 3);
+            m
+        },
+        scenarios: vec![OracleScenario {
+            name: "write SHUTDOWN".into(),
+            writes: vec![(0x00, 4, 1)],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("EVENTS".into(), 3);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+    let mut actual = BTreeMap::new();
+    actual.insert("EVENTS".into(), 3);
+    check_batch1_oracle(&fixture, &actual);
+}
+
+// -- unimp --
 
 #[test]
 fn test_oracle_batch1_unimp() {
     let fixture = OracleFixture {
         device: "unimp".into(),
         reset_regs: BTreeMap::new(),
-        scenarios: vec![],
+        scenarios: vec![OracleScenario {
+            name: "write then read".into(),
+            writes: vec![(0x00, 0xDEAD_BEEF, 4)],
+            expected: BTreeMap::new(),
+            irqs: BTreeMap::new(),
+        }],
         quirks: vec![],
     };
-    check_batch1_reset(&fixture, &BTreeMap::new());
+    check_batch1_oracle(&fixture, &BTreeMap::new());
 }
+
+// -- virt_ctrl --
 
 #[test]
 fn test_oracle_batch1_virt_ctrl() {
@@ -584,18 +698,28 @@ fn test_oracle_batch1_virt_ctrl() {
             m.insert("CMD".into(), 0);
             m
         },
-        scenarios: vec![],
+        scenarios: vec![OracleScenario {
+            name: "write CMD_RESET".into(),
+            writes: vec![(0x04, 0x00, 4)],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("CMD".into(), 0);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
         quirks: vec![],
     };
     let mut actual = BTreeMap::new();
     actual.insert("FEATURES".into(), 0x0000_0001);
     actual.insert("CMD".into(), 0);
-    check_batch1_reset(&fixture, &actual);
+    check_batch1_oracle(&fixture, &actual);
 }
+
+// -- led --
 
 #[test]
 fn test_oracle_batch1_led() {
-    // LED is non-MMIO; intensity tracks gpio_active_high polarity.
     let fixture = OracleFixture {
         device: "led".into(),
         reset_regs: {
@@ -603,35 +727,59 @@ fn test_oracle_batch1_led() {
             m.insert("INTENSITY".into(), 100);
             m
         },
-        scenarios: vec![],
+        scenarios: vec![OracleScenario {
+            name: "set gpio high".into(),
+            writes: vec![],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("INTENSITY".into(), 255);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
         quirks: vec![],
     };
     let mut actual = BTreeMap::new();
     actual.insert("INTENSITY".into(), 100);
-    check_batch1_reset(&fixture, &actual);
+    check_batch1_oracle(&fixture, &actual);
 }
+
+// -- gpio_key --
 
 #[test]
 fn test_oracle_batch1_gpio_key() {
-    // gpio_key has no MMIO registers; IRQ line asserted on key press.
-    // The fixture captures the quiescent state: no IRQ.
     let fixture = OracleFixture {
         device: "gpio_key".into(),
         reset_regs: BTreeMap::new(),
-        scenarios: vec![],
+        scenarios: vec![OracleScenario {
+            name: "press key".into(),
+            writes: vec![],
+            expected: BTreeMap::new(),
+            irqs: {
+                let mut m = BTreeMap::new();
+                m.insert(0, true);
+                m
+            },
+        }],
         quirks: vec![],
     };
-    check_batch1_reset(&fixture, &BTreeMap::new());
+    check_batch1_oracle(&fixture, &BTreeMap::new());
 }
+
+// -- gpio_pwr --
 
 #[test]
 fn test_oracle_batch1_gpio_pwr() {
-    // gpio_pwr has no MMIO registers; dispatches action on rising edge.
     let fixture = OracleFixture {
         device: "gpio_pwr".into(),
         reset_regs: BTreeMap::new(),
-        scenarios: vec![],
+        scenarios: vec![OracleScenario {
+            name: "reset trigger".into(),
+            writes: vec![],
+            expected: BTreeMap::new(),
+            irqs: BTreeMap::new(),
+        }],
         quirks: vec![],
     };
-    check_batch1_reset(&fixture, &BTreeMap::new());
+    check_batch1_oracle(&fixture, &BTreeMap::new());
 }
