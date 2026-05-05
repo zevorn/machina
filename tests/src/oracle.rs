@@ -1123,3 +1123,123 @@ fn test_batch1_oracle_probe_argv_includes_device_name() {
         "probe args should contain device name 'test-dev', got: {args:?}"
     );
 }
+
+/// Fake-probe regression: prove an empty scenario applier mismatches
+/// against non-empty probe scenario output, and a correct applier
+/// passes. This catches the original Round 7 failure mode where
+/// scenario comparison used an empty applier and still passed/skipped.
+#[test]
+fn test_batch1_oracle_fake_probe_scenario_mismatch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let probe_path = dir.path().join("probe");
+    let log_path = dir.path().join("argv.log");
+    {
+        let log = log_path.to_str().unwrap();
+        let script = format!(
+            "#!/bin/sh
+printf '%s\\0' \"$@\" >> {log}
+found=0
+for arg in \"$@\"; do
+ case \"$arg\" in
+ --probe) found=1 ;;
+ reset) [ \"$found\" = \"1\" ] && echo '{{\"registers\":{{}},\"irqs\":{{}}}}' && exit 0 ;;
+ scenario) [ \"$found\" = \"1\" ] && echo '{{\"registers\":{{\"ACTION\":7}},\"irqs\":{{}}}}' && exit 0 ;;
+ esac
+done
+echo '{{\"registers\":{{}},\"irqs\":{{}}}}'
+"
+        );
+        let mut f = std::fs::File::create(&probe_path).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &probe_path,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    let fixture = OracleFixture {
+        device: "test-dev".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "nonempty scenario".into(),
+            writes: vec![],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("ACTION".into(), 7);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+    let json = serde_json::to_vec(&fixture).unwrap();
+    let oracle = RuntimeOracle::new(
+        &json,
+        probe_path.to_str().unwrap(),
+        &[fixture.device.clone()],
+    )
+    .unwrap();
+
+    // Empty applier must mismatch against non-empty probe output.
+    let results =
+        oracle.check_scenarios(&|_scenario| (BTreeMap::new(), BTreeMap::new()));
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        OracleCheckResult::Mismatch(r) => {
+            assert!(
+                r.details.iter().any(
+                    |d| d.register == "ACTION"
+                        && d.expected != d.actual
+                ),
+                "empty applier must mismatch against probe ACTION=7, got: {r:?}"
+            );
+        }
+        other => panic!(
+            "expected Mismatch for empty applier vs non-empty probe, got {other:?}"
+        ),
+    }
+
+    // Correct applier must pass.
+    let results = oracle.check_scenarios(&|_scenario| {
+        let mut regs = BTreeMap::new();
+        regs.insert("ACTION".into(), 7);
+        (regs, BTreeMap::new())
+    });
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        OracleCheckResult::Pass { total } => {
+            assert!(*total >= 1, "passing scenario should report >=1 total");
+        }
+        other => panic!("expected Pass for correct applier, got {other:?}"),
+    }
+
+    // Verify argv: device name, --probe, scenario, scenario-name.
+    let log = std::fs::read(&log_path).unwrap_or_default();
+    let args: Vec<&str> = log
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| std::str::from_utf8(s).unwrap_or(""))
+        .collect();
+    assert!(
+        args.contains(&"test-dev"),
+        "probe args should contain device name 'test-dev', got: {args:?}"
+    );
+    assert!(
+        args.contains(&"--probe"),
+        "probe args should contain --probe, got: {args:?}"
+    );
+    assert!(
+        args.contains(&"scenario"),
+        "probe args should contain 'scenario', got: {args:?}"
+    );
+    assert!(
+        args.contains(&"nonempty scenario"),
+        "probe args should contain scenario name, got: {args:?}"
+    );
+}
