@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
 use machina_core::device_cell::DeviceRefCell;
@@ -7,6 +7,8 @@ use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::mdev::MDevice;
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
+
+pub type CpuResetBaseCb = Box<dyn Fn(usize, u64) + Send + Sync>;
 
 const GCR_MAX_VPS: usize = 256;
 
@@ -53,9 +55,7 @@ impl CmgcrRegs {
     ) -> Self {
         let mut reset_base =
             [CM_RESET_VEC & GCR_CL_RESET_BASE_RESETBASE_MSK; GCR_MAX_VPS];
-        for entry in &mut reset_base {
-            *entry = CM_RESET_VEC & GCR_CL_RESET_BASE_RESETBASE_MSK;
-        }
+        reset_base.fill(CM_RESET_VEC & GCR_CL_RESET_BASE_RESETBASE_MSK);
         Self {
             gcr_rev,
             cluster_id,
@@ -73,6 +73,7 @@ impl CmgcrRegs {
 pub struct Cmgcr {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<CmgcrRegs>,
+    vp_reset_base_cb: Mutex<Option<CpuResetBaseCb>>,
 }
 
 impl Cmgcr {
@@ -86,9 +87,9 @@ impl Cmgcr {
         local_id: &str,
         gcr_rev: i32,
         cluster_id: u32,
-        num_vps: u32,
-        num_hart: u32,
-        num_core: u32,
+        num_vps_val: u32,
+        num_hart_val: u32,
+        num_core_val: u32,
         gcr_base: u64,
     ) -> Self {
         Self {
@@ -96,12 +97,31 @@ impl Cmgcr {
             regs: DeviceRefCell::new(CmgcrRegs::new(
                 gcr_rev,
                 cluster_id,
-                num_vps.max(1),
-                num_hart.max(1),
-                num_core.max(1),
+                num_vps_val,
+                num_hart_val,
+                num_core_val,
                 gcr_base,
             )),
+            vp_reset_base_cb: Mutex::new(None),
         }
+    }
+
+    pub fn validate_properties(&self) -> Result<(), String> {
+        let regs = self.regs.borrow();
+        if regs.num_vps == 0 {
+            return Err("cmgcr: num_vps must be > 0".to_string());
+        }
+        if regs.num_vps as usize > GCR_MAX_VPS {
+            return Err(format!(
+                "cmgcr: num_vps {} exceeds max {}",
+                regs.num_vps, GCR_MAX_VPS
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn set_vp_reset_base_cb(&self, cb: CpuResetBaseCb) {
+        *self.vp_reset_base_cb.lock().unwrap() = Some(cb);
     }
 
     pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
@@ -154,8 +174,14 @@ impl Cmgcr {
     pub fn reset_runtime(&self) {
         let mut regs = self.regs.borrow();
         regs.cpc_base = (regs.gcr_base + 0x8001) & GCR_CPC_BASE_MSK;
-        for entry in &mut regs.reset_base {
-            *entry = CM_RESET_VEC & GCR_CL_RESET_BASE_RESETBASE_MSK;
+        let num_vps = regs.num_vps as usize;
+        let cb = self.vp_reset_base_cb.lock().unwrap();
+        let val = CM_RESET_VEC & GCR_CL_RESET_BASE_RESETBASE_MSK;
+        for vp in 0..num_vps {
+            regs.reset_base[vp] = val;
+            if let Some(ref cb) = *cb {
+                cb(vp, val);
+            }
         }
     }
 }
@@ -190,21 +216,22 @@ impl MmioOps for CmgcrMmio {
                 if offset == addr {
                     let cpu_index = (c * regs.num_hart as u64 + h) as usize;
                     if cpu_index < GCR_MAX_VPS {
-                        regs.reset_base[cpu_index] =
-                            val & GCR_CL_RESET_BASE_MSK;
+                        let masked = val & GCR_CL_RESET_BASE_MSK;
+                        regs.reset_base[cpu_index] = masked;
+                        let cb = self.0.vp_reset_base_cb.lock().unwrap();
+                        if let Some(ref cb) = *cb {
+                            cb(cpu_index, masked);
+                        }
                     }
                     return;
                 }
             }
         }
 
-        match offset {
-            GCR_BASE_OFS => {
-                regs.gcr_base = val & GCR_BASE_GCRBASE_MSK;
-                let new_cpc = (regs.gcr_base + 0x8001) & GCR_CPC_BASE_MSK;
-                regs.cpc_base = new_cpc;
-            }
-            _ => {}
+        if offset == GCR_BASE_OFS {
+            regs.gcr_base = val & GCR_BASE_GCRBASE_MSK;
+            let new_cpc = (regs.gcr_base + 0x8001) & GCR_CPC_BASE_MSK;
+            regs.cpc_base = new_cpc;
         }
     }
 }

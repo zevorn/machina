@@ -127,15 +127,49 @@ fn test_pch_msi_mmio_write_non_4byte_ignored() {
 }
 
 #[test]
-fn test_pch_msi_mmio_write_nonzero_offset_ignored() {
+fn test_pch_msi_mmio_write_offset_4_accepted() {
     let msi = Arc::new(PchMsi::new_named("pch_msi", 0, 8));
     let sink = RecordingSink::new(8);
     msi.connect_output(1, recording_line(&sink, 1));
 
     let mmio = PchMsiMmio(Arc::clone(&msi));
 
+    // offset 0x04 within the 0x8 region — must fire output[1]
     mmio.write(0x04, 4, 1);
+    assert!(sink.level(1));
+}
+
+#[test]
+fn test_pch_msi_mmio_write_offset_outside_region_ignored() {
+    let msi = Arc::new(PchMsi::new_named("pch_msi", 0, 8));
+    let sink = RecordingSink::new(8);
+    msi.connect_output(1, recording_line(&sink, 1));
+
+    let mmio = PchMsiMmio(Arc::clone(&msi));
+
+    // offset 0x08 is outside the 0x8 region — no output
+    mmio.write(0x08, 4, 1);
     assert!(!sink.level(1));
+}
+
+#[test]
+fn test_pch_msi_validate_irq_num_zero() {
+    let msi = PchMsi::new_named("pch_msi", 0, 0);
+    let err = msi.validate_properties().unwrap_err();
+    assert!(err.contains("irq_num"));
+}
+
+#[test]
+fn test_pch_msi_validate_irq_num_exceeds_max() {
+    let msi = PchMsi::new_named("pch_msi", 0, 225);
+    let err = msi.validate_properties().unwrap_err();
+    assert!(err.contains("exceeds max"));
+}
+
+#[test]
+fn test_pch_msi_validate_irq_num_ok() {
+    let msi = PchMsi::new_named("pch_msi", 0, 32);
+    msi.validate_properties().unwrap();
 }
 
 #[test]
@@ -207,7 +241,7 @@ fn test_dintc_mmio_read_returns_zero() {
 }
 
 #[test]
-fn test_dintc_mmio_write_fires_cpu_output() {
+fn test_dintc_mmio_write_fires_cpu_output_and_sets_vector() {
     let dintc = Arc::new(Dintc::new_named("dintc", 4));
     let sink0 = RecordingSink::new(1);
     let sink1 = RecordingSink::new(1);
@@ -216,28 +250,40 @@ fn test_dintc_mmio_write_fires_cpu_output() {
 
     let mmio = DintcMmio(Arc::clone(&dintc));
 
-    // offset 0x2050: cpu=2, irq=5 -> fires output[2]
-    // Wait, let me recalculate. VIRT_DINTC_BASE = 0x2FE00000
-    // msg_addr = offset + VIRT_DINTC_BASE
-    // cpu_num = (msg_addr >> 12) & 0xff
-    // irq_num = (msg_addr >> 4) & 0xff
-    //
-    // For cpu=1: offset with bit12 set = 0x1000
-    // msg_addr = 0x1000 + 0x2FE00000 = 0x2FE01000
-    // cpu_num = (0x2FE01000 >> 12) & 0xff = 0x01 = 1
-    //
-    // For cpu=0: offset with no bits 12-19 = 0x0
-    // msg_addr = 0 + 0x2FE00000 = 0x2FE00000
-    // cpu_num = 0
-
-    // Fire CPU 0
-    mmio.write(0x0, 4, 0);
+    // CPU 0: irq=5 → bitpos = (4 & 0xf0) >> 4 = 0 at offset 0.
+    // irq_num is derived from msg_addr: (VIRT_DINTC_BASE >> 4) & 0xff = 0.
+    // Let's use offset 0x50 → irq_num = 5
+    mmio.write(0x50, 4, 0);
+    assert_eq!(dintc.pending_vector(0) & (1 << 5), 1 << 5);
+    assert_eq!(dintc.pending_vector(1), 0);
     assert!(sink0.level(0));
     assert!(!sink1.level(0));
 
-    // Fire CPU 1
-    mmio.write(0x1000, 4, 0);
+    // CPU 1: offset 0x1050 → cpu=1, irq=5
+    mmio.write(0x1050, 4, 0);
+    assert_eq!(dintc.pending_vector(1) & (1 << 5), 1 << 5);
     assert!(sink1.level(0));
+}
+
+#[test]
+fn test_dintc_vector_isolation() {
+    let dintc = Arc::new(Dintc::new_named("dintc", 4));
+    let sink0 = RecordingSink::new(1);
+    let sink1 = RecordingSink::new(1);
+    dintc.connect_output(0, recording_line(&sink0, 0));
+    dintc.connect_output(1, recording_line(&sink1, 0));
+
+    let mmio = DintcMmio(Arc::clone(&dintc));
+
+    // Write to cpu=1, irq=5 sets vector[5] for CPU 1 only
+    mmio.write(0x1050, 4, 0);
+    assert_eq!(dintc.pending_vector(0), 0);
+    assert_eq!(dintc.pending_vector(1), 1 << 5);
+
+    // Write to cpu=0, irq=3 sets vector[3] for CPU 0 only
+    mmio.write(0x30, 4, 0);
+    assert_eq!(dintc.pending_vector(0), 1 << 3);
+    assert_eq!(dintc.pending_vector(1), 1 << 5);
 }
 
 #[test]
@@ -294,17 +340,19 @@ fn test_dintc_power_on_default_outputs_lowered() {
 }
 
 #[test]
-fn test_dintc_reset_runtime_lowers_outputs() {
+fn test_dintc_reset_runtime_lowers_outputs_and_clears_vectors() {
     let dintc = Arc::new(Dintc::new_named("dintc", 4));
     let sink = RecordingSink::new(1);
     dintc.connect_output(0, recording_line(&sink, 0));
 
     let mmio = DintcMmio(Arc::clone(&dintc));
-    mmio.write(0x0, 4, 0);
+    mmio.write(0x50, 4, 0);
     assert!(sink.level(0));
+    assert_eq!(dintc.pending_vector(0), 1 << 5);
 
     dintc.reset_runtime();
     assert!(!sink.level(0));
+    assert_eq!(dintc.pending_vector(0), 0);
 }
 
 // ---- Liointc ----
@@ -550,4 +598,37 @@ fn test_liointc_reset_runtime() {
     assert_eq!(mmio.read(0x20, 4), 0); // ISR
     assert_eq!(mmio.read(0x24, 4), 0); // IEN
     assert_eq!(mmio.read(0x40, 4), 0); // per_core_isr[0]
+}
+
+#[test]
+fn test_liointc_mapper_reroute_while_pending() {
+    let lio = Arc::new(Liointc::new_named("liointc"));
+    let sink = RecordingSink::new(16);
+    let mmio = LiointcMmio(Arc::clone(&lio));
+
+    lio.connect_output_xy(0, 0, recording_line(&sink, 0));
+    lio.connect_output_xy(1, 0, recording_line(&sink, 4));
+
+    // Route IRQ 3 to core0:ip0, enable it, and assert pin
+    mmio.write(3, 1, (1 << 0) | (1 << 4));
+    mmio.write(0x28, 4, 1 << 3);
+    LiointcIrqSink(Arc::clone(&lio)).set_irq(3, true);
+    assert!(sink.level(0));
+    assert!(!sink.level(4));
+
+    // Reroute IRQ 3 to core1:ip0
+    mmio.write(3, 1, (1 << 1) | (1 << 4));
+    assert!(!sink.level(0));
+    assert!(sink.level(4));
+}
+
+#[test]
+fn test_liointc_per_core_isr_recomputed_not_stored() {
+    let lio = Arc::new(Liointc::new_named("liointc"));
+    let mmio = LiointcMmio(Arc::clone(&lio));
+
+    // Write to per_core_isr[0] — should be ignored since it's derived
+    mmio.write(0x40, 4, 0xFFFFFFFF);
+    // When no pins are active, per_core_isr should be 0
+    assert_eq!(mmio.read(0x40, 4), 0);
 }

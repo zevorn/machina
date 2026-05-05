@@ -7,8 +7,8 @@ pub mod sifive_u_prci;
 pub mod unimp;
 pub mod virt_ctrl;
 
-pub use cmgcr::{Cmgcr, CmgcrMmio};
-pub use cpc::{Cpc, CpcMmio};
+pub use cmgcr::{Cmgcr, CmgcrMmio, CpuResetBaseCb};
+pub use cpc::{Cpc, CpcMmio, CpcMtimeCb, CpcVpActionCb};
 pub use led::Led;
 pub use led::LedColor;
 pub use pvpanic::{Pvpanic, PvpanicEvent, PvpanicMmio};

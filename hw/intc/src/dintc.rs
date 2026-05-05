@@ -15,6 +15,7 @@ pub struct Dintc {
     #[allow(dead_code)]
     num_cpus: u32,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
+    pending_vectors: parking_lot::Mutex<Vec<u64>>,
 }
 
 impl Dintc {
@@ -34,6 +35,7 @@ impl Dintc {
                 v.resize_with(count, || None);
                 v
             }),
+            pending_vectors: parking_lot::Mutex::new(vec![0u64; count]),
         }
     }
 
@@ -89,8 +91,23 @@ impl Dintc {
         outputs[cpu_id as usize] = Some(irq);
     }
 
+    // Observable per-CPU pending vector. Returns the pending bitmap for a
+    // given CPU so tests can verify which IRQ vectors were delivered.
+    #[must_use]
+    pub fn pending_vector(&self, cpu_id: u32) -> u64 {
+        self.pending_vectors
+            .lock()
+            .get(cpu_id as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn reset_runtime(&self) {
         self.lower_outputs();
+        let mut pending = self.pending_vectors.lock();
+        for v in pending.iter_mut() {
+            *v = 0;
+        }
     }
 
     fn lower_outputs(&self) {
@@ -118,11 +135,16 @@ impl MmioOps for DintcMmio {
         let msg_addr = offset + VIRT_DINTC_BASE;
         let cpu_num = ((msg_addr >> 12) & 0xff) as u32;
         let irq_num = ((msg_addr >> 4) & 0xff) as u32;
+        // Set the pending vector bit for this CPU.
+        {
+            let mut pending = self.0.pending_vectors.lock();
+            if (cpu_num as usize) < pending.len() {
+                pending[cpu_num as usize] |= 1u64 << irq_num;
+            }
+        }
         let outputs = self.0.outputs.lock();
         if let Some(Some(line)) = outputs.get(cpu_num as usize) {
             line.set(true);
         }
-        drop(outputs);
-        let _ = irq_num;
     }
 }

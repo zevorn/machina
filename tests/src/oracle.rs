@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use machina_core::address::GPA;
 use machina_hw_core::bus::SysBusDeviceState;
+use machina_hw_core::irq::InterruptSource;
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::MemoryRegion;
 use machina_oracle::{
@@ -1229,6 +1230,573 @@ echo '{{\"registers\":{{}},\"irqs\":{{}}}}'
     assert!(
         args.contains(&"test-dev"),
         "probe args should contain device name 'test-dev', got: {args:?}"
+    );
+    assert!(
+        args.contains(&"--probe"),
+        "probe args should contain --probe, got: {args:?}"
+    );
+    assert!(
+        args.contains(&"scenario"),
+        "probe args should contain 'scenario', got: {args:?}"
+    );
+    assert!(
+        args.contains(&"nonempty scenario"),
+        "probe args should contain scenario name, got: {args:?}"
+    );
+}
+
+// -- Batch 2 Device Oracle Tests -----------------------------------
+
+fn check_batch2_oracle(
+    fixture: &OracleFixture,
+    actual_reset: &RegSnapshot,
+    apply_scenario: &ScenarioApplier,
+) {
+    let json = serde_json::to_vec(fixture).unwrap();
+    let probe = probe_command();
+    let runtime =
+        RuntimeOracle::new(&json, &probe, &[fixture.device.clone()]).unwrap();
+
+    // Reset check (probe-based).
+    match runtime.check_reset(actual_reset, &BTreeMap::new()) {
+        OracleCheckResult::Pass { .. } => {}
+        OracleCheckResult::Skip(reason) => {
+            assert!(
+                reason.contains("NOT_FOUND"),
+                "unexpected reset Skip for {}: {reason}",
+                fixture.device,
+            );
+        }
+        OracleCheckResult::Mismatch(r) => {
+            panic!(
+                "oracle reset mismatch for {}: {}/{} mismatched: {:?}",
+                fixture.device, r.mismatches, r.total, r.details
+            );
+        }
+        OracleCheckResult::Error(e) => {
+            panic!("oracle reset error for {}: {e}", fixture.device);
+        }
+    }
+
+    if fixture.scenarios.is_empty() {
+        return;
+    }
+
+    // Scenario check via fixture-based Oracle.
+    let static_oracle = Oracle::load(&json).unwrap();
+    let results = static_oracle.check_scenarios(apply_scenario);
+    for result in &results {
+        if result.mismatches > 0 {
+            panic!(
+                "fixture scenario mismatch for {}: {:?}",
+                fixture.device, result.details
+            );
+        }
+    }
+
+    // Scenario check via RuntimeOracle (probe-based).
+    for result in runtime.check_scenarios(apply_scenario) {
+        match result {
+            OracleCheckResult::Pass { .. } => {}
+            OracleCheckResult::Skip(reason) => {
+                assert!(
+                    reason.contains("NOT_FOUND"),
+                    "unexpected scenario Skip for {}: {reason}",
+                    fixture.device,
+                );
+            }
+            OracleCheckResult::Mismatch(r) => {
+                panic!(
+                    "oracle scenario mismatch for {}: {:?}",
+                    fixture.device, r.details
+                );
+            }
+            OracleCheckResult::Error(e) => {
+                panic!("oracle scenario error for {}: {e}", fixture.device);
+            }
+        }
+    }
+}
+
+// -- pch_msi --
+
+#[test]
+fn test_oracle_batch2_pch_msi() {
+    use machina_hw_intc::pch_msi::{PchMsi, PchMsiMmio};
+
+    let msi = Arc::new(PchMsi::new_named("pch_msi", 0x40, 64));
+    let msi2 = Arc::clone(&msi);
+
+    let fixture = OracleFixture {
+        device: "pch_msi".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "msg_data_LOW".into(),
+            writes: vec![(0x04, 0x0000_3745, 4)],
+            expected: BTreeMap::new(),
+            irqs: {
+                let mut m = BTreeMap::new();
+                m.insert(5, true);
+                m
+            },
+        }],
+        quirks: vec![],
+    };
+
+    let applier: Box<ScenarioApplier> =
+        Box::new(move |scenario: &OracleScenario| {
+            let (mut aspace, mut bus) = crate::hw_misc::make_test_aspace();
+            let sink = crate::hw_intc_riscv::RecordingSink::new(64);
+
+            let region = MemoryRegion::io(
+                "pch_msi",
+                0x8,
+                Arc::new(PchMsiMmio(msi2.clone())),
+            );
+            msi2.attach_to_bus(&mut bus).unwrap();
+            msi2.register_mmio(region, GPA(0x1000_0000)).unwrap();
+            msi2.connect_output(5, InterruptSource::new(sink.clone(), 5));
+            msi2.realize_onto(&mut bus, &mut aspace).unwrap();
+
+            for &(offset, val, size) in &scenario.writes {
+                aspace.write(GPA(0x1000_0000 + offset), u32::from(size), val);
+            }
+            let mut irqs = BTreeMap::new();
+            irqs.insert(5, sink.level(5));
+            (BTreeMap::new(), irqs)
+        });
+    check_batch2_oracle(&fixture, &BTreeMap::new(), &applier);
+}
+
+// -- dintc --
+
+#[test]
+fn test_oracle_batch2_dintc() {
+    use machina_hw_intc::dintc::{Dintc, DintcMmio};
+
+    let dintc = Arc::new(Dintc::new_named("dintc", 4));
+    let dintc2 = Arc::clone(&dintc);
+
+    // Dintc decodes: cpu = ((msg_addr >> 12) & 0xff), irq = ((msg_addr >> 4) & 0xff)
+    // msg_addr = VIRT_DINTC_BASE(0x2FE0_0000) + offset
+    // For cpu=1, irq=3: offset must have bits [19:12]=1, bits [11:4]=3
+    // offset = (1 << 12) | (3 << 4) = 0x1030
+    let dintc_offset: u64 = (1 << 12) | (3 << 4);
+
+    let fixture = OracleFixture {
+        device: "dintc".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "ip_to_cpu1_vec3".into(),
+            writes: vec![(dintc_offset, 0, 4)],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("PENDING_CPU1".into(), 1 << 3);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+
+    let applier: Box<ScenarioApplier> =
+        Box::new(move |scenario: &OracleScenario| {
+            let (mut aspace, mut bus) = crate::hw_misc::make_test_aspace();
+
+            let region = MemoryRegion::io(
+                "dintc",
+                0x2000,
+                Arc::new(DintcMmio(dintc2.clone())),
+            );
+            dintc2.attach_to_bus(&mut bus).unwrap();
+            dintc2.register_mmio(region, GPA(0x1000_0000)).unwrap();
+            dintc2.realize_onto(&mut bus, &mut aspace).unwrap();
+
+            for &(offset, val, size) in &scenario.writes {
+                aspace.write(GPA(0x1000_0000 + offset), u32::from(size), val);
+            }
+            let mut regs = BTreeMap::new();
+            regs.insert("PENDING_CPU1".into(), dintc2.pending_vector(1));
+            (regs, BTreeMap::new())
+        });
+    check_batch2_oracle(&fixture, &BTreeMap::new(), &applier);
+}
+
+// -- liointc --
+
+#[test]
+fn test_oracle_batch2_liointc() {
+    use machina_hw_intc::liointc::{Liointc, LiointcMmio};
+
+    let lio = Arc::new(Liointc::new_named("liointc"));
+    let lio2 = Arc::clone(&lio);
+
+    let fixture = OracleFixture {
+        device: "liointc".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "map_irq3_to_core0_ip0".into(),
+            // 1. Enable IRQ 3 via IEN_SET (offset 0x28, bit 3)
+            // 2. Map IRQ 3 → core 0, IP 0 (byte offset 3, val=0x11)
+            writes: vec![(0x28, 1 << 3, 4), (0x03, 0x11, 1)],
+            expected: BTreeMap::new(),
+            irqs: {
+                let mut m = BTreeMap::new();
+                m.insert(0, true);
+                m
+            },
+        }],
+        quirks: vec![],
+    };
+
+    let applier: Box<ScenarioApplier> =
+        Box::new(move |scenario: &OracleScenario| {
+            let (mut aspace, mut bus) = crate::hw_misc::make_test_aspace();
+            let sink = crate::hw_intc_riscv::RecordingSink::new(4);
+
+            let region = MemoryRegion::io(
+                "liointc",
+                0x10000,
+                Arc::new(LiointcMmio(lio2.clone())),
+            );
+            lio2.attach_to_bus(&mut bus).unwrap();
+            lio2.register_mmio(region, GPA(0x1000_0000)).unwrap();
+            lio2.connect_output(0, InterruptSource::new(sink.clone(), 0));
+            lio2.realize_onto(&mut bus, &mut aspace).unwrap();
+
+            for &(offset, val, size) in &scenario.writes {
+                aspace.write(GPA(0x1000_0000 + offset), u32::from(size), val);
+            }
+            lio2.set_irq(3, true);
+            let mut irqs = BTreeMap::new();
+            irqs.insert(0, sink.level(0));
+            (BTreeMap::new(), irqs)
+        });
+    check_batch2_oracle(&fixture, &BTreeMap::new(), &applier);
+}
+
+// -- cmgcr --
+
+#[test]
+fn test_oracle_batch2_cmgcr() {
+    use machina_hw_misc::cmgcr::{Cmgcr, CmgcrMmio};
+
+    let cmgcr = Arc::new(Cmgcr::new_named("cmgcr", 4, 0, 4, 1, 1, 0));
+    let cmgcr2 = Arc::new(CmgcrMmio(Arc::clone(&cmgcr)));
+
+    let fixture = OracleFixture {
+        device: "cmgcr".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("GCR_BASE".into(), 0);
+            m.insert("GCR_CPC_STATUS".into(), 0);
+            m
+        },
+        scenarios: vec![OracleScenario {
+            name: "write_gcr_base".into(),
+            writes: vec![(0x08, 0x40_0000, 4)],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("GCR_BASE".into(), 0x40_0000);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+
+    let mut actual = BTreeMap::new();
+    actual.insert("GCR_BASE".into(), 0);
+    actual.insert("GCR_CPC_STATUS".into(), 0);
+
+    let applier = mmio_scenario_applier(
+        cmgcr2.clone(),
+        "cmgcr".to_string(),
+        0x10000,
+        0x1000_0000,
+        |aspace, base| {
+            let mut m = BTreeMap::new();
+            m.insert("GCR_BASE".into(), aspace.read(GPA(base + 0x08), 4));
+            m
+        },
+    );
+    check_batch2_oracle(&fixture, &actual, &applier);
+}
+
+// -- cpc --
+
+#[test]
+fn test_oracle_batch2_cpc() {
+    use machina_hw_misc::cpc::{Cpc, CpcMmio};
+
+    let cpc = Arc::new(Cpc::new_named("cpc", 0, 4, 4, 1, 0));
+    let cpc2 = Arc::new(CpcMmio(Arc::clone(&cpc)));
+
+    let fixture = OracleFixture {
+        device: "cpc".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "write_vp_run".into(),
+            writes: vec![(0x0050, 0x0000_0001, 4)],
+            expected: BTreeMap::new(),
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+
+    let applier = mmio_scenario_applier(
+        cpc2.clone(),
+        "cpc".to_string(),
+        0x10000,
+        0x1000_0000,
+        |_aspace, _base| BTreeMap::new(),
+    );
+    check_batch2_oracle(&fixture, &BTreeMap::new(), &applier);
+}
+
+// -- loongarch_ipi --
+
+#[test]
+fn test_oracle_batch2_loongarch_ipi() {
+    use machina_hw_intc::ipi::{LoongArchIpi, LoongArchIpiMmio};
+
+    let ipi = Arc::new(LoongArchIpi::new_named("loongarch_ipi", 4));
+    let ipi2 = Arc::clone(&ipi);
+
+    let fixture = OracleFixture {
+        device: "loongarch_ipi".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "send_ipi_to_cpu0".into(),
+            writes: vec![(0x040, (0u64 << 16) | 3, 4)],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("STATUS".into(), 1 << 3);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+
+    let applier: Box<ScenarioApplier> =
+        Box::new(move |scenario: &OracleScenario| {
+            let (mut aspace, mut bus) = crate::hw_misc::make_test_aspace();
+            let mmio = LoongArchIpiMmio(Arc::clone(&ipi2), 0);
+
+            let region =
+                MemoryRegion::io("loongarch_ipi", 0x200, Arc::new(mmio));
+            ipi2.attach_to_bus(&mut bus).unwrap();
+            ipi2.register_mmio(region, GPA(0x1000_0000)).unwrap();
+            ipi2.realize_onto(&mut bus, &mut aspace).unwrap();
+
+            for &(offset, val, size) in &scenario.writes {
+                aspace.write(GPA(0x1000_0000 + offset), u32::from(size), val);
+            }
+            let mut regs = BTreeMap::new();
+            regs.insert("STATUS".into(), ipi2.mmio_read(0, 0x000));
+            (regs, BTreeMap::new())
+        });
+    check_batch2_oracle(&fixture, &BTreeMap::new(), &applier);
+}
+
+// -- riscv_aplic --
+
+#[test]
+fn test_oracle_batch2_riscv_aplic() {
+    use machina_hw_intc::aplic::{RiscvAplic, RiscvAplicMmio};
+
+    let aplic =
+        Arc::new(RiscvAplic::new_named("riscv_aplic", 32, 4, 7, false, false));
+    let aplic2 = Arc::clone(&aplic);
+
+    let fixture = OracleFixture {
+        device: "riscv_aplic".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("DOMAINCFG".into(), 0x8000_0000);
+            m.insert("SOURCECFG_1".into(), 0);
+            m
+        },
+        scenarios: vec![OracleScenario {
+            name: "write_domaincfg".into(),
+            writes: vec![(0x0000, 0x100, 4)],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("DOMAINCFG".into(), 0x8000_0100);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+
+    let mut actual = BTreeMap::new();
+    actual.insert("DOMAINCFG".into(), 0x8000_0000);
+    actual.insert("SOURCECFG_1".into(), 0);
+
+    let applier = mmio_scenario_applier(
+        Arc::new(RiscvAplicMmio(Arc::clone(&aplic2))),
+        "riscv_aplic".to_string(),
+        0x8000,
+        0x1000_0000,
+        |aspace, base| {
+            let mut m = BTreeMap::new();
+            m.insert("DOMAINCFG".into(), aspace.read(GPA(base), 4));
+            m
+        },
+    );
+    check_batch2_oracle(&fixture, &actual, &applier);
+}
+
+// -- riscv_imsic --
+
+#[test]
+fn test_oracle_batch2_riscv_imsic() {
+    use machina_hw_intc::imsic::RiscvImsic;
+
+    let imsic = Arc::new(RiscvImsic::new_named("riscv_imsic", false, 0, 2, 64));
+    let imsic2 = Arc::clone(&imsic);
+
+    let fixture = OracleFixture {
+        device: "riscv_imsic".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("EIDELIVERY_0".into(), 0);
+            m.insert("EITHRESHOLD_0".into(), 0);
+            m
+        },
+        scenarios: vec![OracleScenario {
+            name: "set_eidelivery".into(),
+            writes: vec![],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("EIDELIVERY_0".into(), 1);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+
+    let mut actual = BTreeMap::new();
+    actual.insert("EIDELIVERY_0".into(), 0);
+    actual.insert("EITHRESHOLD_0".into(), 0);
+
+    let applier: Box<ScenarioApplier> =
+        Box::new(move |scenario: &OracleScenario| {
+            if scenario.name == "set_eidelivery" {
+                let mut val = 0u64;
+                let reg = 0x70u64 | (1u64 << 16) | (32u64 << 24);
+                imsic2.rmw(reg, &mut val, 1, 1);
+            }
+            let mut regs = BTreeMap::new();
+            regs.insert("EIDELIVERY_0".into(), imsic2.eidelivery_val(0) as u64);
+            (regs, BTreeMap::new())
+        });
+    check_batch2_oracle(&fixture, &actual, &applier);
+}
+
+// -- Batch 2 fake-probe regression --
+
+#[test]
+fn test_batch2_oracle_fake_probe_scenario_mismatch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let probe_path = dir.path().join("probe");
+    let log_path = dir.path().join("argv.log");
+    {
+        let log = log_path.to_str().unwrap();
+        let script = format!(
+            "#!/bin/sh
+printf '%s\\0' \"$@\" >> {log}
+found=0
+for arg in \"$@\"; do
+ case \"$arg\" in
+ --probe) found=1 ;;
+ reset) [ \"$found\" = \"1\" ] && echo '{{\"registers\":{{}},\"irqs\":{{}}}}' && exit 0 ;;
+ scenario) [ \"$found\" = \"1\" ] && echo '{{\"registers\":{{\"DOMAINCFG\":0}},\"irqs\":{{}}}}' && exit 0 ;;
+ esac
+done
+echo '{{\"registers\":{{}},\"irqs\":{{}}}}'
+"
+        );
+        let mut f = std::fs::File::create(&probe_path).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &probe_path,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    let fixture = OracleFixture {
+        device: "test-batch2".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "nonempty scenario".into(),
+            writes: vec![],
+            expected: {
+                let mut m = BTreeMap::new();
+                m.insert("DOMAINCFG".into(), 1);
+                m
+            },
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+    let json = serde_json::to_vec(&fixture).unwrap();
+    let oracle = RuntimeOracle::new(
+        &json,
+        probe_path.to_str().unwrap(),
+        &[fixture.device.clone()],
+    )
+    .unwrap();
+
+    // Empty applier must mismatch against non-empty probe output.
+    let results =
+        oracle.check_scenarios(&|_scenario| (BTreeMap::new(), BTreeMap::new()));
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        OracleCheckResult::Mismatch(r) => {
+            assert!(
+                r.mismatches > 0,
+                "empty applier must mismatch against non-empty probe, got {r:?}"
+            );
+        }
+        other => panic!(
+            "expected Mismatch for empty applier vs non-empty probe, got {other:?}"
+        ),
+    }
+
+    // Correct applier must pass.
+    let results = oracle.check_scenarios(&|_scenario| {
+        let mut regs = BTreeMap::new();
+        regs.insert("DOMAINCFG".into(), 0);
+        (regs, BTreeMap::new())
+    });
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        OracleCheckResult::Pass { total } => {
+            assert!(*total >= 1, "passing scenario should report >=1 total");
+        }
+        other => panic!("expected Pass for correct applier, got {other:?}"),
+    }
+
+    // Verify argv: device name, --probe, scenario, scenario-name.
+    let log = std::fs::read(&log_path).unwrap_or_default();
+    let args: Vec<&str> = log
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| std::str::from_utf8(s).unwrap_or(""))
+        .collect();
+    assert!(
+        args.contains(&"test-batch2"),
+        "probe args should contain device name 'test-batch2', got: {args:?}"
     );
     assert!(
         args.contains(&"--probe"),

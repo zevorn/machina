@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
 use machina_core::device_cell::DeviceRefCell;
@@ -7,6 +7,9 @@ use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::mdev::MDevice;
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
+
+pub type CpcMtimeCb = Box<dyn Fn() -> u64 + Send + Sync>;
+pub type CpcVpActionCb = Box<dyn Fn(u64, bool) + Send + Sync>;
 
 const CPC_MTIME_REG_OFS: u64 = 0x50;
 const CPC_CM_STAT_CONF_OFS: u64 = 0x1008;
@@ -56,6 +59,8 @@ impl CpcRegs {
 pub struct Cpc {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<CpcRegs>,
+    mtime_cb: Mutex<Option<CpcMtimeCb>>,
+    vp_action_cb: Mutex<Option<CpcVpActionCb>>,
 }
 
 impl Cpc {
@@ -77,12 +82,38 @@ impl Cpc {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
             regs: DeviceRefCell::new(CpcRegs::new(
                 cluster_id,
-                num_vp.max(1),
-                num_hart.max(1),
-                num_core.max(1),
+                num_vp,
+                num_hart,
+                num_core,
                 vps_start_running_mask,
             )),
+            mtime_cb: Mutex::new(None),
+            vp_action_cb: Mutex::new(None),
         }
+    }
+
+    pub fn validate_properties(&self) -> Result<(), String> {
+        let regs = self.regs.borrow();
+        let max_mask = if regs.num_vp >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << regs.num_vp) - 1
+        };
+        if regs.vps_start_running_mask & !max_mask != 0 {
+            return Err(format!(
+                "cpc: vps_start_running_mask 0x{:x} exceeds num_vp {}",
+                regs.vps_start_running_mask, regs.num_vp
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn set_mtime_cb(&self, cb: CpcMtimeCb) {
+        *self.mtime_cb.lock().unwrap() = Some(cb);
+    }
+
+    pub fn set_vp_action_cb(&self, cb: CpcVpActionCb) {
+        *self.vp_action_cb.lock().unwrap() = Some(cb);
     }
 
     pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
@@ -157,14 +188,24 @@ impl MmioOps for CpcMmio {
 
         match offset {
             CPC_CM_STAT_CONF_OFS => CPC_Cx_STAT_CONF_SEQ_STATE_U5,
-            CPC_MTIME_REG_OFS => 0,
+            CPC_MTIME_REG_OFS => {
+                let cb = self.0.mtime_cb.lock().unwrap();
+                match *cb {
+                    Some(ref f) => f(),
+                    None => 0,
+                }
+            }
             _ => 0,
         }
     }
 
     fn write(&self, offset: u64, _size: u32, val: u64) {
         let mut regs = self.0.regs.borrow();
-        let vp_run_mask = (1u64 << regs.num_vp) - 1;
+        let vp_run_mask = if regs.num_vp >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << regs.num_vp) - 1
+        };
 
         for c in 0..regs.num_core as u64 {
             let cpu_index = c * regs.num_hart as u64
@@ -176,6 +217,14 @@ impl MmioOps for CpcMmio {
             {
                 let mask = (val << cpu_index) & vp_run_mask;
                 regs.vps_running_mask |= mask;
+                let action_cb = self.0.vp_action_cb.lock().unwrap();
+                if let Some(ref cb) = *action_cb {
+                    for bit in 0..64 {
+                        if mask & (1u64 << bit) != 0 {
+                            cb(bit, true);
+                        }
+                    }
+                }
                 return;
             }
             if offset
@@ -183,6 +232,14 @@ impl MmioOps for CpcMmio {
             {
                 let mask = (val << cpu_index) & vp_run_mask;
                 regs.vps_running_mask &= !mask;
+                let action_cb = self.0.vp_action_cb.lock().unwrap();
+                if let Some(ref cb) = *action_cb {
+                    for bit in 0..64 {
+                        if mask & (1u64 << bit) != 0 {
+                            cb(bit, false);
+                        }
+                    }
+                }
                 return;
             }
         }

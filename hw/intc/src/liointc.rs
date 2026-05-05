@@ -185,19 +185,18 @@ impl Liointc {
                     regs.per_core_isr[core] |= 1 << irq;
                 }
             }
-            for ip in 0..NUM_IPS {
+            for (ip, item) in per_ip_isr.iter_mut().enumerate().take(NUM_IPS) {
                 if regs.mapper[irq] & (1 << (ip + 4)) != 0 {
-                    per_ip_isr[ip] |= 1 << irq;
+                    *item |= 1 << irq;
                 }
             }
         }
 
         let outputs = self.outputs.lock();
         for core in 0..NUM_CORES {
-            for ip in 0..NUM_IPS {
+            for (ip, &ip_isr) in per_ip_isr.iter().enumerate().take(NUM_IPS) {
                 let parent = parent_index(core, ip);
-                let new_state =
-                    regs.per_core_isr[core] != 0 && per_ip_isr[ip] != 0;
+                let new_state = regs.per_core_isr[core] != 0 && ip_isr != 0;
                 if regs.parent_state[parent] != new_state {
                     regs.parent_state[parent] = new_state;
                     if let Some(Some(line)) = outputs.get(parent) {
@@ -225,13 +224,13 @@ impl MmioOps for LiointcMmio {
             return u64::from(regs.mapper[offset as usize]);
         }
 
-        if size != 4 || (offset % 4) != 0 {
+        if size != 4 || !offset.is_multiple_of(4) {
             return 0;
         }
 
-        if offset >= R_PER_CORE_ISR && offset < R_END {
+        if (R_PER_CORE_ISR..R_END).contains(&offset) {
             let rel = offset - R_PER_CORE_ISR;
-            if rel % R_ISR_SIZE != 0 {
+            if !rel.is_multiple_of(R_ISR_SIZE) {
                 return 0;
             }
             let core = rel / R_ISR_SIZE;
@@ -249,23 +248,23 @@ impl MmioOps for LiointcMmio {
         let value = val as u32;
 
         if size == 1 && offset < R_MAPPER_END {
-            let mut regs = self.0.regs.borrow();
-            regs.mapper[offset as usize] = value as u8;
+            self.0.regs.borrow().mapper[offset as usize] = value as u8;
+            self.0.update_outputs();
             return;
         }
 
-        if size != 4 || (offset % 4) != 0 {
+        if size != 4 || !offset.is_multiple_of(4) {
             return;
         }
 
-        if offset >= R_PER_CORE_ISR && offset < R_END {
+        if (R_PER_CORE_ISR..R_END).contains(&offset) {
             let rel = offset - R_PER_CORE_ISR;
-            if rel % R_ISR_SIZE != 0 {
+            if !rel.is_multiple_of(R_ISR_SIZE) {
                 return;
             }
-            let core = rel / R_ISR_SIZE;
-            let mut regs = self.0.regs.borrow();
-            regs.per_core_isr[core as usize] = value;
+            // Reference recomputes per-core ISR from pin/enable/mapper.
+            // Guest writes to per-core ISR are ignored; the value is
+            // derived state.
             return;
         }
 

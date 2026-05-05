@@ -9,11 +9,26 @@ use machina_hw_core::mdev::MDevice;
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
-const PCH_MSI_IRQ_NUM: usize = 224;
+const PCH_MSI_MAX_IRQ_NUM: u32 = 224;
 
 struct PchMsiRegs {
     irq_base: u32,
     irq_num: u32,
+}
+
+impl PchMsiRegs {
+    fn validate(&self) -> Result<(), String> {
+        if self.irq_num == 0 {
+            return Err("pch_msi: irq_num must be > 0".to_string());
+        }
+        if self.irq_num > PCH_MSI_MAX_IRQ_NUM {
+            return Err(format!(
+                "pch_msi: irq_num {} exceeds max {}",
+                self.irq_num, PCH_MSI_MAX_IRQ_NUM
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub struct PchMsi {
@@ -30,19 +45,20 @@ impl PchMsi {
 
     #[must_use]
     pub fn new_named(local_id: &str, irq_base: u32, irq_num: u32) -> Self {
-        let irq_count = (irq_num as usize).clamp(1, PCH_MSI_IRQ_NUM);
+        let irq_count = irq_num as usize;
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(PchMsiRegs {
-                irq_base,
-                irq_num: irq_num.max(1),
-            }),
+            regs: DeviceRefCell::new(PchMsiRegs { irq_base, irq_num }),
             outputs: parking_lot::Mutex::new({
                 let mut v = Vec::with_capacity(irq_count);
                 v.resize_with(irq_count, || None);
                 v
             }),
         }
+    }
+
+    pub fn validate_properties(&self) -> Result<(), String> {
+        self.regs.borrow().validate()
     }
 
     pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
@@ -125,7 +141,7 @@ impl MmioOps for PchMsiMmio {
         if size != 4 {
             return;
         }
-        if offset != 0 {
+        if offset >= 8 {
             return;
         }
         let regs = self.0.regs.borrow();
