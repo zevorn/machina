@@ -334,20 +334,34 @@ impl FwCfg {
 
     /// Execute a DMA transfer.
     ///
-    /// Reads the descriptor from `desc_addr` via `access`, then
-    /// performs select/read/skip/write operations according to
-    /// the control field. On completion, writes back the control
-    /// field (0 on success, ERROR on failure).
+    /// Reads the 16-byte big-endian descriptor from `desc_addr` via
+    /// `access`, then performs the highest-priority operation among
+    /// READ / WRITE / SKIP (QEMU priority: READ > WRITE > SKIP).
+    /// SELECT is independent and always applied first.
+    ///
+    /// On completion, writes back only the 4-byte big-endian control
+    /// field (0 on success, ERROR bit on failure).  Length and address
+    /// fields in guest memory are preserved.
+    ///
+    /// Guest-visible DMA errors are reported via the descriptor ERROR
+    /// status bit — `do_dma` returns `Ok(())` for these.  It returns
+    /// `Err` only when the DMA access layer itself fails.
     pub fn do_dma(
         &self,
         desc_addr: u64,
         access: &dyn FwCfgDmaAccess,
     ) -> Result<(), String> {
         let mut desc_buf = [0u8; 16];
-        access.dma_read(desc_addr, &mut desc_buf)?;
-        let desc = FwCfgDmaDescriptor::decode(&desc_buf)
-            .ok_or("short DMA descriptor")?;
+        let n = access.dma_read(desc_addr, &mut desc_buf)?;
 
+        if n < 16 {
+            // Short descriptor read — set ERROR in guest descriptor
+            let _ = access
+                .dma_write(desc_addr, &(dma_ctl::ERROR as u32).to_be_bytes());
+            return Ok(());
+        }
+
+        let desc = FwCfgDmaDescriptor::decode(&desc_buf).unwrap();
         let ctl = desc.control as u16;
         let mut dma_error = false;
 
@@ -356,6 +370,7 @@ impl FwCfg {
             self.set_selector(key);
         }
 
+        // QEMU priority: READ, then WRITE, then SKIP (mutually exclusive)
         if ctl & dma_ctl::READ != 0 {
             let entry = *self.cur_entry.lock().unwrap();
             let entries = self.entries.borrow();
@@ -378,38 +393,29 @@ impl FwCfg {
                 }
                 let written =
                     access.dma_write(desc.address + offset as u64, &buf)?;
-                offset += written as u32;
                 if written < chunk {
+                    dma_error = true;
+                    offset += written as u32;
                     break;
                 }
+                offset += written as u32;
             }
-            *self.cur_offset.lock().unwrap() += desc.length;
-        }
-
-        if ctl & dma_ctl::SKIP != 0 {
-            *self.cur_offset.lock().unwrap() += desc.length;
-        }
-
-        if ctl & dma_ctl::WRITE != 0 {
+            *self.cur_offset.lock().unwrap() += offset;
+        } else if ctl & dma_ctl::WRITE != 0 {
+            // Guest WRITE is denied — set ERROR, descriptor carries the
+            // fault; do_dma returns Ok(())
             dma_error = true;
+        } else if ctl & dma_ctl::SKIP != 0 {
+            *self.cur_offset.lock().unwrap() += desc.length;
         }
 
-        // Write back descriptor status
+        // Write back only the 4-byte big-endian control field
         let status = if dma_error {
             dma_ctl::ERROR as u32
         } else {
             0u32
         };
-        let status_desc = FwCfgDmaDescriptor {
-            control: status,
-            length: 0,
-            address: 0,
-        };
-        access.dma_write(desc_addr, &status_desc.encode())?;
-
-        if dma_error {
-            return Err("fw_cfg DMA write not permitted".to_string());
-        }
+        access.dma_write(desc_addr, &status.to_be_bytes())?;
 
         Ok(())
     }

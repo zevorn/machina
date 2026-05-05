@@ -209,8 +209,8 @@ impl RuntimeOracle {
     /// Run the probe command and capture its JSON output.
     ///
     /// Returns `Ok(ProbeOutput)` on success, `Err(msg)` on failure.
-    /// The error starts with "CMD:" if the probe command could not
-    /// be started (command not found).
+    /// The error starts with "NOT_FOUND:" only when the probe command
+    /// is genuinely unavailable (`ErrorKind::NotFound`).
     fn run_probe(
         &self,
         mode: &str,
@@ -228,7 +228,14 @@ impl RuntimeOracle {
         cmd.stdout(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| {
-            format!("CMD:cannot start probe '{}': {e}", self.probe_cmd)
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "NOT_FOUND:cannot start probe '{}': {e}",
+                    self.probe_cmd
+                )
+            } else {
+                format!("cannot start probe '{}': {e}", self.probe_cmd)
+            }
         })?;
 
         let mut stdout = Vec::new();
@@ -271,7 +278,7 @@ impl RuntimeOracle {
         let probe = match self.run_probe("reset", None) {
             Ok(p) => p,
             Err(e) => {
-                if e.starts_with("CMD:") {
+                if e.starts_with("NOT_FOUND:") {
                     return OracleCheckResult::Skip(e);
                 }
                 return OracleCheckResult::Error(e);
@@ -309,7 +316,7 @@ impl RuntimeOracle {
                     match self.run_probe("scenario", Some(&scenario.name)) {
                         Ok(p) => p,
                         Err(e) => {
-                            if e.starts_with("CMD:") {
+                            if e.starts_with("NOT_FOUND:") {
                                 return OracleCheckResult::Skip(e);
                             }
                             return OracleCheckResult::Error(e);
@@ -386,7 +393,15 @@ fn check_snapshot(
             continue;
         }
         result.total += 1;
-        let actual_val = actual_irqs.get(&irq).copied().unwrap_or(false);
+        let Some(&actual_val) = actual_irqs.get(&irq) else {
+            result.mismatches += 1;
+            result.details.push(OracleMismatch {
+                register: irq_key,
+                expected: u64::from(expected),
+                actual: 0,
+            });
+            continue;
+        };
         if actual_val != expected {
             result.mismatches += 1;
             result.details.push(OracleMismatch {

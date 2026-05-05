@@ -286,3 +286,180 @@ fn test_runtime_oracle_skip_when_probe_fails() {
         other => panic!("expected Error for failing probe, got {other:?}"),
     }
 }
+
+// -- RuntimeOracle: AC-6 contract tests --
+
+#[test]
+fn test_oracle_missing_false_irq_is_mismatch() {
+    // When an expected IRQ (even false/deasserted) is missing from the
+    // actual IRQ map, it must be flagged as a mismatch — the same class
+    // of false-pass we fixed for registers in Round 2.
+    let fixture = OracleFixture {
+        device: "test".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "irq test".into(),
+            writes: vec![],
+            expected: BTreeMap::new(),
+            irqs: {
+                let mut m = BTreeMap::new();
+                m.insert(0, false);
+                m.insert(1, true);
+                m
+            },
+        }],
+        quirks: vec![],
+    };
+    let json = serde_json::to_vec(&fixture).unwrap();
+    let oracle = Oracle::load(&json).unwrap();
+
+    // Empty actual IRQ map — both expected IRQs are missing.
+    let results =
+        oracle.check_scenarios(&|_scenario| (BTreeMap::new(), BTreeMap::new()));
+    assert_eq!(results.len(), 1);
+    // IRQ 0 (false) missing → mismatch; IRQ 1 (true) missing → mismatch
+    assert_eq!(results[0].mismatches, 2);
+    // Verify the false IRQ appears in the mismatch details
+    assert!(results[0]
+        .details
+        .iter()
+        .any(|d| d.register == "IRQ_0" && d.expected == 0));
+}
+
+#[test]
+fn test_oracle_irqs_match_when_present() {
+    let fixture = OracleFixture {
+        device: "test".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "irq match".into(),
+            writes: vec![],
+            expected: BTreeMap::new(),
+            irqs: {
+                let mut m = BTreeMap::new();
+                m.insert(0, false);
+                m.insert(1, true);
+                m
+            },
+        }],
+        quirks: vec![],
+    };
+    let json = serde_json::to_vec(&fixture).unwrap();
+    let oracle = Oracle::load(&json).unwrap();
+
+    // Actual IRQs match expected.
+    let results = oracle.check_scenarios(&|_scenario| {
+        let mut irqs = BTreeMap::new();
+        irqs.insert(0, false);
+        irqs.insert(1, true);
+        (BTreeMap::new(), irqs)
+    });
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].mismatches, 0);
+    assert_eq!(results[0].total, 2);
+}
+
+/// Write a probe script that records argv into a shared log.
+fn write_argv_logging_probe(
+    dir: &std::path::Path,
+    name: &str,
+) -> std::path::PathBuf {
+    let path = dir.join(name);
+    let log_path = dir.join("argv.log");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\0' \"$@\" >> {log}\n",
+        log = log_path.to_str().unwrap()
+    );
+    let script = script + "echo '{\"registers\":{},\"irqs\":{}}'\n";
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    path
+}
+
+#[test]
+fn test_runtime_oracle_scenario_argv_separate() {
+    // The probe must receive --probe, scenario, <name> as separate argv.
+    let fixture = OracleFixture {
+        device: "test".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![OracleScenario {
+            name: "write LCR".into(),
+            writes: vec![],
+            expected: BTreeMap::new(),
+            irqs: BTreeMap::new(),
+        }],
+        quirks: vec![],
+    };
+    let json = serde_json::to_vec(&fixture).unwrap();
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let probe_path = write_argv_logging_probe(dir.path(), "probe");
+    let log_path = dir.path().join("argv.log");
+
+    let oracle =
+        RuntimeOracle::new(&json, probe_path.to_str().unwrap(), &[]).unwrap();
+
+    let _ =
+        oracle.check_scenarios(&|_scenario| (BTreeMap::new(), BTreeMap::new()));
+
+    // Read the logged argv. It should contain three NUL-terminated
+    // strings: --probe, scenario, write LCR.
+    let log = std::fs::read(&log_path).unwrap_or_default();
+    let args: Vec<&str> = log
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| std::str::from_utf8(s).unwrap_or(""))
+        .collect();
+    assert_eq!(args, vec!["--probe", "scenario", "write LCR"]);
+}
+
+#[test]
+fn test_runtime_oracle_perm_denied_returns_error() {
+    let fixture = sample_fixture();
+    let json = serde_json::to_vec(&fixture).unwrap();
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let probe_path = dir.path().join("noexec-probe");
+    {
+        let mut f = std::fs::File::create(&probe_path).unwrap();
+        f.write_all(b"#!/bin/sh\necho '{}'\n").unwrap();
+        f.sync_all().unwrap();
+    }
+    // No execute permission — permission denied on spawn.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &probe_path,
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+    }
+
+    let oracle =
+        RuntimeOracle::new(&json, probe_path.to_str().unwrap(), &[]).unwrap();
+
+    let actual = BTreeMap::new();
+    match oracle.check_reset(&actual, &BTreeMap::new()) {
+        OracleCheckResult::Error(msg) => {
+            // Should NOT be Skip; must be Error for permission denied.
+            assert!(
+                msg.contains("Permission denied")
+                    || msg.contains("cannot start probe"),
+                "expected Permission denied or cannot start, got: {msg}"
+            );
+        }
+        other => {
+            panic!("expected Error for permission-denied probe, got {other:?}")
+        }
+    }
+}

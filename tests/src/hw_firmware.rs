@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use machina_hw_firmware::{
-    keys, FwCfg, FwCfgDataGenerator, FwCfgDmaAccess, FwCfgDmaDescriptor,
+    dma_ctl, keys, FwCfg, FwCfgDataGenerator, FwCfgDmaAccess,
+    FwCfgDmaDescriptor,
 };
 
 // -- Positive Tests --
@@ -335,7 +336,7 @@ fn test_fw_cfg_dma_write_denied() {
     access.write_mem(0x100, &desc.encode());
 
     let result = fw.do_dma(0x100, &access);
-    assert!(result.is_err());
+    assert!(result.is_ok(), "WRITE denial must return Ok(())");
 
     // Descriptor should have ERROR bit set in control (big-endian)
     let status = access.read_mem(0x100, 4);
@@ -497,4 +498,200 @@ fn test_fw_cfg_data_generator_error() {
     let result = gen.get_data();
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), "generator failed");
+}
+
+// -- DMA ABI contract tests (contiguous-memory helper) --
+
+/// Contiguous-memory DMA test helper.  Backed by a `Vec<u8>` behind a
+/// `Mutex`, so `dma_read` and `dma_write` access the same linear space.
+struct DmaMem {
+    data: Mutex<Vec<u8>>,
+}
+
+impl DmaMem {
+    fn new(size: usize) -> Self {
+        Self {
+            data: Mutex::new(vec![0u8; size]),
+        }
+    }
+
+    fn put(&self, offset: usize, bytes: &[u8]) {
+        let mut data = self.data.lock().unwrap();
+        let end = (offset + bytes.len()).min(data.len());
+        let n = end.saturating_sub(offset);
+        data[offset..end].copy_from_slice(&bytes[..n]);
+    }
+
+    fn be32_at(&self, offset: usize) -> u32 {
+        let data = self.data.lock().unwrap();
+        let b = &data[offset..offset + 4];
+        u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+    }
+
+    fn be64_at(&self, offset: usize) -> u64 {
+        let data = self.data.lock().unwrap();
+        let b = &data[offset..offset + 8];
+        u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+    }
+
+    fn bytes_at(&self, offset: usize, len: usize) -> Vec<u8> {
+        let data = self.data.lock().unwrap();
+        data[offset..offset + len].to_vec()
+    }
+}
+
+impl FwCfgDmaAccess for DmaMem {
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> Result<usize, String> {
+        let data = self.data.lock().unwrap();
+        let start = addr as usize;
+        let end = (start + buf.len()).min(data.len());
+        let n = end.saturating_sub(start);
+        buf[..n].copy_from_slice(&data[start..end]);
+        // Bytes beyond the buffer stay zero (buf is pre-filled with 0).
+        Ok(n)
+    }
+
+    fn dma_write(&self, addr: u64, buf: &[u8]) -> Result<usize, String> {
+        let mut data = self.data.lock().unwrap();
+        let start = addr as usize;
+        let end = (start + buf.len()).min(data.len());
+        let n = end.saturating_sub(start);
+        data[start..end].copy_from_slice(&buf[..n]);
+        Ok(n)
+    }
+}
+
+#[test]
+fn test_fw_cfg_dma_status_writeback_preserves_length_address() {
+    // After a successful DMA transfer, only the 4-byte big-endian control
+    // field is written back.  Length and address must be preserved.
+    let fw = FwCfg::new(10);
+    fw.add_bytes(0x0003, vec![0x01, 0x02, 0x03, 0x04]);
+    fw.set_dma_enabled(true);
+
+    let mem = DmaMem::new(256);
+    let desc = FwCfgDmaDescriptor {
+        control: 0x0003_000A, // SELECT | READ, selector=0x0003
+        length: 4,
+        address: 0x80, // data destination
+    };
+    mem.put(0x00, &desc.encode()); // descriptor at offset 0
+
+    fw.do_dma(0x00, &mem).unwrap();
+
+    // Control field (0x00..0x04) is zeroed (success status).
+    assert_eq!(mem.be32_at(0x00), 0x0000_0000);
+    // Length (0x04..0x08) preserved.
+    assert_eq!(mem.be32_at(0x04), 0x0000_0004);
+    // Address (0x08..0x10) preserved.
+    assert_eq!(mem.be64_at(0x08), 0x0000_0000_0000_0080);
+    // Data was written to the correct destination.
+    assert_eq!(mem.bytes_at(0x80, 4), vec![0x01, 0x02, 0x03, 0x04]);
+}
+
+#[test]
+fn test_fw_cfg_dma_write_denied_returns_ok() {
+    // Guest WRITE denial must set ERROR in the descriptor status and
+    // return Ok(()) — the error is guest-visible descriptor status,
+    // not a Rust-level operation error.
+    let fw = FwCfg::new(10);
+    fw.set_dma_enabled(true);
+
+    let mem = DmaMem::new(256);
+    let desc = FwCfgDmaDescriptor {
+        control: 0x0000_0010, // WRITE only
+        length: 4,
+        address: 0x100,
+    };
+    mem.put(0x00, &desc.encode());
+
+    let result = fw.do_dma(0x00, &mem);
+    assert!(result.is_ok(), "WRITE denial must return Ok(())");
+
+    // Descriptor status has ERROR bit set (big-endian at offset 0).
+    assert_eq!(mem.be32_at(0x00), dma_ctl::ERROR as u32);
+    // Length and address are preserved.
+    assert_eq!(mem.be32_at(0x04), 0x0000_0004);
+    assert_eq!(mem.be64_at(0x08), 0x0000_0000_0000_0100);
+}
+
+#[test]
+fn test_fw_cfg_dma_short_descriptor_read_sets_error() {
+    // When dma_read returns fewer than 16 bytes for the descriptor,
+    // do_dma must set ERROR status (when status writeback is possible).
+    let fw = FwCfg::new(10);
+    fw.set_dma_enabled(true);
+
+    // Descriptor at the end of a small buffer: only 8 bytes readable.
+    let mem = DmaMem::new(8);
+    let desc = FwCfgDmaDescriptor {
+        control: 0x0003_000A,
+        length: 4,
+        address: 0x100,
+    };
+    mem.put(0x00, &desc.encode());
+
+    let result = fw.do_dma(0x00, &mem);
+    // Must be Ok — descriptor status carries the error.
+    assert!(result.is_ok());
+    // Control field must have ERROR bit set.
+    assert_eq!(
+        mem.be32_at(0x00) & dma_ctl::ERROR as u32,
+        dma_ctl::ERROR as u32
+    );
+}
+
+#[test]
+fn test_fw_cfg_dma_read_write_skip_priority() {
+    // QEMU priority: READ takes precedence over WRITE, which takes
+    // precedence over SKIP. Combined bits execute only the
+    // highest-priority operation.
+    let fw = FwCfg::new(10);
+    fw.add_bytes(0x0042, vec![0xAA, 0xBB, 0xCC, 0xDD]);
+    fw.set_dma_enabled(true);
+
+    // READ | WRITE | SKIP combined → only READ executes.
+    let mem = DmaMem::new(0x300);
+    let desc = FwCfgDmaDescriptor {
+        control: 0x0042_001E, // SELECT | READ | WRITE | SKIP, selector=0x0042
+        length: 2,
+        address: 0x200,
+    };
+    mem.put(0x00, &desc.encode());
+
+    let result = fw.do_dma(0x00, &mem);
+    assert!(result.is_ok());
+
+    // Status is success (not ERROR, since READ succeeded and WRITE was
+    // ignored due to priority).
+    assert_eq!(mem.be32_at(0x00), 0x0000_0000);
+    // Data was read (READ executed).
+    assert_eq!(mem.bytes_at(0x200, 2), vec![0xAA, 0xBB]);
+}
+
+#[test]
+fn test_fw_cfg_dma_partial_write_sets_error() {
+    // When dma_write cannot write the full requested length, the DMA
+    // must flag ERROR and stop advancing cur_offset past what was
+    // actually written.
+    let fw = FwCfg::new(10);
+    fw.add_bytes(0x0005, vec![0x11, 0x22, 0x33, 0x44]);
+    fw.set_dma_enabled(true);
+
+    // Buffer ends at offset 0x50, so only 2 of 4 bytes fit at 0x4E.
+    let mem = DmaMem::new(0x50);
+    let desc = FwCfgDmaDescriptor {
+        control: 0x0005_000A, // SELECT | READ, selector=0x0005
+        length: 4,
+        address: 0x4E, // 4 bytes from 0x4E..0x52, but buffer ends at 0x50
+    };
+    mem.put(0x00, &desc.encode());
+
+    let result = fw.do_dma(0x00, &mem);
+    assert!(result.is_ok());
+    // ERROR must be set because the write was partial.
+    assert_eq!(
+        mem.be32_at(0x00) & dma_ctl::ERROR as u32,
+        dma_ctl::ERROR as u32
+    );
 }
