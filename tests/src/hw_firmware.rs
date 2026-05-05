@@ -695,3 +695,31 @@ fn test_fw_cfg_dma_partial_write_sets_error() {
         dma_ctl::ERROR as u32
     );
 }
+
+#[test]
+fn test_fw_cfg_dma_write_denied_advances_offset() {
+    // Denied guest WRITE must still consume bytes and advance
+    // cur_offset against a valid selected entry (QEMU-equivalent).
+    let fw = FwCfg::new(10);
+    fw.add_bytes(0x0042, vec![0xAA, 0xBB, 0xCC, 0xDD]);
+    fw.set_selector(0x0042);
+    fw.set_dma_enabled(true);
+
+    let mem = DmaMem::new(256);
+    let desc = FwCfgDmaDescriptor {
+        control: 0x0042_0010, // SELECT | WRITE, selector=0x0042
+        length: 2,
+        address: 0x100,
+    };
+    mem.put(0x00, &desc.encode());
+
+    let result = fw.do_dma(0x00, &mem);
+    assert!(result.is_ok());
+
+    // ERROR status must be set
+    assert_eq!(mem.be32_at(0x00), dma_ctl::ERROR as u32);
+
+    // Offset must have advanced by 2 — next read gets third byte
+    assert_eq!(fw.read_data_byte(), 0xCC);
+    assert_eq!(fw.read_data_byte(), 0xDD);
+}

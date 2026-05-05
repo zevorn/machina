@@ -336,7 +336,7 @@ impl FwCfg {
     ///
     /// Reads the 16-byte big-endian descriptor from `desc_addr` via
     /// `access`, then performs the highest-priority operation among
-    /// READ / WRITE / SKIP (QEMU priority: READ > WRITE > SKIP).
+    /// READ / WRITE / SKIP (priority: READ > WRITE > SKIP).
     /// SELECT is independent and always applied first.
     ///
     /// On completion, writes back only the 4-byte big-endian control
@@ -370,7 +370,7 @@ impl FwCfg {
             self.set_selector(key);
         }
 
-        // QEMU priority: READ, then WRITE, then SKIP (mutually exclusive)
+        // Priority: READ, then WRITE, then SKIP (mutually exclusive)
         if ctl & dma_ctl::READ != 0 {
             let entry = *self.cur_entry.lock().unwrap();
             let entries = self.entries.borrow();
@@ -402,9 +402,20 @@ impl FwCfg {
             }
             *self.cur_offset.lock().unwrap() += offset;
         } else if ctl & dma_ctl::WRITE != 0 {
-            // Guest WRITE is denied — set ERROR, descriptor carries the
-            // fault; do_dma returns Ok(())
+            // Guest WRITE is denied.  Still consume bytes and advance
+            // cur_offset — denied WRITE against a valid entry skips
+            // the available data and sets ERROR.
             dma_error = true;
+            let entry = *self.cur_entry.lock().unwrap();
+            let entries = self.entries.borrow();
+            let consumed = if let Some(e) = entries.get(&entry) {
+                let base = *self.cur_offset.lock().unwrap() as usize;
+                let remaining = e.data.len().saturating_sub(base);
+                (desc.length as usize).min(remaining) as u32
+            } else {
+                0
+            };
+            *self.cur_offset.lock().unwrap() += consumed;
         } else if ctl & dma_ctl::SKIP != 0 {
             *self.cur_offset.lock().unwrap() += desc.length;
         }
