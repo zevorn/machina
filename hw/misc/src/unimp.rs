@@ -47,6 +47,16 @@ impl Unimp {
         region: MemoryRegion,
         base: GPA,
     ) -> Result<(), SysBusError> {
+        if region.name != self.name {
+            return Err(SysBusError::Device(MDeviceError::LateMutation(
+                "unimp region name must match configured name",
+            )));
+        }
+        if region.size != self.size {
+            return Err(SysBusError::Device(MDeviceError::LateMutation(
+                "unimp region size must match configured size",
+            )));
+        }
         self.state.lock().register_mmio(region, base)
     }
 

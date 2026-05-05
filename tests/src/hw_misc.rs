@@ -12,7 +12,7 @@ use machina_hw_misc::{
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
-fn make_test_aspace() -> (AddressSpace, SysBus) {
+pub(crate) fn make_test_aspace() -> (AddressSpace, SysBus) {
     let root = MemoryRegion::container("root", 0x1_0000_0000);
     let aspace = AddressSpace::new(root);
     let bus = SysBus::new("sysbus");
@@ -107,9 +107,9 @@ fn test_sifive_e_prci_lifecycle() {
     );
     assert!(prci.register_mmio(region2, GPA(0x2000_0000)).is_err());
 
-    // Second realize_onto fails (mapping already recorded in bus)
+    // Second realize_onto fails (already realized)
     let err = prci.realize_onto(&mut bus, &mut aspace).unwrap_err();
-    assert!(err.to_string().contains("overlaps"));
+    assert!(err.to_string().contains("already realized"));
 
     prci.unrealize_from(&mut bus, &mut aspace).unwrap();
     assert!(!prci.realized());
@@ -240,9 +240,9 @@ fn test_sifive_u_prci_lifecycle() {
     // Realized: address space read returns register defaults
     assert_eq!(aspace.read(base, 4) as u32, 0xC000_0000);
 
-    // Second realize_onto fails (mapping already recorded in bus)
+    // Second realize_onto fails (already realized)
     let err = prci.realize_onto(&mut bus, &mut aspace).unwrap_err();
-    assert!(err.to_string().contains("overlaps"));
+    assert!(err.to_string().contains("already realized"));
 
     prci.unrealize_from(&mut bus, &mut aspace).unwrap();
     assert!(!prci.realized());
@@ -372,9 +372,9 @@ fn test_pvpanic_lifecycle() {
     // Realized: read returns events mask
     assert_eq!(aspace.read(base, 1) as u8, PvpanicEvent::PANICKED);
 
-    // Second realize_onto fails (mapping already recorded in bus)
+    // Second realize_onto fails (already realized)
     let err = pvp.realize_onto(&mut bus, &mut aspace).unwrap_err();
-    assert!(err.to_string().contains("overlaps"));
+    assert!(err.to_string().contains("already realized"));
 
     pvp.unrealize_from(&mut bus, &mut aspace).unwrap();
     assert!(!pvp.realized());
@@ -440,8 +440,11 @@ fn test_unimp_lifecycle() {
     assert_eq!(aspace.read(base, 4), 0);
 
     unimp.attach_to_bus(&mut bus).unwrap();
-    let region =
-        MemoryRegion::io("unimp", 0x1000, Arc::new(UnimpMmio(unimp.clone())));
+    let region = MemoryRegion::io(
+        "test-device",
+        0x1000,
+        Arc::new(UnimpMmio(unimp.clone())),
+    );
     unimp.register_mmio(region, base).unwrap();
     unimp.realize_onto(&mut bus, &mut aspace).unwrap();
     assert!(unimp.realized());
@@ -450,9 +453,9 @@ fn test_unimp_lifecycle() {
     assert_eq!(aspace.read(base, 4), 0);
     aspace.write(base, 4, 0xDEAD_BEEF);
 
-    // Second realize_onto fails (mapping already recorded in bus)
+    // Second realize_onto fails (already realized)
     let err = unimp.realize_onto(&mut bus, &mut aspace).unwrap_err();
-    assert!(err.to_string().contains("overlaps"));
+    assert!(err.to_string().contains("already realized"));
 
     unimp.unrealize_from(&mut bus, &mut aspace).unwrap();
     assert!(!unimp.realized());
@@ -469,11 +472,67 @@ fn test_unimp_rejects_zero_size_realize() {
     let (mut aspace, mut bus) = make_test_aspace();
     unimp.attach_to_bus(&mut bus).unwrap();
     let region =
-        MemoryRegion::io("zero", 0, Arc::new(UnimpMmio(unimp.clone())));
+        MemoryRegion::io("zero-device", 0, Arc::new(UnimpMmio(unimp.clone())));
     unimp.register_mmio(region, GPA(0x1000_0000)).unwrap();
     let err = unimp.realize_onto(&mut bus, &mut aspace).unwrap_err();
     assert!(err.to_string().contains("must be non-zero"));
     assert!(!unimp.realized());
+}
+
+#[test]
+fn test_unimp_rejects_name_mismatch() {
+    let unimp = Unimp::new("test-device", 0x1000);
+    let (mut _aspace, mut bus) = make_test_aspace();
+    unimp.attach_to_bus(&mut bus).unwrap();
+    let region = MemoryRegion::io(
+        "wrong-name",
+        0x1000,
+        Arc::new(UnimpMmio(unimp.clone())),
+    );
+    let err = unimp.register_mmio(region, GPA(0x1000_0000)).unwrap_err();
+    assert!(err.to_string().contains("must match"));
+}
+
+#[test]
+fn test_unimp_rejects_size_mismatch() {
+    let unimp = Unimp::new("test-device", 0x1000);
+    let (mut _aspace, mut bus) = make_test_aspace();
+    unimp.attach_to_bus(&mut bus).unwrap();
+    let region = MemoryRegion::io(
+        "test-device",
+        0x2000,
+        Arc::new(UnimpMmio(unimp.clone())),
+    );
+    let err = unimp.register_mmio(region, GPA(0x1000_0000)).unwrap_err();
+    assert!(err.to_string().contains("must match"));
+}
+
+#[test]
+fn test_unimp_realize_with_correct_properties() {
+    let unimp = Unimp::new("prop-device", 0x800);
+    assert!(!unimp.realized());
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x2000_0000);
+    assert_eq!(aspace.read(base, 4), 0);
+
+    unimp.attach_to_bus(&mut bus).unwrap();
+    let region = MemoryRegion::io(
+        "prop-device",
+        0x800,
+        Arc::new(UnimpMmio(unimp.clone())),
+    );
+    unimp.register_mmio(region, base).unwrap();
+    unimp.realize_onto(&mut bus, &mut aspace).unwrap();
+    assert!(unimp.realized());
+
+    // Realized: read returns 0 with the propagated region
+    assert_eq!(aspace.read(base, 4), 0);
+    aspace.write(base, 4, 0xFEED_FACE);
+
+    unimp.unrealize_from(&mut bus, &mut aspace).unwrap();
+    assert!(!unimp.realized());
+    assert_eq!(aspace.read(base, 4), 0);
 }
 
 // ---- LED ----
@@ -690,9 +749,9 @@ fn test_virt_ctrl_lifecycle() {
     // Realized: read returns FEATURES
     assert_eq!(aspace.read(base, 4) as u32, 0x0000_0001);
 
-    // Second realize_onto fails (mapping already recorded in bus)
+    // Second realize_onto fails (already realized)
     let err = vc.realize_onto(&mut bus, &mut aspace).unwrap_err();
-    assert!(err.to_string().contains("overlaps"));
+    assert!(err.to_string().contains("already realized"));
 
     vc.unrealize_from(&mut bus, &mut aspace).unwrap();
     assert!(!vc.realized());
