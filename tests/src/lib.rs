@@ -35,6 +35,8 @@ mod hw_fdt;
 #[cfg(test)]
 mod hw_firmware;
 #[cfg(test)]
+mod hw_gpio;
+#[cfg(test)]
 mod hw_i2c;
 #[cfg(test)]
 mod hw_ipi;
@@ -42,6 +44,8 @@ mod hw_ipi;
 mod hw_irq;
 #[cfg(test)]
 mod hw_loader;
+#[cfg(test)]
+mod hw_misc;
 #[cfg(test)]
 mod hw_pch_pic;
 #[cfg(test)]

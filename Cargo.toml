@@ -33,6 +33,8 @@ members = [
     "hw/timer",
     "hw/firmware",
     "hw/storage",
+    "hw/misc",
+    "hw/gpio",
     "tests/mtest",
     "tools/oracle",
     "tools/difftest",
@@ -67,6 +69,8 @@ machina-hw-sd       = { version = "0.1.2", path = "hw/sd" }
 machina-hw-timer    = { version = "0.1.2", path = "hw/timer" }
 machina-hw-firmware = { version = "0.1.2", path = "hw/firmware" }
 machina-hw-storage  = { version = "0.1.2", path = "hw/storage" }
+machina-hw-misc     = { version = "0.1.2", path = "hw/misc" }
+machina-hw-gpio     = { version = "0.1.2", path = "hw/gpio" }
 machina-oracle      = { version = "0.1.2", path = "tools/oracle" }
 machina-tests       = { version = "0.1.2", path = "tests" }
 machina-mtest       = { version = "0.1.2", path = "tests/mtest" }

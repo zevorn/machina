@@ -1,0 +1,19 @@
+[package]
+name = "machina-hw-gpio"
+version.workspace = true
+edition.workspace = true
+description = "GPIO devices for Machina (buttons, power control)"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["riscv", "emulator", "gpio"]
+categories = ["emulators", "hardware-support"]
+
+[dependencies]
+machina-accel = { workspace = true }
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }
+machina-memory = { workspace = true }
+
+[lints]
+workspace = true
