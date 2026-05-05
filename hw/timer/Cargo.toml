@@ -1,0 +1,17 @@
+[package]
+name = "machina-hw-timer"
+version.workspace = true
+edition.workspace = true
+description = "Timer infrastructure (Ptimer) for Machina device models"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["riscv", "emulator", "timer", "ptimer"]
+categories = ["emulators", "hardware-support"]
+
+[dependencies]
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }
+
+[lints]
+workspace = true

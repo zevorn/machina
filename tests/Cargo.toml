@@ -17,6 +17,13 @@ machina-hw-intc = { workspace = true }
 machina-hw-char = { workspace = true }
 machina-hw-loongarch = { workspace = true }
 machina-hw-riscv = { workspace = true }
+machina-hw-ssi = { workspace = true }
+machina-hw-i2c = { workspace = true }
+machina-hw-sd = { workspace = true }
+machina-hw-timer = { workspace = true }
+machina-hw-firmware = { workspace = true }
+machina-hw-storage = { workspace = true }
+machina-oracle = { workspace = true }
 machina-hw-virtio = { workspace = true }
 machina-disas = { workspace = true }
 machina-monitor = { workspace = true }

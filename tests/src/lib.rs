@@ -33,6 +33,10 @@ mod hw_eiointc;
 #[cfg(test)]
 mod hw_fdt;
 #[cfg(test)]
+mod hw_firmware;
+#[cfg(test)]
+mod hw_i2c;
+#[cfg(test)]
 mod hw_ipi;
 #[cfg(test)]
 mod hw_irq;
@@ -47,7 +51,15 @@ mod hw_qdev;
 #[cfg(test)]
 mod hw_ref_machine;
 #[cfg(test)]
+mod hw_sd;
+#[cfg(test)]
+mod hw_ssi;
+#[cfg(test)]
+mod hw_storage;
+#[cfg(test)]
 mod hw_sysbus;
+#[cfg(test)]
+mod hw_timer;
 #[cfg(test)]
 mod hw_uart;
 #[cfg(test)]
@@ -94,6 +106,8 @@ mod loongarch_virt_board;
 mod memory_region;
 #[cfg(test)]
 mod monitor;
+#[cfg(test)]
+mod oracle;
 #[cfg(test)]
 mod riscv_csr;
 #[cfg(test)]

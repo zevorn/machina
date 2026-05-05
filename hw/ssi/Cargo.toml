@@ -1,0 +1,17 @@
+[package]
+name = "machina-hw-ssi"
+version.workspace = true
+edition.workspace = true
+description = "SPI bus infrastructure for Machina device models"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["riscv", "emulator", "spi", "ssi"]
+categories = ["emulators", "hardware-support"]
+
+[dependencies]
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }
+
+[lints]
+workspace = true
