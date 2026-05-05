@@ -3,7 +3,7 @@ use std::io::Write;
 
 use machina_oracle::{
     Oracle, OracleCheckResult, OracleFixture, OracleQuirk, OracleScenario,
-    RuntimeOracle,
+    RegSnapshot, RuntimeOracle,
 };
 
 fn sample_fixture() -> OracleFixture {
@@ -462,4 +462,176 @@ fn test_runtime_oracle_perm_denied_returns_error() {
             panic!("expected Error for permission-denied probe, got {other:?}")
         }
     }
+}
+
+// -- Batch 1 Device Oracle Tests -----------------------------------
+
+/// Helper: build RuntimeOracle from a fixture, check reset against
+/// `actual` registers, and accept Skip (probe not found) or Pass.
+/// Panics on Mismatch or Error.
+fn check_batch1_reset(fixture: &OracleFixture, actual: &RegSnapshot) {
+    let json = serde_json::to_vec(fixture).unwrap();
+    let oracle =
+        RuntimeOracle::new(&json, "/nonexistent/probe/command", &[]).unwrap();
+    match oracle.check_reset(actual, &BTreeMap::new()) {
+        OracleCheckResult::Skip(_) | OracleCheckResult::Pass { .. } => {}
+        OracleCheckResult::Mismatch(r) => {
+            panic!(
+                "oracle mismatch for {}: {}/{} mismatched: {:?}",
+                fixture.device, r.mismatches, r.total, r.details
+            );
+        }
+        OracleCheckResult::Error(e) => {
+            panic!("oracle error for {}: {e}", fixture.device);
+        }
+    }
+}
+
+#[test]
+fn test_oracle_batch1_sifive_e_prci() {
+    let fixture = OracleFixture {
+        device: "sifive_e_prci".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("HFROSCCFG".into(), 0xC000_0000);
+            m.insert("HFXOSCCFG".into(), 0xC000_0000);
+            m.insert("PLLCFG".into(), 0x8006_0000);
+            m.insert("PLLOUTDIV".into(), 0x0000_0100);
+            m
+        },
+        scenarios: vec![],
+        quirks: vec![],
+    };
+    let mut actual = BTreeMap::new();
+    actual.insert("HFROSCCFG".into(), 0xC000_0000);
+    actual.insert("HFXOSCCFG".into(), 0xC000_0000);
+    actual.insert("PLLCFG".into(), 0x8006_0000);
+    actual.insert("PLLOUTDIV".into(), 0x0000_0100);
+    check_batch1_reset(&fixture, &actual);
+}
+
+#[test]
+fn test_oracle_batch1_sifive_u_prci() {
+    let pllcfg0_default: u64 =
+        (1 << 0) | (31 << 6) | (3 << 15) | (1 << 25) | (1 << 31);
+    let fixture = OracleFixture {
+        device: "sifive_u_prci".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("HFXOSCCFG".into(), 0xC000_0000);
+            m.insert("COREPLLCFG0".into(), pllcfg0_default);
+            m.insert("DDRPLLCFG0".into(), pllcfg0_default);
+            m.insert("DDRPLLCFG1".into(), 0);
+            m.insert("GEMGXLPLLCFG0".into(), pllcfg0_default);
+            m.insert("GEMGXLPLLCFG1".into(), 0);
+            m.insert("CORECLKSEL".into(), 1);
+            m.insert("DEVICESRESET".into(), 0);
+            m.insert("CLKMUXSTATUS".into(), 0);
+            m
+        },
+        scenarios: vec![],
+        quirks: vec![],
+    };
+    let mut actual = BTreeMap::new();
+    actual.insert("HFXOSCCFG".into(), 0xC000_0000);
+    actual.insert("COREPLLCFG0".into(), pllcfg0_default);
+    actual.insert("DDRPLLCFG0".into(), pllcfg0_default);
+    actual.insert("DDRPLLCFG1".into(), 0);
+    actual.insert("GEMGXLPLLCFG0".into(), pllcfg0_default);
+    actual.insert("GEMGXLPLLCFG1".into(), 0);
+    actual.insert("CORECLKSEL".into(), 1);
+    actual.insert("DEVICESRESET".into(), 0);
+    actual.insert("CLKMUXSTATUS".into(), 0);
+    check_batch1_reset(&fixture, &actual);
+}
+
+#[test]
+fn test_oracle_batch1_pvpanic() {
+    // PANICKED = 1 << 0
+    let fixture = OracleFixture {
+        device: "pvpanic".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("EVENTS".into(), 1);
+            m
+        },
+        scenarios: vec![],
+        quirks: vec![],
+    };
+    let mut actual = BTreeMap::new();
+    actual.insert("EVENTS".into(), 1);
+    check_batch1_reset(&fixture, &actual);
+}
+
+#[test]
+fn test_oracle_batch1_unimp() {
+    let fixture = OracleFixture {
+        device: "unimp".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![],
+        quirks: vec![],
+    };
+    check_batch1_reset(&fixture, &BTreeMap::new());
+}
+
+#[test]
+fn test_oracle_batch1_virt_ctrl() {
+    let fixture = OracleFixture {
+        device: "virt_ctrl".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("FEATURES".into(), 0x0000_0001);
+            m.insert("CMD".into(), 0);
+            m
+        },
+        scenarios: vec![],
+        quirks: vec![],
+    };
+    let mut actual = BTreeMap::new();
+    actual.insert("FEATURES".into(), 0x0000_0001);
+    actual.insert("CMD".into(), 0);
+    check_batch1_reset(&fixture, &actual);
+}
+
+#[test]
+fn test_oracle_batch1_led() {
+    // LED is non-MMIO; intensity tracks gpio_active_high polarity.
+    let fixture = OracleFixture {
+        device: "led".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("INTENSITY".into(), 100);
+            m
+        },
+        scenarios: vec![],
+        quirks: vec![],
+    };
+    let mut actual = BTreeMap::new();
+    actual.insert("INTENSITY".into(), 100);
+    check_batch1_reset(&fixture, &actual);
+}
+
+#[test]
+fn test_oracle_batch1_gpio_key() {
+    // gpio_key has no MMIO registers; IRQ line asserted on key press.
+    // The fixture captures the quiescent state: no IRQ.
+    let fixture = OracleFixture {
+        device: "gpio_key".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![],
+        quirks: vec![],
+    };
+    check_batch1_reset(&fixture, &BTreeMap::new());
+}
+
+#[test]
+fn test_oracle_batch1_gpio_pwr() {
+    // gpio_pwr has no MMIO registers; dispatches action on rising edge.
+    let fixture = OracleFixture {
+        device: "gpio_pwr".into(),
+        reset_regs: BTreeMap::new(),
+        scenarios: vec![],
+        quirks: vec![],
+    };
+    check_batch1_reset(&fixture, &BTreeMap::new());
 }

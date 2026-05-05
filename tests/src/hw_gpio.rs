@@ -1,141 +1,149 @@
-// Tests for hw/gpio devices: gpio_key and gpio_pwr.
+// Tests for hw/gpio devices: gpio_key, gpio_pwr.
 
 use std::sync::{Arc, Mutex};
 
 use machina_accel::timer::{ClockType, VirtualClock};
+use machina_hw_core::bus::SysBus;
 use machina_hw_core::irq::{IrqLine, IrqSink};
 use machina_hw_gpio::{GpioKey, GpioPwr, GpioPwrAction};
 
-// Test sink that records IRQ transitions
-struct TestIrqSink {
-    events: Mutex<Vec<(u32, bool)>>,
+struct TestSink {
+    level: Mutex<bool>,
+    calls: Mutex<u32>,
 }
 
-impl TestIrqSink {
+impl TestSink {
     fn new() -> Self {
         Self {
-            events: Mutex::new(Vec::new()),
+            level: Mutex::new(false),
+            calls: Mutex::new(0),
         }
     }
 
-    fn events(&self) -> Vec<(u32, bool)> {
-        self.events.lock().unwrap().clone()
+    fn level(&self) -> bool {
+        *self.level.lock().unwrap()
+    }
+
+    fn call_count(&self) -> u32 {
+        *self.calls.lock().unwrap()
     }
 }
 
-impl IrqSink for TestIrqSink {
-    fn set_irq(&self, irq: u32, level: bool) {
-        self.events.lock().unwrap().push((irq, level));
+impl IrqSink for TestSink {
+    fn set_irq(&self, _irq: u32, level: bool) {
+        *self.level.lock().unwrap() = level;
+        *self.calls.lock().unwrap() += 1;
     }
-}
-
-fn make_irq_line(sink: Arc<TestIrqSink>, irq: u32) -> IrqLine {
-    IrqLine::new(sink, irq)
 }
 
 // ---- GpioKey ----
 
 #[test]
-fn test_gpio_key_new() {
-    let sink = Arc::new(TestIrqSink::new());
-    let irq = make_irq_line(sink.clone(), 0);
+fn test_gpio_key_trigger_raises_irq() {
     let clock = Arc::new(VirtualClock::new(ClockType::Virtual));
-    let _key = GpioKey::new(irq, clock);
-}
+    let sink = Arc::new(TestSink::new());
+    let irq = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
 
-#[test]
-fn test_gpio_key_assert_raises_irq() {
-    let sink = Arc::new(TestIrqSink::new());
-    let irq = make_irq_line(sink.clone(), 5);
-    let clock = Arc::new(VirtualClock::new(ClockType::Virtual));
-    let key = GpioKey::new(irq, clock);
-
+    let key = GpioKey::new(irq, clock.clone());
     key.set_gpio(true);
-
-    let events = sink.events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0], (5, true)); // IRQ 5 raised
+    assert!(sink.level());
 }
 
 #[test]
-fn test_gpio_key_deassert_does_nothing() {
-    let sink = Arc::new(TestIrqSink::new());
-    let irq = make_irq_line(sink.clone(), 5);
+fn test_gpio_key_trigger_on_low_level() {
     let clock = Arc::new(VirtualClock::new(ClockType::Virtual));
-    let key = GpioKey::new(irq, clock);
+    let sink = Arc::new(TestSink::new());
+    let irq = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
 
-    // Deassert without prior assert should have no effect
+    let key = GpioKey::new(irq, clock.clone());
+    // Even low level triggers (per QEMU reference)
     key.set_gpio(false);
-    assert!(sink.events().is_empty());
+    assert!(sink.level());
 }
 
 #[test]
-fn test_gpio_key_irq_lowered_after_latency() {
-    let sink = Arc::new(TestIrqSink::new());
-    let irq = make_irq_line(sink.clone(), 3);
+fn test_gpio_key_irq_lowers_after_timer() {
     let clock = Arc::new(VirtualClock::new(ClockType::Virtual));
+    let sink = Arc::new(TestSink::new());
+    let irq = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+
     let key = GpioKey::new(irq, clock.clone());
-
     key.set_gpio(true);
+    assert!(sink.level());
 
-    // IRQ should be raised
-    let events = sink.events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0], (3, true));
-
-    // Advance time by 100ms — the timer should fire and lower IRQ
-    clock.step(100_000_000); // 100ms in ns
-
-    let events = sink.events();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0], (3, true));
-    assert_eq!(events[1], (3, false));
-}
-
-#[test]
-fn test_gpio_key_irq_not_lowered_before_latency() {
-    let sink = Arc::new(TestIrqSink::new());
-    let irq = make_irq_line(sink.clone(), 3);
-    let clock = Arc::new(VirtualClock::new(ClockType::Virtual));
-    let key = GpioKey::new(irq, clock.clone());
-
-    key.set_gpio(true);
-
-    // Advance time by 50ms — IRQ should still be high
-    clock.step(50_000_000); // 50ms in ns
-
-    let events = sink.events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0], (3, true));
+    // Advance past 100ms
+    clock.step(200_000_000);
+    assert!(!sink.level());
 }
 
 #[test]
 fn test_gpio_key_multiple_presses() {
-    let sink = Arc::new(TestIrqSink::new());
-    let irq = make_irq_line(sink.clone(), 7);
     let clock = Arc::new(VirtualClock::new(ClockType::Virtual));
+    let sink = Arc::new(TestSink::new());
+    let irq = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+
     let key = GpioKey::new(irq, clock.clone());
-
-    // First press
     key.set_gpio(true);
-    clock.step(100_000_000);
+    assert!(sink.level());
 
-    // Second press
+    // Second press before timer expires (rearms timer)
+    clock.step(50_000_000);
     key.set_gpio(true);
-    clock.step(100_000_000);
+    assert!(sink.level());
 
-    let events = sink.events();
-    assert_eq!(events.len(), 4);
-    assert_eq!(events[0], (7, true)); // first press raise
-    assert_eq!(events[1], (7, false)); // first press timeout lower
-    assert_eq!(events[2], (7, true)); // second press raise
-    assert_eq!(events[3], (7, false)); // second press timeout lower
+    // 60ms from retrigger — timer hasn't fired yet
+    clock.step(60_000_000);
+    assert!(sink.level());
+
+    // Past the retriggered timer
+    clock.step(50_000_000);
+    assert!(!sink.level());
+}
+
+#[test]
+fn test_gpio_key_reset_cancels_timer() {
+    let clock = Arc::new(VirtualClock::new(ClockType::Virtual));
+    let sink = Arc::new(TestSink::new());
+    let irq = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+
+    let key = GpioKey::new(irq, clock.clone());
+    key.set_gpio(true);
+    assert!(sink.level());
+
+    // Reset cancels timer without lowering IRQ
+    key.reset_runtime();
+    assert!(sink.level());
+
+    // Advance past 100ms — timer was cancelled, IRQ stays high
+    clock.step(200_000_000);
+    assert!(sink.level());
+}
+
+#[test]
+fn test_gpio_key_lifecycle() {
+    let clock = Arc::new(VirtualClock::new(ClockType::Virtual));
+    let sink = Arc::new(TestSink::new());
+    let irq = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+
+    let key = GpioKey::new(irq, clock.clone());
+    assert!(!key.realized());
+
+    let mut bus = SysBus::new("sysbus");
+    key.attach_to_bus(&mut bus).unwrap();
+    key.realize().unwrap();
+    assert!(key.realized());
+
+    let err = key.realize().unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+
+    key.unrealize().unwrap();
+    assert!(!key.realized());
 }
 
 // ---- GpioPwr ----
 
 #[test]
-fn test_gpio_pwr_reset() {
+fn test_gpio_pwr_reset_on_rising_edge() {
     let pwr = GpioPwr::new();
     let actions = Arc::new(Mutex::new(Vec::new()));
     let actions_clone = Arc::clone(&actions);
@@ -148,7 +156,20 @@ fn test_gpio_pwr_reset() {
 }
 
 #[test]
-fn test_gpio_pwr_shutdown() {
+fn test_gpio_pwr_reset_low_does_nothing() {
+    let pwr = GpioPwr::new();
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let actions_clone = Arc::clone(&actions);
+    pwr.set_action_handler(Box::new(move |action| {
+        actions_clone.lock().unwrap().push(action);
+    }));
+
+    pwr.gpio_reset(false);
+    assert!(actions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn test_gpio_pwr_shutdown_on_rising_edge() {
     let pwr = GpioPwr::new();
     let actions = Arc::new(Mutex::new(Vec::new()));
     let actions_clone = Arc::clone(&actions);
@@ -161,7 +182,7 @@ fn test_gpio_pwr_shutdown() {
 }
 
 #[test]
-fn test_gpio_pwr_level_low_ignored() {
+fn test_gpio_pwr_shutdown_low_does_nothing() {
     let pwr = GpioPwr::new();
     let actions = Arc::new(Mutex::new(Vec::new()));
     let actions_clone = Arc::clone(&actions);
@@ -169,33 +190,30 @@ fn test_gpio_pwr_level_low_ignored() {
         actions_clone.lock().unwrap().push(action);
     }));
 
-    // Deassert should not trigger
-    pwr.gpio_reset(false);
     pwr.gpio_shutdown(false);
     assert!(actions.lock().unwrap().is_empty());
 }
 
 #[test]
-fn test_gpio_pwr_both_reset_and_shutdown() {
+fn test_gpio_pwr_no_handler_safe() {
     let pwr = GpioPwr::new();
-    let actions = Arc::new(Mutex::new(Vec::new()));
-    let actions_clone = Arc::clone(&actions);
-    pwr.set_action_handler(Box::new(move |action| {
-        actions_clone.lock().unwrap().push(action);
-    }));
-
     pwr.gpio_reset(true);
     pwr.gpio_shutdown(true);
-    assert_eq!(
-        *actions.lock().unwrap(),
-        vec![GpioPwrAction::Reset, GpioPwrAction::Shutdown]
-    );
 }
 
 #[test]
-fn test_gpio_pwr_no_handler_no_panic() {
+fn test_gpio_pwr_lifecycle() {
     let pwr = GpioPwr::new();
-    // Without a handler, these should not panic
-    pwr.gpio_reset(true);
-    pwr.gpio_shutdown(true);
+    assert!(!pwr.realized());
+
+    let mut bus = SysBus::new("sysbus");
+    pwr.attach_to_bus(&mut bus).unwrap();
+    pwr.realize().unwrap();
+    assert!(pwr.realized());
+
+    let err = pwr.realize().unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+
+    pwr.unrealize().unwrap();
+    assert!(!pwr.realized());
 }

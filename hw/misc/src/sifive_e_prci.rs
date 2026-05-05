@@ -5,8 +5,14 @@
 //
 // DTB compatible: "sifive,e-prci0"
 
+use std::sync::Arc;
+
+use machina_core::address::GPA;
 use machina_core::device_cell::DeviceCell;
-use machina_memory::region::MmioOps;
+use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_hw_core::mdev::MDevice;
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
 
 // Register offsets
 const HFROSCCFG: u64 = 0x00;
@@ -27,6 +33,7 @@ const PLLOUTDIV_DIV1: u32 = 1 << 8;
 pub const SIFIVE_E_PRCI_REG_SIZE: u64 = 0x1000;
 
 pub struct SifiveEPRCI {
+    state: parking_lot::Mutex<SysBusDeviceState>,
     hfrosccfg: DeviceCell<u32>,
     hfxosccfg: DeviceCell<u32>,
     pllcfg: DeviceCell<u32>,
@@ -34,26 +41,83 @@ pub struct SifiveEPRCI {
 }
 
 impl SifiveEPRCI {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: parking_lot::Mutex::new(SysBusDeviceState::new(
+                "sifive_e_prci",
+            )),
             hfrosccfg: DeviceCell::new(HFROSCCFG_RDY | HFROSCCFG_EN),
             hfxosccfg: DeviceCell::new(HFXOSCCFG_RDY | HFXOSCCFG_EN),
             pllcfg: DeviceCell::new(
                 PLLCFG_REFSEL | PLLCFG_BYPASS | PLLCFG_LOCK,
             ),
             plloutdiv: DeviceCell::new(PLLOUTDIV_DIV1),
+        })
+    }
+
+    pub fn new_named(local_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
+            hfrosccfg: DeviceCell::new(HFROSCCFG_RDY | HFROSCCFG_EN),
+            hfxosccfg: DeviceCell::new(HFXOSCCFG_RDY | HFXOSCCFG_EN),
+            pllcfg: DeviceCell::new(
+                PLLCFG_REFSEL | PLLCFG_BYPASS | PLLCFG_LOCK,
+            ),
+            plloutdiv: DeviceCell::new(PLLOUTDIV_DIV1),
+        })
+    }
+
+    pub fn attach_to_bus(
+        self: &Arc<Self>,
+        bus: &mut SysBus,
+    ) -> Result<(), SysBusError> {
+        self.state.lock().attach_to_bus(bus)
+    }
+
+    pub fn register_mmio(
+        self: &Arc<Self>,
+        region: MemoryRegion,
+        base: GPA,
+    ) -> Result<(), SysBusError> {
+        self.state.lock().register_mmio(region, base)
+    }
+
+    pub fn realize_onto(
+        self: &Arc<Self>,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+    ) -> Result<(), SysBusError> {
+        self.state.lock().realize_onto(bus, address_space)
+    }
+
+    pub fn unrealize_from(
+        self: &Arc<Self>,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+    ) -> Result<(), SysBusError> {
+        self.state.lock().unrealize_from(bus, address_space)
+    }
+
+    pub fn realized(&self) -> bool {
+        self.state.lock().device().is_realized()
+    }
+
+    pub fn reset_runtime(&self) {
+        self.hfrosccfg.set(HFROSCCFG_RDY | HFROSCCFG_EN);
+        self.hfxosccfg.set(HFXOSCCFG_RDY | HFXOSCCFG_EN);
+        self.pllcfg.set(PLLCFG_REFSEL | PLLCFG_BYPASS | PLLCFG_LOCK);
+        self.plloutdiv.set(PLLOUTDIV_DIV1);
+    }
+
+    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
+        let guard = self.state.lock();
+        f(&*guard)
+    }
+
+    pub fn do_read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
         }
-    }
-}
-
-impl Default for SifiveEPRCI {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MmioOps for SifiveEPRCI {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
         match offset {
             HFROSCCFG => u64::from(self.hfrosccfg.get()),
             HFXOSCCFG => u64::from(self.hfxosccfg.get()),
@@ -63,7 +127,10 @@ impl MmioOps for SifiveEPRCI {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    pub fn do_write(&self, offset: u64, size: u32, val: u64) {
+        if size != 4 {
+            return;
+        }
         let val32 = val as u32;
         match offset {
             HFROSCCFG => {
@@ -80,5 +147,17 @@ impl MmioOps for SifiveEPRCI {
             }
             _ => {}
         }
+    }
+}
+
+pub struct SifiveEPRCIMmio(pub Arc<SifiveEPRCI>);
+
+impl MmioOps for SifiveEPRCIMmio {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        self.0.do_read(offset, size)
+    }
+
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        self.0.do_write(offset, size, val);
     }
 }
