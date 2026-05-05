@@ -39,6 +39,10 @@ mod hw_gpio;
 #[cfg(test)]
 mod hw_i2c;
 #[cfg(test)]
+mod hw_intc_loongarch;
+#[cfg(test)]
+mod hw_intc_riscv;
+#[cfg(test)]
 mod hw_ipi;
 #[cfg(test)]
 mod hw_irq;
