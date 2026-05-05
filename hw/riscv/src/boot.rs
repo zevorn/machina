@@ -1,6 +1,6 @@
 // Boot setup for the riscv64-ref machine.
 //
-// QEMU virt boot convention:
+// RISC-V virt boot convention:
 //   CPU starts at PC = 0x1000 (MROM base).
 //   MROM contains a reset vector that sets:
 //     a0 = mhartid
@@ -115,7 +115,7 @@ fn place_fdt(
 }
 
 /// Search for firmware in standard data directories,
-/// following QEMU's `qemu_find_file()` convention.
+/// following the standard firmware search convention.
 ///
 /// Search order:
 ///   1. $MACHINA_DATADIR/<name>
@@ -166,7 +166,7 @@ fn resolve_bios(bios_path: &Option<std::path::PathBuf>) -> BiosSource {
     }
 }
 
-/// Write QEMU-compatible reset vector into MROM.
+/// Write reset vector into MROM.
 ///
 /// Layout at MROM_BASE (0x1000):
 ///   0x00: auipc  t0, %pcrel_hi(fw_dyn)   // 0x00000297
@@ -185,7 +185,7 @@ fn write_mrom(
     kernel_entry: u64,
     has_firmware: bool,
 ) {
-    // RV64 reset vector (matches QEMU exactly).
+    // RV64 reset vector.
     let reset_vec: [u32; 10] = [
         0x0000_0297, // auipc  t0, %pcrel_hi(fw_dyn)
         0x0282_8613, // addi   a2, t0, %pcrel_lo(1b)

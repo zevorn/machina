@@ -184,9 +184,9 @@ impl Plic {
     }
 
     /// Update the source wire level.  Only a rising edge
-    /// (0→1) latches the pending bit, matching QEMU
-    /// semantics and preventing interrupt storms when the
-    /// guest defers source-clearing to a task/bottom-half.
+    /// (0→1) latches the pending bit, preventing interrupt
+    /// storms when the guest defers source-clearing to a
+    /// task/bottom-half.
     pub fn set_irq(&self, source: u32, level: bool) {
         if source == 0 || source >= self.num_sources {
             return;
@@ -288,7 +288,7 @@ impl Plic {
     /// Clears the claim record and re-evaluates outputs.
     /// Does NOT automatically re-pend based on source wire
     /// level — the device must de-assert and re-assert to
-    /// generate a new interrupt (matching QEMU semantics).
+    /// generate a new interrupt.
     pub fn complete_irq(&self, context: u32, irq: u32) {
         if context >= self.num_contexts {
             return;

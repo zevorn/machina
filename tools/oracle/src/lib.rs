@@ -106,6 +106,8 @@ pub enum OracleCheckResult {
     Mismatch(OracleResult),
     /// Probe command unavailable — comparison skipped.
     Skip(String),
+    /// Probe ran but failed (non-zero exit, bad JSON, etc.).
+    Error(String),
 }
 
 /// Result of a single probe run.
@@ -206,19 +208,27 @@ impl RuntimeOracle {
 
     /// Run the probe command and capture its JSON output.
     ///
-    /// Returns `Ok(ProbeOutput)` on success, `Err(msg)` on failure
-    /// (including command-not-found).
-    fn run_probe(&self, mode: &str) -> Result<ProbeOutput, String> {
+    /// Returns `Ok(ProbeOutput)` on success, `Err(msg)` on failure.
+    /// The error starts with "CMD:" if the probe command could not
+    /// be started (command not found).
+    fn run_probe(
+        &self,
+        mode: &str,
+        scenario_name: Option<&str>,
+    ) -> Result<ProbeOutput, String> {
         let mut cmd = Command::new(&self.probe_cmd);
         cmd.args(&self.probe_args);
         cmd.arg("--probe");
         cmd.arg(mode);
+        if let Some(name) = scenario_name {
+            cmd.arg(name);
+        }
         cmd.stdin(Stdio::null());
         cmd.stderr(Stdio::piped());
         cmd.stdout(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| {
-            format!("cannot start probe '{}': {e}", self.probe_cmd)
+            format!("CMD:cannot start probe '{}': {e}", self.probe_cmd)
         })?;
 
         let mut stdout = Vec::new();
@@ -247,20 +257,31 @@ impl RuntimeOracle {
     }
 
     /// Probe the reference implementation for reset register values
-    /// and compare against `actual`.
+    /// and compare against `actual` and `actual_irqs`.
     ///
-    /// Returns `Skip` if the probe command is not found, `Pass` if
-    /// all values match, or `Mismatch` with details.
-    pub fn check_reset(&self, actual: &RegSnapshot) -> OracleCheckResult {
-        let probe = match self.run_probe("reset") {
+    /// Returns `Skip` only when the probe command cannot be started
+    /// (command not found). Returns `Error` for probe execution
+    /// failures (non-zero exit, bad JSON). Returns `Pass` if all
+    /// values match, or `Mismatch` with details.
+    pub fn check_reset(
+        &self,
+        actual: &RegSnapshot,
+        actual_irqs: &BTreeMap<u32, bool>,
+    ) -> OracleCheckResult {
+        let probe = match self.run_probe("reset", None) {
             Ok(p) => p,
-            Err(e) => return OracleCheckResult::Skip(e),
+            Err(e) => {
+                if e.starts_with("CMD:") {
+                    return OracleCheckResult::Skip(e);
+                }
+                return OracleCheckResult::Error(e);
+            }
         };
 
         let result = check_snapshot(
             &probe.registers,
             actual,
-            &BTreeMap::new(),
+            actual_irqs,
             &probe.irqs,
             &self.oracle.fixture.quirks,
         );
@@ -284,12 +305,16 @@ impl RuntimeOracle {
             .scenarios
             .iter()
             .map(|scenario| {
-                let probe = match self
-                    .run_probe(&format!("scenario {}", scenario.name))
-                {
-                    Ok(p) => p,
-                    Err(e) => return OracleCheckResult::Skip(e),
-                };
+                let probe =
+                    match self.run_probe("scenario", Some(&scenario.name)) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            if e.starts_with("CMD:") {
+                                return OracleCheckResult::Skip(e);
+                            }
+                            return OracleCheckResult::Error(e);
+                        }
+                    };
 
                 let (actual_regs, actual_irqs) = _apply(scenario);
                 // Compare Machina output against QEMU probe output
@@ -336,7 +361,15 @@ fn check_snapshot(
             continue;
         }
         result.total += 1;
-        let actual_val = actual_regs.get(reg).copied().unwrap_or(0);
+        let Some(&actual_val) = actual_regs.get(reg) else {
+            result.mismatches += 1;
+            result.details.push(OracleMismatch {
+                register: reg.clone(),
+                expected,
+                actual: 0,
+            });
+            continue;
+        };
         if actual_val != expected {
             result.mismatches += 1;
             result.details.push(OracleMismatch {

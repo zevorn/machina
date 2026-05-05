@@ -12,7 +12,7 @@ fn test_fw_cfg_new_has_signature() {
     let fw = FwCfg::new(10);
     assert!(fw.has_entry(keys::SIGNATURE));
     let entry = fw.get_entry(keys::SIGNATURE).unwrap();
-    assert_eq!(entry.data, b"QEMU".to_vec());
+    assert_eq!(entry.data, vec![0x51, 0x45, 0x4D, 0x55]);
 }
 
 #[test]
@@ -170,17 +170,17 @@ fn test_fw_cfg_read_data_word() {
     fw.add_bytes(0x0004, vec![0x01, 0x02, 0x03, 0x04]);
     fw.set_selector(0x0004);
 
-    assert_eq!(fw.read_data_word(), 0x0201); // LE
-    assert_eq!(fw.read_data_word(), 0x0403); // LE
+    assert_eq!(fw.read_data_word(), 0x0102); // BE
+    assert_eq!(fw.read_data_word(), 0x0304); // BE
 }
 
 #[test]
 fn test_fw_cfg_read_data_dword() {
     let fw = FwCfg::new(10);
-    fw.add_bytes(0x0004, vec![0x78, 0x56, 0x34, 0x12]);
+    fw.add_bytes(0x0004, vec![0x01, 0x02, 0x03, 0x04]);
     fw.set_selector(0x0004);
 
-    assert_eq!(fw.read_data_dword(), 0x12345678);
+    assert_eq!(fw.read_data_dword(), 0x01020304);
 }
 
 #[test]
@@ -189,8 +189,8 @@ fn test_fw_cfg_read_data_word_past_end_padded() {
     fw.add_bytes(0x0004, vec![0xAA]); // only 1 byte
     fw.set_selector(0x0004);
 
-    // Reading a word past end: first byte valid, second byte zero-padded
-    assert_eq!(fw.read_data_word(), 0x00AA);
+    // BE: [0xAA] as word = 0xAA00 (right-zero padding)
+    assert_eq!(fw.read_data_word(), 0xAA00);
 }
 
 #[test]
@@ -199,8 +199,8 @@ fn test_fw_cfg_read_data_dword_past_end_padded() {
     fw.add_bytes(0x0004, vec![0x11, 0x22]); // only 2 bytes
     fw.set_selector(0x0004);
 
-    // Reading dword past end: first 2 bytes valid, rest zero-padded
-    assert_eq!(fw.read_data_dword(), 0x00002211);
+    // BE: [0x11, 0x22] as dword = 0x11220000 (right-zero padding)
+    assert_eq!(fw.read_data_dword(), 0x11220000);
 }
 
 // -- DMA descriptor tests --
@@ -208,7 +208,7 @@ fn test_fw_cfg_read_data_dword_past_end_padded() {
 #[test]
 fn test_fw_cfg_dma_descriptor_encode_decode() {
     let desc = FwCfgDmaDescriptor {
-        control: 0x00000006, // SELECT | READ
+        control: 0x0000_000A, // SELECT | READ
         length: 0x1000,
         address: 0x8000_0000,
     };
@@ -216,7 +216,7 @@ fn test_fw_cfg_dma_descriptor_encode_decode() {
     assert_eq!(bytes.len(), 16);
 
     let decoded = FwCfgDmaDescriptor::decode(&bytes).unwrap();
-    assert_eq!(decoded.control, 6);
+    assert_eq!(decoded.control, 0x0A);
     assert_eq!(decoded.length, 0x1000);
     assert_eq!(decoded.address, 0x8000_0000);
 }
@@ -248,7 +248,10 @@ impl MockDmaAccess {
             .lock()
             .unwrap()
             .get(&addr)
-            .cloned()
+            .map(|v| {
+                let n = len.min(v.len());
+                v[..n].to_vec()
+            })
             .unwrap_or_else(|| vec![0u8; len])
     }
 }
@@ -278,23 +281,23 @@ fn test_fw_cfg_dma_read() {
     fw.set_dma_enabled(true);
 
     let access = MockDmaAccess::new();
-    // Descriptor at addr 0x100: SELECT|READ, length=4, select_addr=0x200
+    // Descriptor at addr 0x100: SELECT|READ, selector=0x0003 in high 16 bits
     let desc = FwCfgDmaDescriptor {
-        control: 0x0000_0006, // SELECT | READ
+        control: 0x0003_000A, // SELECT | READ, selector=0x0003
         length: 4,
-        address: 0x200, // where to read selector key from
+        address: 0x200, // data transfer address
     };
     access.write_mem(0x100, &desc.encode());
-    // Write selector key at address 0x200: 0x0003 in big-endian
-    access.write_mem(0x200, &[0x00, 0x03]);
 
     fw.do_dma(0x100, &access).unwrap();
 
-    // DMA should have written 4 bytes of the entry to address 0x200+0=0x200
-    // (the address field is reused: first it's the selector source, then
-    //  the data destination for reads)
+    // DMA should have written 4 bytes of entry 0x0003 to address 0x200
     let result = access.read_mem(0x200, 4);
     assert_eq!(result, vec![0x40, 0x00, 0x00, 0x00]);
+
+    // Descriptor writeback should clear control to 0 (success)
+    let status = access.read_mem(0x100, 4);
+    assert_eq!(status, vec![0x00, 0x00, 0x00, 0x00]);
 }
 
 #[test]
@@ -306,7 +309,7 @@ fn test_fw_cfg_dma_skip() {
     // Skip first 2 bytes
     let access = MockDmaAccess::new();
     let desc = FwCfgDmaDescriptor {
-        control: 0x0000_0008, // SKIP only
+        control: 0x0000_0004, // SKIP only
         length: 2,
         address: 0,
     };
@@ -333,6 +336,52 @@ fn test_fw_cfg_dma_write_denied() {
 
     let result = fw.do_dma(0x100, &access);
     assert!(result.is_err());
+
+    // Descriptor should have ERROR bit set in control (big-endian)
+    let status = access.read_mem(0x100, 4);
+    assert_eq!(status, vec![0x00, 0x00, 0x00, 0x01]); // ERROR=0x01
+}
+
+#[test]
+fn test_fw_cfg_dma_read_past_end_zero_fill() {
+    let fw = FwCfg::new(10);
+    fw.add_bytes(0x0003, vec![0xAA, 0xBB]); // only 2 bytes
+    fw.set_dma_enabled(true);
+
+    let access = MockDmaAccess::new();
+    // Read 4 bytes from 2-byte entry: first 2 valid, rest zero-filled
+    let desc = FwCfgDmaDescriptor {
+        control: 0x0003_000A, // SELECT | READ, selector=0x0003
+        length: 4,
+        address: 0x200,
+    };
+    access.write_mem(0x100, &desc.encode());
+
+    fw.do_dma(0x100, &access).unwrap();
+
+    let result = access.read_mem(0x200, 4);
+    assert_eq!(result, vec![0xAA, 0xBB, 0x00, 0x00]);
+}
+
+#[test]
+fn test_fw_cfg_dma_read_no_entry_zero_fill() {
+    let fw = FwCfg::new(10);
+    // No entry at key 0xDEAD
+    fw.set_dma_enabled(true);
+
+    let access = MockDmaAccess::new();
+    let desc = FwCfgDmaDescriptor {
+        control: 0xDEAD_000A, // SELECT | READ, selector=0xDEAD
+        length: 4,
+        address: 0x300,
+    };
+    access.write_mem(0x100, &desc.encode());
+
+    fw.do_dma(0x100, &access).unwrap();
+
+    // Should zero-fill when no entry exists
+    let result = access.read_mem(0x300, 4);
+    assert_eq!(result, vec![0x00, 0x00, 0x00, 0x00]);
 }
 
 // -- File directory auto-registration --

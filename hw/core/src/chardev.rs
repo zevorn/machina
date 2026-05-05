@@ -167,7 +167,7 @@ impl Chardev for NullChardev {
     }
 }
 
-/// Wraps host stdin/stdout with QEMU-compatible escape
+/// Wraps host stdin/stdout with terminal escape
 /// sequences (Ctrl+A prefix):
 ///   Ctrl+A, X — exit emulator
 ///   Ctrl+A, C — toggle monitor console

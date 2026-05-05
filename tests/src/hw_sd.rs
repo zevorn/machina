@@ -181,7 +181,7 @@ fn test_sd_do_command_no_card() {
     let mut resp = [0u8; 16];
     let req = SdRequest::new(0, 0);
     let result = bus.do_command(&req, &mut resp);
-    assert_eq!(result.unwrap_err(), SdError::NoCard);
+    assert_eq!(result.unwrap_err(), SdError::Timeout);
 }
 
 #[test]
@@ -318,6 +318,6 @@ fn test_sd_reparent_card() {
     assert_eq!(
         bus1.do_command(&SdRequest::new(1, 0), &mut resp)
             .unwrap_err(),
-        SdError::NoCard
+        SdError::Timeout
     );
 }

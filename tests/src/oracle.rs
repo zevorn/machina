@@ -191,7 +191,7 @@ fn test_runtime_oracle_check_reset_skip_missing_probe() {
         RuntimeOracle::new(&json, "/nonexistent/probe/command", &[]).unwrap();
 
     let actual = BTreeMap::new();
-    match oracle.check_reset(&actual) {
+    match oracle.check_reset(&actual, &BTreeMap::new()) {
         OracleCheckResult::Skip(reason) => {
             assert!(reason.contains("cannot start probe"));
         }
@@ -218,7 +218,7 @@ fn test_runtime_oracle_check_reset_with_fake_probe() {
     actual.insert("LCR".into(), 0x00);
     actual.insert("LSR".into(), 0x60);
 
-    match oracle.check_reset(&actual) {
+    match oracle.check_reset(&actual, &BTreeMap::new()) {
         OracleCheckResult::Pass { total } => {
             assert_eq!(total, 5);
         }
@@ -246,7 +246,7 @@ fn test_runtime_oracle_check_reset_detects_mismatch() {
     actual.insert("LCR".into(), 0xFF);
     actual.insert("LSR".into(), 0x60);
 
-    match oracle.check_reset(&actual) {
+    match oracle.check_reset(&actual, &BTreeMap::new()) {
         OracleCheckResult::Mismatch(result) => {
             assert!(result.mismatches > 0);
         }
@@ -261,9 +261,12 @@ fn test_runtime_oracle_skip_when_probe_fails() {
 
     let dir = tempfile::TempDir::new().unwrap();
     let probe_path = dir.path().join("failing-probe");
-    // Write a script that exits non-zero
-    let mut f = std::fs::File::create(&probe_path).unwrap();
-    f.write_all(b"#!/bin/sh\nexit 1\n").unwrap();
+    // Write a script that exits non-zero; close before chmod+run.
+    {
+        let mut f = std::fs::File::create(&probe_path).unwrap();
+        f.write_all(b"#!/bin/sh\nexit 1\n").unwrap();
+        f.sync_all().unwrap();
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -278,8 +281,8 @@ fn test_runtime_oracle_skip_when_probe_fails() {
         RuntimeOracle::new(&json, probe_path.to_str().unwrap(), &[]).unwrap();
 
     let actual = BTreeMap::new();
-    match oracle.check_reset(&actual) {
-        OracleCheckResult::Skip(_) => {}
-        other => panic!("expected Skip for failing probe, got {other:?}"),
+    match oracle.check_reset(&actual, &BTreeMap::new()) {
+        OracleCheckResult::Error(_) => {}
+        other => panic!("expected Error for failing probe, got {other:?}"),
     }
 }

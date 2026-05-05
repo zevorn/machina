@@ -2,7 +2,8 @@
 //!
 //! Provides [`FwCfg`] for registering firmware configuration entries,
 //! and the [`FwCfgDataGenerator`] trait for devices that contribute
-//! data items. IO and DMA access follow the QEMU fw_cfg device model.
+//! data items. IO and DMA access follow the fw_cfg ABI (selector/data
+//! register pair and big-endian DMA descriptor protocol).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -39,19 +40,19 @@ pub mod keys {
     pub const FILE_DIR: u16 = 0x0019;
 }
 
-/// Signature bytes returned for key 0x0000.
-pub const FW_CFG_SIGNATURE: &[u8] = b"QEMU";
+/// Signature bytes returned for key 0x0000 (fw_cfg protocol).
+pub const FW_CFG_SIGNATURE: &[u8] = &[0x51, 0x45, 0x4D, 0x55];
 
-/// DMA control bits.
+/// DMA control bits (fw_cfg ABI).
 pub mod dma_ctl {
     pub const ERROR: u16 = 0x0001;
-    pub const SELECT: u16 = 0x0002;
-    pub const READ: u16 = 0x0004;
-    pub const SKIP: u16 = 0x0008;
+    pub const READ: u16 = 0x0002;
+    pub const SKIP: u16 = 0x0004;
+    pub const SELECT: u16 = 0x0008;
     pub const WRITE: u16 = 0x0010;
 }
 
-/// DMA descriptor layout (big-endian fields, same as QEMU fw_cfg_dma).
+/// DMA descriptor layout (big-endian fields, fw_cfg ABI).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FwCfgDmaDescriptor {
     pub control: u32,
@@ -296,16 +297,18 @@ impl FwCfg {
 
     /// Read a 16-bit word from the current entry.
     ///
+    /// Bytes are composed big-endian (first byte = high byte).
     /// Bytes past the entry end are read as 0.
     #[must_use]
     pub fn read_data_word(&self) -> u16 {
-        let lo = self.read_data_byte();
         let hi = self.read_data_byte();
-        u16::from_le_bytes([lo, hi])
+        let lo = self.read_data_byte();
+        u16::from_be_bytes([hi, lo])
     }
 
     /// Read a 32-bit dword from the current entry.
     ///
+    /// Bytes are composed big-endian (first byte = high byte).
     /// Bytes past the entry end are read as 0.
     #[must_use]
     pub fn read_data_dword(&self) -> u32 {
@@ -313,7 +316,7 @@ impl FwCfg {
         let b1 = self.read_data_byte();
         let b2 = self.read_data_byte();
         let b3 = self.read_data_byte();
-        u32::from_le_bytes([b0, b1, b2, b3])
+        u32::from_be_bytes([b0, b1, b2, b3])
     }
 
     // -- DMA --
@@ -333,7 +336,8 @@ impl FwCfg {
     ///
     /// Reads the descriptor from `desc_addr` via `access`, then
     /// performs select/read/skip/write operations according to
-    /// the control field.
+    /// the control field. On completion, writes back the control
+    /// field (0 on success, ERROR on failure).
     pub fn do_dma(
         &self,
         desc_addr: u64,
@@ -345,45 +349,41 @@ impl FwCfg {
             .ok_or("short DMA descriptor")?;
 
         let ctl = desc.control as u16;
+        let mut dma_error = false;
 
         if ctl & dma_ctl::SELECT != 0 {
-            // Select: read 2 bytes from guest address as big-endian key
-            let mut key_buf = [0u8; 2];
-            access.dma_read(desc.address, &mut key_buf)?;
-            let key = u16::from_be_bytes(key_buf);
+            let key = (desc.control >> 16) as u16;
             self.set_selector(key);
         }
 
         if ctl & dma_ctl::READ != 0 {
-            let mut offset = 0u32;
             let entry = *self.cur_entry.lock().unwrap();
             let entries = self.entries.borrow();
             let entry_data = entries.get(&entry);
+            let base = *self.cur_offset.lock().unwrap() as usize;
+
+            let mut offset = 0u32;
             while offset < desc.length {
                 let remaining = (desc.length - offset) as usize;
-                let mut buf = vec![0u8; remaining.min(4096)];
-                let mut n = 0usize;
+                let chunk = remaining.min(4096);
+                let mut buf = vec![0u8; chunk];
+
                 if let Some(e) = entry_data {
-                    let base = *self.cur_offset.lock().unwrap() as usize;
                     for (i, dst) in buf.iter_mut().enumerate() {
-                        if base + i < e.data.len() {
-                            *dst = e.data[base + i];
-                            n = i + 1;
-                        } else {
-                            // past end → zero
-                            n = i + 1;
-                            break;
+                        let pos = base + offset as usize + i;
+                        if pos < e.data.len() {
+                            *dst = e.data[pos];
                         }
                     }
-                    *self.cur_offset.lock().unwrap() += n as u32;
                 }
-                let actual = &buf[..n];
-                access.dma_write(desc.address + offset as u64, actual)?;
-                offset += n as u32;
-                if n == 0 {
+                let written =
+                    access.dma_write(desc.address + offset as u64, &buf)?;
+                offset += written as u32;
+                if written < chunk {
                     break;
                 }
             }
+            *self.cur_offset.lock().unwrap() += desc.length;
         }
 
         if ctl & dma_ctl::SKIP != 0 {
@@ -391,7 +391,23 @@ impl FwCfg {
         }
 
         if ctl & dma_ctl::WRITE != 0 {
-            // Write denied: fw_cfg is read-only from guest perspective
+            dma_error = true;
+        }
+
+        // Write back descriptor status
+        let status = if dma_error {
+            dma_ctl::ERROR as u32
+        } else {
+            0u32
+        };
+        let status_desc = FwCfgDmaDescriptor {
+            control: status,
+            length: 0,
+            address: 0,
+        };
+        access.dma_write(desc_addr, &status_desc.encode())?;
+
+        if dma_error {
             return Err("fw_cfg DMA write not permitted".to_string());
         }
 

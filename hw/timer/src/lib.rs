@@ -55,6 +55,16 @@ struct PtimerState {
     callback: Option<PtimerCallback>,
     in_transaction: bool,
     need_reload: bool,
+    /// Sub-period residual nanoseconds for drive_ptimer accumulation.
+    residual_ns: u64,
+}
+
+/// Handle for a scheduled ptimer on a VirtualClock.
+///
+/// Dropping the handle cancels any pending timer callback.
+pub struct PtimerHandle {
+    clock: Arc<VirtualClock>,
+    timer_id: std::sync::Mutex<Option<u64>>,
 }
 
 /// A general-purpose periodic/one-shot countdown timer.
@@ -85,6 +95,7 @@ impl Ptimer {
                 callback,
                 in_transaction: false,
                 need_reload: false,
+                residual_ns: 0,
             }),
         })
     }
@@ -278,18 +289,8 @@ impl PtimerState {
 /// Drive a Ptimer from a VirtualClock step.
 ///
 /// Advances the clock by `delta_ns`, then ticks the ptimer once
-/// for each full period elapsed. Returns the number of callback
-/// invocations.
-///
-/// This is the canonical event-loop integration pattern:
-///
-/// ```text
-/// loop {
-///     let delta = compute_time_slice();
-///     drive_ptimer(&ptimer, &clock, delta);
-///     // ... other event loop work
-/// }
-/// ```
+/// for each full period elapsed. Accumulates sub-period residual
+/// across calls so repeated partial advances eventually fire.
 pub fn drive_ptimer(
     ptimer: &Ptimer,
     clock: &VirtualClock,
@@ -300,11 +301,92 @@ pub fn drive_ptimer(
     if period_ns <= 0 || !ptimer.is_enabled() {
         return 0;
     }
-    let elapsed = (delta_ns / period_ns) as u64;
+    let mut s = ptimer.inner.borrow();
+    let total_ns = s.residual_ns as i64 + delta_ns;
+    let elapsed = (total_ns / period_ns) as u64;
+    s.residual_ns = (total_ns % period_ns) as u64;
+    drop(s);
     if elapsed == 0 {
         return 0;
     }
     ptimer.step(elapsed)
+}
+
+/// Schedule a ptimer on a VirtualClock for periodic or one-shot
+/// callback-driven execution.
+///
+/// Returns a [`PtimerHandle`] that can cancel the scheduling.
+/// Dropping the handle also cancels any pending timer.
+///
+/// For periodic timers, the callback re-schedules itself after
+/// each expiry. For one-shot timers, the callback fires once and
+/// the scheduling chain stops.
+pub fn schedule_ptimer(
+    ptimer: Arc<Ptimer>,
+    clock: Arc<VirtualClock>,
+) -> Arc<PtimerHandle> {
+    let handle = Arc::new(PtimerHandle {
+        clock: clock.clone(),
+        timer_id: std::sync::Mutex::new(None),
+    });
+    schedule_next(&ptimer, &clock, &handle);
+    handle
+}
+
+/// Internal: schedule the next tick callback.
+///
+/// Uses a weak handle reference in the callback so that dropping
+/// all external `Arc<PtimerHandle>` refs triggers cancellation.
+fn schedule_next(
+    ptimer: &Arc<Ptimer>,
+    clock: &Arc<VirtualClock>,
+    handle: &Arc<PtimerHandle>,
+) {
+    if !ptimer.is_enabled() {
+        return;
+    }
+    let period_ns = ptimer.period_ns() as i64;
+    if period_ns <= 0 {
+        return;
+    }
+    let now = clock.get_ns();
+    let expire = now + period_ns;
+    let ptimer_clone = Arc::clone(ptimer);
+    let clock_clone = Arc::clone(clock);
+    let handle_weak = Arc::downgrade(handle);
+
+    let id = clock.add_timer(expire, move || {
+        let _ = ptimer_clone.tick();
+        if ptimer_clone.is_enabled() {
+            if let Some(h) = handle_weak.upgrade() {
+                schedule_next(&ptimer_clone, &clock_clone, &h);
+            }
+        }
+    });
+    *handle.timer_id.lock().unwrap() = Some(id);
+}
+
+impl PtimerHandle {
+    /// Cancel the pending timer callback.
+    ///
+    /// Returns `true` if a timer was cancelled, `false` if no
+    /// timer was scheduled.
+    pub fn cancel(&self) -> bool {
+        let mut tid = self.timer_id.lock().unwrap();
+        if let Some(id) = *tid {
+            let removed = self.clock.remove_timer(id);
+            *tid = None;
+            removed
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for PtimerHandle {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 impl Ptimer {

@@ -430,11 +430,139 @@ fn test_drive_ptimer_sub_period_no_fire() {
     timer.run(false);
 
     let clock = VirtualClock::new(machina_accel::timer::ClockType::Virtual);
-    // 500 ns < 1000 ns period → no full period elapsed
+    // 500 ns < 1000 ns period → no full period elapsed yet
     let fired = timer::drive_ptimer(&timer, &clock, 500);
     assert_eq!(fired, 0);
     assert_eq!(count.load(Ordering::SeqCst), 0);
     assert!(timer.is_enabled());
+}
+
+#[test]
+fn test_drive_ptimer_cumulative_sub_period() {
+    let count = Arc::new(AtomicU64::new(0));
+    let c = count.clone();
+    let timer = Ptimer::new(
+        Some(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        })),
+        0,
+    );
+    timer.set_freq(1_000_000); // 1000 ns
+    timer.set_limit(1, true);
+    timer.run(false);
+
+    let clock = VirtualClock::new(machina_accel::timer::ClockType::Virtual);
+    // 500 ns + 500 ns = 1000 ns → one full period, fires once
+    let fired1 = timer::drive_ptimer(&timer, &clock, 500);
+    assert_eq!(fired1, 0, "no fire at 500/1000 ns");
+    let fired2 = timer::drive_ptimer(&timer, &clock, 500);
+    assert_eq!(fired2, 1, "fire at 1000/1000 ns");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert!(timer.is_enabled());
+}
+
+// -- schedule_ptimer tests --
+
+#[test]
+fn test_schedule_ptimer_periodic() {
+    let count = Arc::new(AtomicU64::new(0));
+    let c = count.clone();
+    let timer = Ptimer::new(
+        Some(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        })),
+        0,
+    );
+    timer.set_freq(1_000_000); // 1000 ns
+    timer.set_limit(1, true);
+    timer.run(false);
+
+    let clock =
+        Arc::new(VirtualClock::new(machina_accel::timer::ClockType::Virtual));
+    let _handle = timer::schedule_ptimer(timer, clock.clone());
+
+    // Step in loop: VirtualClock::step() collects expired timers
+    // at call time and does not chain-fire callbacks added during
+    // callback execution. Looping 5 × 1000 ns gives 5 fires.
+    for _ in 0..5 {
+        clock.step(1000);
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 5);
+}
+
+#[test]
+fn test_schedule_ptimer_oneshot() {
+    let count = Arc::new(AtomicU64::new(0));
+    let c = count.clone();
+    let timer = Ptimer::new(
+        Some(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        })),
+        0,
+    );
+    timer.set_freq(1_000_000);
+    timer.set_limit(1, true);
+    timer.run(true); // oneshot
+
+    let clock =
+        Arc::new(VirtualClock::new(machina_accel::timer::ClockType::Virtual));
+    let _handle = timer::schedule_ptimer(timer, clock.clone());
+
+    // Step 5000 ns → only first period fires (oneshot), then stops
+    clock.step(5000);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn test_schedule_ptimer_cancel() {
+    let count = Arc::new(AtomicU64::new(0));
+    let c = count.clone();
+    let timer = Ptimer::new(
+        Some(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        })),
+        0,
+    );
+    timer.set_freq(1_000_000);
+    timer.set_limit(1, true);
+    timer.run(false);
+
+    let clock =
+        Arc::new(VirtualClock::new(machina_accel::timer::ClockType::Virtual));
+    let handle = timer::schedule_ptimer(timer, clock.clone());
+
+    // Cancel before any fires
+    assert!(handle.cancel());
+
+    // Step well past one period — should fire nothing
+    clock.step(5000);
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_schedule_ptimer_drop_cancels() {
+    let count = Arc::new(AtomicU64::new(0));
+    let c = count.clone();
+    let timer = Ptimer::new(
+        Some(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        })),
+        0,
+    );
+    timer.set_freq(1_000_000);
+    timer.set_limit(1, true);
+    timer.run(false);
+
+    let clock =
+        Arc::new(VirtualClock::new(machina_accel::timer::ClockType::Virtual));
+    {
+        let _handle = timer::schedule_ptimer(timer, clock.clone());
+        // handle dropped here → cancels scheduling
+    }
+
+    clock.step(5000);
+    // Drop destroyed the chain before the first fire
+    assert_eq!(count.load(Ordering::SeqCst), 0);
 }
 
 #[test]

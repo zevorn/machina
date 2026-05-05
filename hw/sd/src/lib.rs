@@ -183,7 +183,7 @@ impl SdBus {
     /// Send a command to the card and collect the response.
     ///
     /// Returns `Ok(n)` with the number of response bytes on success,
-    /// or `Err(SdError::NoCard)` if no card is present.
+    /// or `Err(SdError::Timeout)` if no card is present.
     pub fn do_command(
         &self,
         req: &SdRequest,
@@ -192,7 +192,7 @@ impl SdBus {
         if let Some(card) = self.card() {
             Ok(card.do_command(req, resp))
         } else {
-            Err(SdError::NoCard)
+            Err(SdError::Timeout)
         }
     }
 
