@@ -8,6 +8,26 @@ use std::sync::{Arc, Mutex};
 
 use machina_core::device_cell::DeviceRefCell;
 
+/// Errors returned by SD bus operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdError {
+    /// No card is inserted in the bus.
+    NoCard,
+    /// Command timed out (no response from card).
+    Timeout,
+}
+
+impl std::fmt::Display for SdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoCard => write!(f, "SD no card"),
+            Self::Timeout => write!(f, "SD command timeout"),
+        }
+    }
+}
+
+impl std::error::Error for SdError {}
+
 /// SD command request from host to card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SdRequest {
@@ -162,13 +182,17 @@ impl SdBus {
 
     /// Send a command to the card and collect the response.
     ///
-    /// Returns the number of response bytes, or 0 if no card.
-    #[must_use]
-    pub fn do_command(&self, req: &SdRequest, resp: &mut [u8]) -> usize {
+    /// Returns `Ok(n)` with the number of response bytes on success,
+    /// or `Err(SdError::NoCard)` if no card is present.
+    pub fn do_command(
+        &self,
+        req: &SdRequest,
+        resp: &mut [u8],
+    ) -> Result<usize, SdError> {
         if let Some(card) = self.card() {
-            card.do_command(req, resp)
+            Ok(card.do_command(req, resp))
         } else {
-            0
+            Err(SdError::NoCard)
         }
     }
 
@@ -250,20 +274,29 @@ impl SdBus {
         self.card().is_none_or(|card| card.get_cmd_line())
     }
 
+    /// Remove and return the card, notifying the host.
+    fn take_card(&self) -> Option<Arc<dyn SdCard>> {
+        let mut cards = self.cards.lock().unwrap();
+        let card = cards.pop().map(|e| e.card);
+        if card.is_some() {
+            drop(cards);
+            if let Some(ref host) = *self.host.borrow() {
+                host.set_inserted(false);
+            }
+        }
+        card
+    }
+
     /// Move a card from another bus to this one.
     pub fn reparent_card(&self, from: &SdBus) {
         let readonly = from.get_readonly();
-        let inserted = from.get_inserted();
-        if !inserted {
-            return;
-        }
-        from.remove_card();
-        // Copy the card reference — simplified model;
-        // real implementation would transfer ownership.
-        if let Some(ref host) = *self.host.borrow() {
-            let h: &Arc<dyn SdBusHost> = host;
-            h.set_inserted(true);
-            h.set_readonly(readonly);
+        if let Some(card) = from.take_card() {
+            self.cards.lock().unwrap().clear();
+            self.cards.lock().unwrap().push(SdCardEntry { card });
+            if let Some(ref host) = *self.host.borrow() {
+                host.set_inserted(true);
+                host.set_readonly(readonly);
+            }
         }
     }
 }

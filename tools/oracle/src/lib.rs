@@ -1,20 +1,33 @@
 //! Oracle dynamic comparison tool.
 //!
-//! The oracle framework captures guest-visible behavior (register
-//! values, IRQ state) from QEMU and compares it against Machina
-//! device models at runtime.  Oracle data lives in standalone JSON
-//! fixture files — no QEMU file paths or commit hashes appear in
-//! device source.
+//! Provides runtime comparison of Machina device behavior against
+//! a reference implementation (QEMU) via command-line probing.
 //!
 //! # Workflow
 //!
-//! 1. Run QEMU with the target device, capture register / IRQ
-//!    state into a JSON fixture (offline, one-time).
-//! 2. Machina tests load the fixture and call [`Oracle::check`]
-//!    to compare live device state against expected values.
-//! 3. If QEMU is unavailable, oracle tests are skipped gracefully.
+//! 1. A [`RuntimeOracle`] is configured with a fixture (static expected
+//!    values) and a probe command (e.g. a wrapper script that runs QEMU
+//!    and captures register state as JSON).
+//! 2. At test time, `check_reset` tries to run the probe. If the
+//!    command is unavailable, it returns `Skip`. Otherwise it compares
+//!    the captured state against the actual device state.
+//! 3. The fixture serves as offline documentation; the probe provides
+//!    runtime verification against the real QEMU behavior.
+//!
+//! # Probe command contract
+//!
+//! The probe command receives `--probe <mode>` where mode is:
+//! - `reset` — print reset register state as JSON to stdout and exit 0
+//! - `scenario <name>` — apply the named scenario and print state
+//!
+//! Output format (stdout):
+//! ```json
+//! {"registers": {"REG_NAME": value, ...}, "irqs": {"IRQ_NUM": true, ...}}
+//! ```
 
 use std::collections::BTreeMap;
+use std::io::Read;
+use std::process::{Command, Stdio};
 
 /// A single register snapshot: register name → value.
 pub type RegSnapshot = BTreeMap<String, u64>;
@@ -84,6 +97,25 @@ pub struct OracleMismatch {
     pub actual: u64,
 }
 
+/// Result of a runtime oracle check.
+#[derive(Debug)]
+pub enum OracleCheckResult {
+    /// All values matched.
+    Pass { total: usize },
+    /// One or more values mismatched.
+    Mismatch(OracleResult),
+    /// Probe command unavailable — comparison skipped.
+    Skip(String),
+}
+
+/// Result of a single probe run.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ProbeOutput {
+    registers: RegSnapshot,
+    #[serde(default)]
+    irqs: BTreeMap<u32, bool>,
+}
+
 /// The oracle engine — loads fixtures and compares device state.
 pub struct Oracle {
     fixture: OracleFixture,
@@ -102,38 +134,21 @@ impl Oracle {
         &self.fixture.device
     }
 
+    /// Return a reference to the fixture.
+    pub fn fixture(&self) -> &OracleFixture {
+        &self.fixture
+    }
+
     /// Compare `actual` register state against the fixture reset
     /// values, ignoring any registers listed in quirk targets.
     pub fn check_reset(&self, actual: &RegSnapshot) -> OracleResult {
-        let quirk_targets: Vec<&str> = self
-            .fixture
-            .quirks
-            .iter()
-            .map(|q| q.target.as_str())
-            .collect();
-
-        let mut result = OracleResult {
-            total: 0,
-            mismatches: 0,
-            details: Vec::new(),
-        };
-
-        for (reg, &expected) in &self.fixture.reset_regs {
-            if quirk_targets.contains(&reg.as_str()) {
-                continue;
-            }
-            result.total += 1;
-            let actual_val = actual.get(reg).copied().unwrap_or(0);
-            if actual_val != expected {
-                result.mismatches += 1;
-                result.details.push(OracleMismatch {
-                    register: reg.clone(),
-                    expected,
-                    actual: actual_val,
-                });
-            }
-        }
-        result
+        check_snapshot(
+            &self.fixture.reset_regs,
+            actual,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &self.fixture.quirks,
+        )
     }
 
     /// Check all scenarios, returning a Vec of per-scenario results.
@@ -146,54 +161,208 @@ impl Oracle {
             .iter()
             .map(|scenario| {
                 let (actual_regs, actual_irqs) = _apply(scenario);
-                let quirk_targets: Vec<&str> = self
-                    .fixture
-                    .quirks
-                    .iter()
-                    .map(|q| q.target.as_str())
-                    .collect();
-
-                let mut result = OracleResult {
-                    total: 0,
-                    mismatches: 0,
-                    details: Vec::new(),
-                };
-
-                for (reg, &expected) in &scenario.expected {
-                    if quirk_targets.contains(&reg.as_str()) {
-                        continue;
-                    }
-                    result.total += 1;
-                    let actual_val = actual_regs.get(reg).copied().unwrap_or(0);
-                    if actual_val != expected {
-                        result.mismatches += 1;
-                        result.details.push(OracleMismatch {
-                            register: reg.clone(),
-                            expected,
-                            actual: actual_val,
-                        });
-                    }
-                }
-
-                for (&irq, &expected) in &scenario.irqs {
-                    if quirk_targets.contains(&irq.to_string().as_str()) {
-                        continue;
-                    }
-                    result.total += 1;
-                    let actual_val =
-                        actual_irqs.get(&irq).copied().unwrap_or(false);
-                    if actual_val != expected {
-                        result.mismatches += 1;
-                        result.details.push(OracleMismatch {
-                            register: format!("IRQ_{irq}"),
-                            expected: u64::from(expected),
-                            actual: u64::from(actual_val),
-                        });
-                    }
-                }
-
-                result
+                check_snapshot(
+                    &scenario.expected,
+                    &actual_regs,
+                    &actual_irqs,
+                    &scenario.irqs,
+                    &self.fixture.quirks,
+                )
             })
             .collect()
     }
+}
+
+/// Runtime oracle that probes a reference implementation via CLI.
+pub struct RuntimeOracle {
+    oracle: Oracle,
+    probe_cmd: String,
+    probe_args: Vec<String>,
+}
+
+impl RuntimeOracle {
+    /// Create a new runtime oracle.
+    ///
+    /// `probe_cmd` — path to the probe executable (e.g. a wrapper
+    /// script that runs QEMU and captures register state).
+    /// `probe_args` — extra arguments passed before `--probe`.
+    pub fn new(
+        fixture_json: &[u8],
+        probe_cmd: impl Into<String>,
+        probe_args: &[String],
+    ) -> Result<Self, String> {
+        let oracle = Oracle::load(fixture_json)?;
+        Ok(Self {
+            oracle,
+            probe_cmd: probe_cmd.into(),
+            probe_args: probe_args.to_vec(),
+        })
+    }
+
+    /// Return the device name from the underlying fixture.
+    pub fn device(&self) -> &str {
+        self.oracle.device()
+    }
+
+    /// Run the probe command and capture its JSON output.
+    ///
+    /// Returns `Ok(ProbeOutput)` on success, `Err(msg)` on failure
+    /// (including command-not-found).
+    fn run_probe(&self, mode: &str) -> Result<ProbeOutput, String> {
+        let mut cmd = Command::new(&self.probe_cmd);
+        cmd.args(&self.probe_args);
+        cmd.arg("--probe");
+        cmd.arg(mode);
+        cmd.stdin(Stdio::null());
+        cmd.stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| {
+            format!("cannot start probe '{}': {e}", self.probe_cmd)
+        })?;
+
+        let mut stdout = Vec::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_end(&mut stdout)
+            .map_err(|e| format!("read probe stdout: {e}"))?;
+
+        let status = child.wait().map_err(|e| format!("wait probe: {e}"))?;
+
+        if !status.success() {
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            return Err(format!(
+                "probe exited {}: {stderr}",
+                status.code().unwrap_or(-1)
+            ));
+        }
+
+        serde_json::from_slice::<ProbeOutput>(&stdout)
+            .map_err(|e| format!("parse probe output: {e}"))
+    }
+
+    /// Probe the reference implementation for reset register values
+    /// and compare against `actual`.
+    ///
+    /// Returns `Skip` if the probe command is not found, `Pass` if
+    /// all values match, or `Mismatch` with details.
+    pub fn check_reset(&self, actual: &RegSnapshot) -> OracleCheckResult {
+        let probe = match self.run_probe("reset") {
+            Ok(p) => p,
+            Err(e) => return OracleCheckResult::Skip(e),
+        };
+
+        let result = check_snapshot(
+            &probe.registers,
+            actual,
+            &BTreeMap::new(),
+            &probe.irqs,
+            &self.oracle.fixture.quirks,
+        );
+
+        if result.mismatches == 0 {
+            OracleCheckResult::Pass {
+                total: result.total,
+            }
+        } else {
+            OracleCheckResult::Mismatch(result)
+        }
+    }
+
+    /// Probe the reference for each scenario and compare.
+    pub fn check_scenarios(
+        &self,
+        _apply: &ScenarioApplier,
+    ) -> Vec<OracleCheckResult> {
+        self.oracle
+            .fixture
+            .scenarios
+            .iter()
+            .map(|scenario| {
+                let probe = match self
+                    .run_probe(&format!("scenario {}", scenario.name))
+                {
+                    Ok(p) => p,
+                    Err(e) => return OracleCheckResult::Skip(e),
+                };
+
+                let (actual_regs, actual_irqs) = _apply(scenario);
+                // Compare Machina output against QEMU probe output
+                let result = check_snapshot(
+                    &probe.registers,
+                    &actual_regs,
+                    &actual_irqs,
+                    &probe.irqs,
+                    &self.oracle.fixture.quirks,
+                );
+
+                if result.mismatches == 0 {
+                    OracleCheckResult::Pass {
+                        total: result.total,
+                    }
+                } else {
+                    OracleCheckResult::Mismatch(result)
+                }
+            })
+            .collect()
+    }
+}
+
+/// Compare an expected snapshot against actual values, respecting
+/// quirks.
+fn check_snapshot(
+    expected_regs: &RegSnapshot,
+    actual_regs: &RegSnapshot,
+    actual_irqs: &BTreeMap<u32, bool>,
+    expected_irqs: &BTreeMap<u32, bool>,
+    quirks: &[OracleQuirk],
+) -> OracleResult {
+    let quirk_targets: Vec<&str> =
+        quirks.iter().map(|q| q.target.as_str()).collect();
+
+    let mut result = OracleResult {
+        total: 0,
+        mismatches: 0,
+        details: Vec::new(),
+    };
+
+    for (reg, &expected) in expected_regs {
+        if quirk_targets.contains(&reg.as_str()) {
+            continue;
+        }
+        result.total += 1;
+        let actual_val = actual_regs.get(reg).copied().unwrap_or(0);
+        if actual_val != expected {
+            result.mismatches += 1;
+            result.details.push(OracleMismatch {
+                register: reg.clone(),
+                expected,
+                actual: actual_val,
+            });
+        }
+    }
+
+    for (&irq, &expected) in expected_irqs {
+        let irq_key = format!("IRQ_{irq}");
+        if quirk_targets.contains(&irq_key.as_str()) {
+            continue;
+        }
+        result.total += 1;
+        let actual_val = actual_irqs.get(&irq).copied().unwrap_or(false);
+        if actual_val != expected {
+            result.mismatches += 1;
+            result.details.push(OracleMismatch {
+                register: irq_key,
+                expected: u64::from(expected),
+                actual: u64::from(actual_val),
+            });
+        }
+    }
+
+    result
 }

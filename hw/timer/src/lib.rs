@@ -3,9 +3,17 @@
 //! Provides [`Ptimer`], a virtual-clock-driven countdown timer with
 //! policy flags, limit-reload semantics, and a transaction-based API
 //! for batched state modifications.
+//!
+//! ## Integration with VirtualClock
+//!
+//! Ptimer can be driven by a [`VirtualClock`] via [`Ptimer::schedule_on`].
+//! The clock steps virtual nanoseconds forward and fires expired
+//! callbacks; each callback calls `Ptimer::tick()`. For periodic
+//! timers the callback re-schedules itself.
 
 use std::sync::Arc;
 
+use machina_accel::timer::VirtualClock;
 use machina_core::device_cell::DeviceRefCell;
 
 /// Policy flags controlling ptimer trigger/reload behavior.
@@ -267,7 +275,45 @@ impl PtimerState {
     }
 }
 
+/// Drive a Ptimer from a VirtualClock step.
+///
+/// Advances the clock by `delta_ns`, then ticks the ptimer once
+/// for each full period elapsed. Returns the number of callback
+/// invocations.
+///
+/// This is the canonical event-loop integration pattern:
+///
+/// ```text
+/// loop {
+///     let delta = compute_time_slice();
+///     drive_ptimer(&ptimer, &clock, delta);
+///     // ... other event loop work
+/// }
+/// ```
+pub fn drive_ptimer(
+    ptimer: &Ptimer,
+    clock: &VirtualClock,
+    delta_ns: i64,
+) -> u64 {
+    clock.step(delta_ns);
+    let period_ns = ptimer.period_ns() as i64;
+    if period_ns <= 0 || !ptimer.is_enabled() {
+        return 0;
+    }
+    let elapsed = (delta_ns / period_ns) as u64;
+    if elapsed == 0 {
+        return 0;
+    }
+    ptimer.step(elapsed)
+}
+
 impl Ptimer {
+    /// Return the current period in nanoseconds.
+    #[must_use]
+    pub fn period_ns(&self) -> u64 {
+        self.inner.borrow().period_ns
+    }
+
     /// Internal reload logic.
     fn reload(&self, delta_adjust: i32) {
         let mut s = self.inner.borrow();

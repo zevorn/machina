@@ -38,7 +38,7 @@ pub trait BlockBackend: Send + Sync {
 /// address space. Supports optional read-only mode.
 pub struct FileBackend {
     file: Mutex<fs::File>,
-    size: u64,
+    size: Mutex<u64>,
     readonly: bool,
     path: PathBuf,
 }
@@ -74,7 +74,7 @@ impl FileBackend {
             .map_err(|e| format!("cannot stat {path:?}: {e}"))?;
         Ok(Self {
             file: Mutex::new(file),
-            size,
+            size: Mutex::new(size),
             readonly,
             path,
         })
@@ -88,6 +88,9 @@ impl FileBackend {
 
 impl BlockBackend for FileBackend {
     fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, String> {
+        let _end = offset
+            .checked_add(buf.len() as u64)
+            .ok_or("read offset overflow")?;
         let mut f = self
             .file
             .lock()
@@ -101,6 +104,10 @@ impl BlockBackend for FileBackend {
         if self.readonly {
             return Err("file is read-only".to_string());
         }
+        // Guard against overflow in offset + len
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .ok_or("write offset overflow")?;
         let mut f = self
             .file
             .lock()
@@ -108,8 +115,25 @@ impl BlockBackend for FileBackend {
         f.seek(SeekFrom::Start(offset))
             .map_err(|e| format!("seek error: {e}"))?;
         let n = f.write(buf).map_err(|e| format!("write error: {e}"))?;
-        if offset + n as u64 > self.size {
-            // size updated lazily; caller can also call size() directly
+        // Update cached size if the write extended the file
+        let new_size = offset + n as u64;
+        let mut size = self
+            .size
+            .lock()
+            .map_err(|e| format!("size lock error: {e}"))?;
+        if new_size > *size {
+            *size = new_size;
+        }
+        drop(size);
+        drop(f);
+        if end > new_size {
+            // Partial write — refresh from metadata
+            if let Ok(m) = fs::metadata(&self.path) {
+                *self
+                    .size
+                    .lock()
+                    .map_err(|e| format!("size lock error: {e}"))? = m.len();
+            }
         }
         Ok(n)
     }
@@ -123,7 +147,7 @@ impl BlockBackend for FileBackend {
     }
 
     fn size(&self) -> u64 {
-        self.size
+        *self.size.lock().unwrap()
     }
 
     fn readonly(&self) -> bool {
@@ -156,10 +180,17 @@ impl BlockBackend for MemBackend {
     fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, String> {
         let data = self.data.lock().map_err(|e| format!("lock error: {e}"))?;
         let start = offset as usize;
+        // Cast back to u64 to detect truncation on 32-bit usize
+        if start as u64 != offset {
+            return Err("read offset overflow".to_string());
+        }
         if start >= data.len() {
             return Ok(0);
         }
-        let end = (start + buf.len()).min(data.len());
+        let end = start
+            .checked_add(buf.len())
+            .ok_or("read offset overflow")?
+            .min(data.len());
         let n = end - start;
         buf[..n].copy_from_slice(&data[start..end]);
         Ok(n)
@@ -172,7 +203,12 @@ impl BlockBackend for MemBackend {
         let mut data =
             self.data.lock().map_err(|e| format!("lock error: {e}"))?;
         let start = offset as usize;
-        let end = start + buf.len();
+        if start as u64 != offset {
+            return Err("write offset overflow".to_string());
+        }
+        let end = start
+            .checked_add(buf.len())
+            .ok_or("write offset overflow")?;
         if end > data.len() {
             data.resize(end, 0);
         }

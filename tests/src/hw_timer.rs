@@ -1,8 +1,9 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use machina_accel::timer::VirtualClock;
 use machina_hw_timer::policy;
-use machina_hw_timer::Ptimer;
+use machina_hw_timer::{self as timer, Ptimer};
 
 /// Utility: create a timer with a callback that increments a counter.
 fn counting_timer(policy_mask: u8) -> (Arc<Ptimer>, Arc<AtomicU64>) {
@@ -344,4 +345,108 @@ fn test_ptimer_callback_none() {
     // Should not crash with no callback; fires and stops
     assert!(timer.tick());
     assert!(!timer.is_enabled());
+}
+
+// -- VirtualClock integration tests --
+
+#[test]
+fn test_drive_ptimer_periodic() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = count.clone();
+    let timer = Ptimer::new(
+        Some(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        })),
+        0,
+    );
+    timer.set_freq(1_000_000); // 1 MHz → 1000 ns period
+    timer.set_limit(1, true);
+    timer.run(false); // periodic
+
+    let clock = VirtualClock::new(machina_accel::timer::ClockType::Virtual);
+
+    // Advance clock by 10,000 ns → 10 periods elapsed
+    let fired = timer::drive_ptimer(&timer, &clock, 10_000);
+    assert_eq!(fired, 10);
+    assert_eq!(count.load(Ordering::SeqCst), 10);
+    assert!(timer.is_enabled());
+}
+
+#[test]
+fn test_drive_ptimer_oneshot() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = count.clone();
+    let timer = Ptimer::new(
+        Some(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        })),
+        0,
+    );
+    timer.set_freq(1_000_000);
+    timer.set_limit(1, true);
+    timer.run(true); // oneshot
+
+    let clock = VirtualClock::new(machina_accel::timer::ClockType::Virtual);
+
+    // 10,000 ns → 10 periods, but oneshot stops after first
+    let fired = timer::drive_ptimer(&timer, &clock, 10_000);
+    assert_eq!(fired, 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert!(!timer.is_enabled());
+}
+
+#[test]
+fn test_drive_ptimer_stopped_no_fire() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = count.clone();
+    let timer = Ptimer::new(
+        Some(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        })),
+        0,
+    );
+    timer.set_freq(1_000_000);
+    timer.set_limit(1, true);
+    // Not started — timer is disabled
+
+    let clock = VirtualClock::new(machina_accel::timer::ClockType::Virtual);
+    let fired = timer::drive_ptimer(&timer, &clock, 10_000);
+    assert_eq!(fired, 0);
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_drive_ptimer_sub_period_no_fire() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = count.clone();
+    let timer = Ptimer::new(
+        Some(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        })),
+        0,
+    );
+    timer.set_freq(1_000_000); // 1000 ns
+    timer.set_limit(1, true);
+    timer.run(false);
+
+    let clock = VirtualClock::new(machina_accel::timer::ClockType::Virtual);
+    // 500 ns < 1000 ns period → no full period elapsed
+    let fired = timer::drive_ptimer(&timer, &clock, 500);
+    assert_eq!(fired, 0);
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(timer.is_enabled());
+}
+
+#[test]
+fn test_drive_ptimer_clock_advances() {
+    let timer = Ptimer::new(None::<Arc<dyn Fn() + Send + Sync>>, 0);
+    timer.set_freq(1_000_000);
+    timer.set_limit(1, true);
+    timer.run(false);
+
+    let clock = VirtualClock::new(machina_accel::timer::ClockType::Virtual);
+    assert_eq!(clock.get_ns(), 0);
+
+    timer::drive_ptimer(&timer, &clock, 5_000_000);
+    assert_eq!(clock.get_ns(), 5_000_000);
 }

@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
+use std::io::Write;
 
-use machina_oracle::{Oracle, OracleFixture, OracleQuirk, OracleScenario};
+use machina_oracle::{
+    Oracle, OracleCheckResult, OracleFixture, OracleQuirk, OracleScenario,
+    RuntimeOracle,
+};
 
 fn sample_fixture() -> OracleFixture {
     let mut reset_regs = BTreeMap::new();
@@ -27,7 +31,7 @@ fn sample_fixture() -> OracleFixture {
     }
 }
 
-// -- Positive Tests --
+// -- Positive Tests (fixture-based Oracle) --
 
 #[test]
 fn test_oracle_load_fixture() {
@@ -80,9 +84,8 @@ fn test_oracle_check_reset_missing_reg() {
     let json = serde_json::to_vec(&fixture).unwrap();
     let oracle = Oracle::load(&json).unwrap();
 
-    let actual = BTreeMap::new(); // all regs missing -> default to 0
+    let actual = BTreeMap::new();
     let result = oracle.check_reset(&actual);
-    // Missing regs default to 0; LSR expected 0x60 -> mismatch
     assert!(result.mismatches > 0);
 }
 
@@ -102,7 +105,6 @@ fn test_oracle_check_reset_with_quirk() {
     actual.insert("IER".into(), 0x00);
     actual.insert("IIR".into(), 0x01);
     actual.insert("LCR".into(), 0x00);
-    // LSR intentionally different; quirked
     actual.insert("LSR".into(), 0x00);
 
     let result = oracle.check_reset(&actual);
@@ -117,7 +119,7 @@ fn test_oracle_check_scenarios() {
 
     let results = oracle.check_scenarios(&|_scenario| {
         let mut regs = BTreeMap::new();
-        regs.insert("LCR".into(), 0x80); // matching expected
+        regs.insert("LCR".into(), 0x80);
         (regs, BTreeMap::new())
     });
 
@@ -125,7 +127,7 @@ fn test_oracle_check_scenarios() {
     assert_eq!(results[0].mismatches, 0);
 }
 
-// -- Negative Tests --
+// -- Negative Tests (fixture-based) --
 
 #[test]
 fn test_oracle_load_invalid_json() {
@@ -143,4 +145,141 @@ fn test_oracle_load_empty_json() {
     let result = oracle.check_reset(&BTreeMap::new());
     assert_eq!(result.total, 0);
     assert_eq!(result.mismatches, 0);
+}
+
+// -- RuntimeOracle tests --
+
+/// Write a fake probe script that outputs a JSON response.
+fn write_probe_script(
+    dir: &std::path::Path,
+    name: &str,
+    registers: &BTreeMap<String, u64>,
+) -> std::path::PathBuf {
+    let path = dir.join(name);
+    let regs_json = serde_json::to_string(&serde_json::json!({
+        "registers": registers,
+        "irqs": {}
+    }))
+    .unwrap();
+    let script = format!("#!/bin/sh\ncase \"$1\" in\n  --probe)\n");
+    let script = script
+        + &format!("    case \"$2\" in\n      reset) echo '{regs_json}' ;;\n");
+    let script = script + "      *) echo '{\"registers\":{},\"irqs\":{}}' ;;\n";
+    let script = script + "    esac\n    ;;\n";
+    let script = script + "esac\n";
+
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        f.flush().unwrap();
+        // f drops here, closing the file
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    path
+}
+
+#[test]
+fn test_runtime_oracle_check_reset_skip_missing_probe() {
+    let fixture = sample_fixture();
+    let json = serde_json::to_vec(&fixture).unwrap();
+    let oracle =
+        RuntimeOracle::new(&json, "/nonexistent/probe/command", &[]).unwrap();
+
+    let actual = BTreeMap::new();
+    match oracle.check_reset(&actual) {
+        OracleCheckResult::Skip(reason) => {
+            assert!(reason.contains("cannot start probe"));
+        }
+        other => panic!("expected Skip, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_runtime_oracle_check_reset_with_fake_probe() {
+    let fixture = sample_fixture();
+    let json = serde_json::to_vec(&fixture).unwrap();
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let probe_path =
+        write_probe_script(dir.path(), "fake-qemu", &fixture.reset_regs);
+
+    let oracle =
+        RuntimeOracle::new(&json, probe_path.to_str().unwrap(), &[]).unwrap();
+
+    let mut actual = BTreeMap::new();
+    actual.insert("RBR".into(), 0x00);
+    actual.insert("IER".into(), 0x00);
+    actual.insert("IIR".into(), 0x01);
+    actual.insert("LCR".into(), 0x00);
+    actual.insert("LSR".into(), 0x60);
+
+    match oracle.check_reset(&actual) {
+        OracleCheckResult::Pass { total } => {
+            assert_eq!(total, 5);
+        }
+        other => panic!("expected Pass, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_runtime_oracle_check_reset_detects_mismatch() {
+    let fixture = sample_fixture();
+    let json = serde_json::to_vec(&fixture).unwrap();
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let probe_path =
+        write_probe_script(dir.path(), "fake-qemu", &fixture.reset_regs);
+
+    let oracle =
+        RuntimeOracle::new(&json, probe_path.to_str().unwrap(), &[]).unwrap();
+
+    // LCR is 0x00 in probe, but we report 0xFF
+    let mut actual = BTreeMap::new();
+    actual.insert("RBR".into(), 0x00);
+    actual.insert("IER".into(), 0x00);
+    actual.insert("IIR".into(), 0x01);
+    actual.insert("LCR".into(), 0xFF);
+    actual.insert("LSR".into(), 0x60);
+
+    match oracle.check_reset(&actual) {
+        OracleCheckResult::Mismatch(result) => {
+            assert!(result.mismatches > 0);
+        }
+        other => panic!("expected Mismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_runtime_oracle_skip_when_probe_fails() {
+    let fixture = sample_fixture();
+    let json = serde_json::to_vec(&fixture).unwrap();
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let probe_path = dir.path().join("failing-probe");
+    // Write a script that exits non-zero
+    let mut f = std::fs::File::create(&probe_path).unwrap();
+    f.write_all(b"#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &probe_path,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    let oracle =
+        RuntimeOracle::new(&json, probe_path.to_str().unwrap(), &[]).unwrap();
+
+    let actual = BTreeMap::new();
+    match oracle.check_reset(&actual) {
+        OracleCheckResult::Skip(_) => {}
+        other => panic!("expected Skip for failing probe, got {other:?}"),
+    }
 }

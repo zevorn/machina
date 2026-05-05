@@ -9,7 +9,8 @@ struct MockI2cSlave {
     send_data: Mutex<Vec<u8>>,
     recv_data: Mutex<Vec<u8>>,
     recv_pos: Mutex<usize>,
-    _nack_on: Mutex<Option<u8>>,
+    nack_on: Mutex<Option<u8>>,
+    nack_all: Mutex<bool>,
 }
 
 impl MockI2cSlave {
@@ -20,8 +21,17 @@ impl MockI2cSlave {
             send_data: Mutex::new(Vec::new()),
             recv_data: Mutex::new(vec![0x42, 0x43, 0x44]),
             recv_pos: Mutex::new(0),
-            _nack_on: Mutex::new(None),
+            nack_on: Mutex::new(None),
+            nack_all: Mutex::new(false),
         })
+    }
+
+    fn set_nack_on(&self, byte: u8) {
+        *self.nack_on.lock().unwrap() = Some(byte);
+    }
+
+    fn set_nack_all(&self, nack: bool) {
+        *self.nack_all.lock().unwrap() = nack;
     }
 
     fn events(&self) -> Vec<I2cEvent> {
@@ -44,7 +54,10 @@ impl I2cSlave for MockI2cSlave {
     }
 
     fn send(&self, data: u8) -> Result<(), I2cError> {
-        if *self._nack_on.lock().unwrap() == Some(data) {
+        if *self.nack_all.lock().unwrap() {
+            return Err(I2cError::Nack);
+        }
+        if *self.nack_on.lock().unwrap() == Some(data) {
             return Err(I2cError::Nack);
         }
         self.send_data.lock().unwrap().push(data);
@@ -249,6 +262,54 @@ fn test_i2c_busy_after_transfer() {
 
     assert!(!bus.busy());
     bus.start_transfer(0x50, false).unwrap();
+    assert!(bus.busy());
+    bus.end_transfer();
+    assert!(!bus.busy());
+}
+
+#[test]
+fn test_i2c_directed_send_nack_returns_error() {
+    let bus = I2cBus::new();
+    let dev = MockI2cSlave::new(0x50);
+    dev.set_nack_all(true);
+    bus.attach(dev.clone()).unwrap();
+
+    bus.start_transfer(0x50, false).unwrap();
+    let result = bus.send(0x10);
+    assert_eq!(result.unwrap_err(), I2cError::Nack);
+    // Device should not have recorded the byte
+    assert!(dev.sent().is_empty());
+}
+
+#[test]
+fn test_i2c_broadcast_mixed_ack_nack_returns_nack() {
+    let bus = I2cBus::new();
+    let d1 = MockI2cSlave::new(0x10);
+    let d2 = MockI2cSlave::new(0x20);
+    d2.set_nack_all(true); // d2 NACKs everything
+    let d3 = MockI2cSlave::new(0x30);
+    bus.attach(d1.clone()).unwrap();
+    bus.attach(d2.clone()).unwrap();
+    bus.attach(d3.clone()).unwrap();
+
+    bus.start_transfer(I2C_BROADCAST, false).unwrap();
+    // d2 NACKs → overall error even though d1 and d3 would ACK
+    let result = bus.send(0x42);
+    assert_eq!(result.unwrap_err(), I2cError::Nack);
+}
+
+#[test]
+fn test_i2c_repeated_start_with_nack_fails() {
+    let bus = I2cBus::new();
+    let dev = MockI2cSlave::new(0x50);
+    dev.set_nack_all(true);
+    bus.attach(dev.clone()).unwrap();
+
+    // First transfer works (event precedes send)
+    bus.start_transfer(0x50, false).unwrap();
+    // Send fails because device NACKs
+    assert_eq!(bus.send(0x10).unwrap_err(), I2cError::Nack);
+    // Bus is still marked busy until end_transfer
     assert!(bus.busy());
     bus.end_transfer();
     assert!(!bus.busy());

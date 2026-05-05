@@ -199,24 +199,18 @@ impl I2cBus {
 
     /// Send a byte to addressed slaves.
     ///
-    /// Returns `Ok(())` if at least one device ACKs,
-    /// `Err(I2cError::Nack)` if all devices NACK.
+    /// For directed transfers, returns `Err(I2cError::Nack)` if the
+    /// addressed slave NACKs. For broadcast, returns NACK if any
+    /// slave NACKs.
     pub fn send(&self, data: u8) -> Result<(), I2cError> {
         let current = self.current_devs.lock().unwrap();
         if current.is_empty() {
             return Err(I2cError::NoDevice);
         }
-        let mut any_ack = false;
         for dev in current.iter() {
-            if let Ok(()) = dev.send(data) {
-                any_ack = true;
-            } // NACK from this device is ignored
+            dev.send(data)?;
         }
-        if any_ack {
-            Ok(())
-        } else {
-            Err(I2cError::Nack)
-        }
+        Ok(())
     }
 
     /// Receive a byte from the first addressed device.

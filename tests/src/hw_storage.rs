@@ -123,3 +123,35 @@ fn test_file_backend_path() {
     let backend = FileBackend::open(tmp.path(), false).unwrap();
     assert_eq!(backend.path(), &tmp.path().to_path_buf());
 }
+
+#[test]
+fn test_file_backend_size_after_write() {
+    let tmp = NamedTempFile::new().unwrap();
+    let backend = FileBackend::open(tmp.path(), false).unwrap();
+    assert_eq!(backend.size(), 0);
+
+    backend.write(0, &[0x11, 0x22, 0x33]).unwrap();
+    // Size must reflect the write, not the stale open-time metadata
+    assert_eq!(backend.size(), 3);
+
+    backend.write(3, &[0x44, 0x55]).unwrap();
+    assert_eq!(backend.size(), 5);
+}
+
+#[test]
+fn test_mem_backend_overflow_read() {
+    let backend = MemBackend::new(vec![0; 4], false);
+    let mut buf = [0u8; 4];
+    // On 64-bit, u64::MAX is a valid usize; past-end returns Ok(0)
+    let n = backend.read(u64::MAX, &mut buf).unwrap();
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn test_mem_backend_overflow_write() {
+    let backend = MemBackend::new(vec![0; 4], false);
+    // On 64-bit, u64::MAX offset triggers error (past end + overflow)
+    let result = backend.write(u64::MAX, &[0xAA]);
+    // u64::MAX as usize + 1 wraps → checked_add returns None → error
+    assert!(result.is_err());
+}

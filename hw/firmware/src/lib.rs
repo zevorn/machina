@@ -2,7 +2,7 @@
 //!
 //! Provides [`FwCfg`] for registering firmware configuration entries,
 //! and the [`FwCfgDataGenerator`] trait for devices that contribute
-//! data items.
+//! data items. IO and DMA access follow the QEMU fw_cfg device model.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,70 @@ pub mod keys {
 /// Signature bytes returned for key 0x0000.
 pub const FW_CFG_SIGNATURE: &[u8] = b"QEMU";
 
+/// DMA control bits.
+pub mod dma_ctl {
+    pub const ERROR: u16 = 0x0001;
+    pub const SELECT: u16 = 0x0002;
+    pub const READ: u16 = 0x0004;
+    pub const SKIP: u16 = 0x0008;
+    pub const WRITE: u16 = 0x0010;
+}
+
+/// DMA descriptor layout (big-endian fields, same as QEMU fw_cfg_dma).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FwCfgDmaDescriptor {
+    pub control: u32,
+    pub length: u32,
+    pub address: u64,
+}
+
+impl FwCfgDmaDescriptor {
+    /// Size of the descriptor in guest memory (16 bytes).
+    pub const SIZE: usize = 16;
+
+    /// Decode a descriptor from big-endian guest-memory bytes.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 16 {
+            return None;
+        }
+        let control =
+            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let length =
+            u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let address = u64::from_be_bytes([
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13],
+            bytes[14], bytes[15],
+        ]);
+        Some(Self {
+            control,
+            length,
+            address,
+        })
+    }
+
+    /// Encode this descriptor to big-endian guest-memory bytes.
+    pub fn encode(&self) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        b[0..4].copy_from_slice(&self.control.to_be_bytes());
+        b[4..8].copy_from_slice(&self.length.to_be_bytes());
+        b[8..16].copy_from_slice(&self.address.to_be_bytes());
+        b
+    }
+}
+
+/// Trait for bounded memory access during DMA transfers.
+pub trait FwCfgDmaAccess {
+    /// Read `buf` from guest-physical `addr`.
+    ///
+    /// Returns the number of bytes read, or an error string.
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> Result<usize, String>;
+
+    /// Write `buf` to guest-physical `addr`.
+    ///
+    /// Returns the number of bytes written, or an error string.
+    fn dma_write(&self, addr: u64, buf: &[u8]) -> Result<usize, String>;
+}
+
 /// A single fw_cfg data entry.
 #[derive(Debug, Clone)]
 pub struct FwCfgEntry {
@@ -67,22 +131,20 @@ pub struct FwCfgFile {
 /// Trait for objects that can generate fw_cfg data items.
 pub trait FwCfgDataGenerator: Send + Sync {
     /// Generate a byte array of data for this generator.
-    ///
-    /// Returns `None` if no data is required, or `Some(data)` on
-    /// success. Returns an error string on failure.
     fn get_data(&self) -> Result<Option<Vec<u8>>, String>;
 }
 
-/// The fw_cfg interface — a registry of firmware configuration entries.
-///
-/// Devices and machine setup code call `add_bytes`, `add_file`, etc.
-/// to populate entries. The full MMIO/DMA access logic is part of
-/// the complete fw_cfg device implementation (Batch 4).
+/// The fw_cfg interface — a registry of firmware configuration entries
+/// with IO-style selector/data access and DMA support.
 pub struct FwCfg {
     entries: DeviceRefCell<BTreeMap<u16, FwCfgEntry>>,
     cur_entry: Mutex<u16>,
     cur_offset: Mutex<u32>,
     dma_enabled: Mutex<bool>,
+    /// Accumulate two IO writes to build the 16-bit selector.
+    selector_lo: Mutex<u8>,
+    selector_hi: Mutex<u8>,
+    selector_top: Mutex<bool>, // true = next write is hi byte
 }
 
 impl FwCfg {
@@ -94,6 +156,9 @@ impl FwCfg {
             cur_entry: Mutex::new(0),
             cur_offset: Mutex::new(0),
             dma_enabled: Mutex::new(false),
+            selector_lo: Mutex::new(0),
+            selector_hi: Mutex::new(0),
+            selector_top: Mutex::new(false),
         });
         // Signature entry is always present
         s.add_bytes(keys::SIGNATURE, FW_CFG_SIGNATURE.to_vec());
@@ -163,10 +228,43 @@ impl FwCfg {
         self.entries.borrow().contains_key(&key)
     }
 
-    /// Set the current selector (entry to read).
+    // -- Selector register (IO port, 16-bit big-endian) --
+
+    /// Write a byte to the selector register.
+    ///
+    /// Two sequential writes assemble a 16-bit big-endian selector.
+    /// The first write sets the low byte, the second sets the high
+    /// byte and commits the selector.
+    pub fn write_selector_byte(&self, value: u8) {
+        let mut top = self.selector_top.lock().unwrap();
+        if *top {
+            *self.selector_hi.lock().unwrap() = value;
+            let sel = u16::from_be_bytes([
+                *self.selector_lo.lock().unwrap(),
+                *self.selector_hi.lock().unwrap(),
+            ]);
+            drop(top);
+            self.commit_selector(sel);
+        } else {
+            *self.selector_lo.lock().unwrap() = value;
+            *top = true;
+        }
+    }
+
+    /// Set the selector directly (for DMA or test convenience).
     pub fn set_selector(&self, key: u16) {
+        self.commit_selector(key);
+    }
+
+    fn commit_selector(&self, key: u16) {
+        // Build file directory on-demand when FILE_DIR is selected
+        if key == keys::FILE_DIR && !self.has_entry(keys::FILE_DIR) {
+            let dir = self.build_file_dir();
+            self.add_bytes(keys::FILE_DIR, dir);
+        }
         *self.cur_entry.lock().unwrap() = key;
         *self.cur_offset.lock().unwrap() = 0;
+        *self.selector_top.lock().unwrap() = false;
     }
 
     /// Return the current selector.
@@ -175,44 +273,132 @@ impl FwCfg {
         *self.cur_entry.lock().unwrap()
     }
 
+    // -- Data register (IO port, byte/word/dword reads) --
+
     /// Read one byte from the currently selected entry at the current
     /// offset. Advances the offset. Returns 0 if no entry is selected
     /// or the offset is past the end.
     #[must_use]
-    pub fn read_byte(&self) -> u8 {
+    pub fn read_data_byte(&self) -> u8 {
         let entry = *self.cur_entry.lock().unwrap();
-        let mut offset = *self.cur_offset.lock().unwrap();
+        let mut offset = self.cur_offset.lock().unwrap();
 
         let entries = self.entries.borrow();
         if let Some(e) = entries.get(&entry) {
-            if (offset as usize) < e.data.len() {
-                let val = e.data[offset as usize];
-                drop(entries);
-                offset += 1;
-                *self.cur_offset.lock().unwrap() = offset;
+            if (*offset as usize) < e.data.len() {
+                let val = e.data[*offset as usize];
+                *offset += 1;
                 return val;
             }
         }
         0
     }
 
-    /// Write one byte to the selector/data register.
-    /// (Selector is 16-bit, so two writes assemble it.)
-    pub fn write_byte(&self, value: u8) {
-        // Simplified: single-byte selector writes for testing
-        self.set_selector(u16::from(value));
+    /// Read a 16-bit word from the current entry.
+    ///
+    /// Bytes past the entry end are read as 0.
+    #[must_use]
+    pub fn read_data_word(&self) -> u16 {
+        let lo = self.read_data_byte();
+        let hi = self.read_data_byte();
+        u16::from_le_bytes([lo, hi])
     }
 
-    /// Enable DMA mode.
+    /// Read a 32-bit dword from the current entry.
+    ///
+    /// Bytes past the entry end are read as 0.
+    #[must_use]
+    pub fn read_data_dword(&self) -> u32 {
+        let b0 = self.read_data_byte();
+        let b1 = self.read_data_byte();
+        let b2 = self.read_data_byte();
+        let b3 = self.read_data_byte();
+        u32::from_le_bytes([b0, b1, b2, b3])
+    }
+
+    // -- DMA --
+
+    /// Enable or disable DMA.
     pub fn set_dma_enabled(&self, enabled: bool) {
         *self.dma_enabled.lock().unwrap() = enabled;
     }
 
-    /// Return true if DMA mode is enabled.
+    /// Return true if DMA is enabled.
     #[must_use]
     pub fn dma_enabled(&self) -> bool {
         *self.dma_enabled.lock().unwrap()
     }
+
+    /// Execute a DMA transfer.
+    ///
+    /// Reads the descriptor from `desc_addr` via `access`, then
+    /// performs select/read/skip/write operations according to
+    /// the control field.
+    pub fn do_dma(
+        &self,
+        desc_addr: u64,
+        access: &dyn FwCfgDmaAccess,
+    ) -> Result<(), String> {
+        let mut desc_buf = [0u8; 16];
+        access.dma_read(desc_addr, &mut desc_buf)?;
+        let desc = FwCfgDmaDescriptor::decode(&desc_buf)
+            .ok_or("short DMA descriptor")?;
+
+        let ctl = desc.control as u16;
+
+        if ctl & dma_ctl::SELECT != 0 {
+            // Select: read 2 bytes from guest address as big-endian key
+            let mut key_buf = [0u8; 2];
+            access.dma_read(desc.address, &mut key_buf)?;
+            let key = u16::from_be_bytes(key_buf);
+            self.set_selector(key);
+        }
+
+        if ctl & dma_ctl::READ != 0 {
+            let mut offset = 0u32;
+            let entry = *self.cur_entry.lock().unwrap();
+            let entries = self.entries.borrow();
+            let entry_data = entries.get(&entry);
+            while offset < desc.length {
+                let remaining = (desc.length - offset) as usize;
+                let mut buf = vec![0u8; remaining.min(4096)];
+                let mut n = 0usize;
+                if let Some(e) = entry_data {
+                    let base = *self.cur_offset.lock().unwrap() as usize;
+                    for (i, dst) in buf.iter_mut().enumerate() {
+                        if base + i < e.data.len() {
+                            *dst = e.data[base + i];
+                            n = i + 1;
+                        } else {
+                            // past end → zero
+                            n = i + 1;
+                            break;
+                        }
+                    }
+                    *self.cur_offset.lock().unwrap() += n as u32;
+                }
+                let actual = &buf[..n];
+                access.dma_write(desc.address + offset as u64, actual)?;
+                offset += n as u32;
+                if n == 0 {
+                    break;
+                }
+            }
+        }
+
+        if ctl & dma_ctl::SKIP != 0 {
+            *self.cur_offset.lock().unwrap() += desc.length;
+        }
+
+        if ctl & dma_ctl::WRITE != 0 {
+            // Write denied: fw_cfg is read-only from guest perspective
+            return Err("fw_cfg DMA write not permitted".to_string());
+        }
+
+        Ok(())
+    }
+
+    // -- Utilities --
 
     /// Build and return the file directory blob.
     #[must_use]

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use machina_hw_sd::{SdBus, SdBusHost, SdCard, SdRequest, SdVoltage};
+use machina_hw_sd::{SdBus, SdBusHost, SdCard, SdError, SdRequest, SdVoltage};
 
 /// Mock SD card that records commands and returns configurable responses.
 struct MockSdCard {
@@ -168,7 +168,7 @@ fn test_sd_do_command() {
 
     let mut resp = [0u8; 16];
     let req = SdRequest::new(8, 0x1AA);
-    let n = bus.do_command(&req, &mut resp);
+    let n = bus.do_command(&req, &mut resp).unwrap();
 
     assert_eq!(n, 6);
     assert_eq!(resp[..6], [0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
@@ -180,8 +180,8 @@ fn test_sd_do_command_no_card() {
     let bus = SdBus::new();
     let mut resp = [0u8; 16];
     let req = SdRequest::new(0, 0);
-    let n = bus.do_command(&req, &mut resp);
-    assert_eq!(n, 0);
+    let result = bus.do_command(&req, &mut resp);
+    assert_eq!(result.unwrap_err(), SdError::NoCard);
 }
 
 #[test]
@@ -295,10 +295,29 @@ fn test_sd_reparent_card() {
     bus2.set_host(host.clone());
 
     let card = MockSdCard::new(true);
-    bus1.insert_card(card);
+    card.set_response(&[0xAA, 0xBB]);
+    bus1.insert_card(card.clone());
     assert!(bus1.get_inserted());
 
     bus2.reparent_card(&bus1);
+
+    // Source bus is now empty
     assert!(!bus1.get_inserted());
+
+    // Destination bus has the card and can use it
+    assert!(bus2.get_inserted());
     assert_eq!(host.last_inserted(), Some(true));
+
+    let mut resp = [0u8; 16];
+    let n = bus2.do_command(&SdRequest::new(1, 0), &mut resp).unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(resp[0], 0xAA);
+    assert_eq!(resp[1], 0xBB);
+
+    // Source bus cannot use the card anymore
+    assert_eq!(
+        bus1.do_command(&SdRequest::new(1, 0), &mut resp)
+            .unwrap_err(),
+        SdError::NoCard
+    );
 }
