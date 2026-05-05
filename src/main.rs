@@ -9,12 +9,16 @@ use std::process;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use machina_accel::exec::ExecEnv;
+use machina_accel::exec::{ExecEnv, ExitReason};
 use machina_accel::x86_64::emitter::SoftMmuConfig;
 use machina_accel::X86_64CodeGen;
 #[cfg(unix)]
 use machina_core::machine::NetdevOpts;
 use machina_core::machine::{Machine, MachineOpts};
+use machina_guest_loongarch::loongarch::cpu::{
+    GUEST_BASE_CPU_OFFSET, NEG_ALIGN_CPU_OFFSET,
+};
+use machina_hw_loongarch::virt_machine::LoongArchVirtMachine;
 use machina_hw_riscv::ref_machine::RefMachine;
 use machina_hw_riscv::sbi::SbiBackend;
 use machina_hw_riscv::sifive_test::ShutdownReason;
@@ -23,6 +27,9 @@ use machina_system::cpus::LAST_TB_PC;
 use machina_system::cpus::{
     machina_mem_read, machina_mem_write, FullSystemCpu,
 };
+use machina_system::loongarch_cpu::{
+    loongarch_soft_mmu_config, LoongArchFullSystemCpu,
+};
 use machina_system::{CpuManager, FirmwareCallFn};
 
 fn usage() {
@@ -30,7 +37,7 @@ fn usage() {
     eprintln!("Options:");
     eprintln!(
         "  -M machine    Machine type \
-         (default: riscv64-ref)"
+         (default: riscv64-ref; supports loongarch64-ref)"
     );
     eprintln!("  -m size       RAM size in MiB (default: 128)");
     eprintln!("  -bios path    BIOS/firmware binary");
@@ -542,6 +549,73 @@ fn run_machine_cycle(
     None
 }
 
+fn run_loongarch_machine_cycle(
+    opts: &MachineOpts,
+    ram_size: u64,
+) -> Option<ShutdownReason> {
+    let mut machine = LoongArchVirtMachine::new();
+    if let Err(e) = machine.init(opts) {
+        machina_hw_core::chardev::restore_terminal();
+        eprintln!("machina: init failed: {}", e);
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
+    }
+    if let Err(e) = machine.boot() {
+        eprintln!("machina: boot failed: {}", e);
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
+    }
+
+    let mut backend = X86_64CodeGen::new();
+    backend.set_guest_base_offset(GUEST_BASE_CPU_OFFSET);
+    backend.mmio = Some(loongarch_soft_mmu_config());
+    backend.neg_align_off = i32::try_from(NEG_ALIGN_CPU_OFFSET).unwrap();
+    let env = ExecEnv::new(backend);
+    let shared = env.shared.clone();
+
+    let mut cpu_mgr = CpuManager::new();
+    let stop_flag = cpu_mgr.running_flag();
+    let (cpu_state, interrupts) = match machine.take_runtime_cpu_state() {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("machina: runtime CPU setup failed: {}", e);
+            machina_hw_core::chardev::restore_terminal();
+            process::exit(1);
+        }
+    };
+    let cpu = unsafe {
+        // The guest-visible LoongArch RAM window starts at physical 0.
+        // VIRT_RAM_BASE is the high direct-map boot alias; DA/MMU
+        // translation canonicalizes it back to low physical RAM here.
+        LoongArchFullSystemCpu::new_with_interrupts(
+            cpu_state,
+            machine.ram_block().as_ptr(),
+            0,
+            ram_size,
+            machine.address_space() as *const _ as u64,
+            Arc::clone(&stop_flag),
+            interrupts,
+        )
+    };
+    cpu_mgr.add_loongarch_cpu(cpu);
+
+    let exit = unsafe { cpu_mgr.run(&shared) };
+    loongarch_shutdown_reason(exit)
+}
+
+fn loongarch_shutdown_reason(exit: ExitReason) -> Option<ShutdownReason> {
+    match exit {
+        ExitReason::Halted => None,
+        ExitReason::Exit(code) => Some(ShutdownReason::Fail(
+            u32::try_from(code).unwrap_or(u32::MAX),
+        )),
+        ExitReason::Ecall { priv_level } => {
+            Some(ShutdownReason::Fail(0xec00 | u32::from(priv_level)))
+        }
+        ExitReason::BufferFull => Some(ShutdownReason::Fail(0xffff_fffe)),
+    }
+}
+
 fn main() {
     install_crash_handler();
     let cli = match parse_args() {
@@ -556,12 +630,25 @@ fn main() {
 
     if cli.machine == "?" {
         eprintln!("Available machines:");
-        eprintln!("  riscv64-ref    RISC-V reference machine");
+        eprintln!("  riscv64-ref      RISC-V reference machine");
+        eprintln!("  loongarch64-ref  LoongArch64 reference machine");
         machina_hw_core::chardev::restore_terminal();
         process::exit(0);
     }
-    if cli.machine != "riscv64-ref" {
+    if cli.machine != "riscv64-ref" && cli.machine != "loongarch64-ref" {
         eprintln!("machina: unknown machine: {}", cli.machine);
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
+    }
+    if cli.machine == "loongarch64-ref"
+        && (cli.start_paused || cli.gdb.is_some())
+    {
+        eprintln!("machina: loongarch64-ref does not support -S or -gdb");
+        machina_hw_core::chardev::restore_terminal();
+        process::exit(1);
+    }
+    if cli.machine == "loongarch64-ref" && cli.monitor.is_some() {
+        eprintln!("machina: loongarch64-ref does not support -monitor");
         machina_hw_core::chardev::restore_terminal();
         process::exit(1);
     }
@@ -630,34 +717,44 @@ fn main() {
     }
 
     // Find HTIF tohost symbol from kernel ELF.
-    let htif_tohost: Option<u64> = cli.kernel.as_ref().and_then(|p| {
-        let data = std::fs::read(p).ok()?;
-        let addr = machina_hw_core::loader::elf_find_symbol(&data, "tohost")?;
-        let bias = if machina_hw_core::loader::elf_is_dyn(&data) {
-            use machina_hw_riscv::boot::KERNEL_OFFSET;
-            let bios_none = cli
-                .bios
-                .as_ref()
-                .is_some_and(|p| p.to_str() == Some("none"));
-            let has_fw = !cli.bios_builtin && !bios_none;
-            if has_fw {
-                machina_hw_riscv::ref_machine::RAM_BASE + KERNEL_OFFSET
+    let htif_tohost: Option<u64> = if cli.machine == "riscv64-ref" {
+        cli.kernel.as_ref().and_then(|p| {
+            let data = std::fs::read(p).ok()?;
+            let addr =
+                machina_hw_core::loader::elf_find_symbol(&data, "tohost")?;
+            let bias = if machina_hw_core::loader::elf_is_dyn(&data) {
+                use machina_hw_riscv::boot::KERNEL_OFFSET;
+                let bios_none = cli
+                    .bios
+                    .as_ref()
+                    .is_some_and(|p| p.to_str() == Some("none"));
+                let has_fw = !cli.bios_builtin && !bios_none;
+                if has_fw {
+                    machina_hw_riscv::ref_machine::RAM_BASE + KERNEL_OFFSET
+                } else {
+                    machina_hw_riscv::ref_machine::RAM_BASE
+                }
             } else {
-                machina_hw_riscv::ref_machine::RAM_BASE
-            }
-        } else {
-            0
-        };
-        Some(addr + bias)
-    });
+                0
+            };
+            Some(addr + bias)
+        })
+    } else {
+        None
+    };
 
-    eprintln!("machina: riscv64-ref, {} MiB RAM", cli.ram_mib,);
+    eprintln!("machina: {}, {} MiB RAM", cli.machine, cli.ram_mib,);
     if let Some(addr) = htif_tohost {
         eprintln!("machina: HTIF tohost at {:#x}", addr);
     }
 
     #[cfg(unix)]
     if cli.difftest {
+        if cli.machine != "riscv64-ref" {
+            eprintln!("machina: --difftest is only supported by riscv64-ref");
+            machina_hw_core::chardev::restore_terminal();
+            process::exit(1);
+        }
         if cli.bios_builtin {
             eprintln!(
                 "machina: --difftest is incompatible \
@@ -750,20 +847,24 @@ fn main() {
     // Outer loop: supports machine reset via SiFive Test.
     loop {
         eprintln!("machina: entering execution loop");
-        let ms = if cli.monitor.is_some() || cli.nographic {
-            Some(Arc::clone(&monitor_state))
+        let reason = if cli.machine == "loongarch64-ref" {
+            run_loongarch_machine_cycle(&opts, ram_size)
         } else {
-            None
+            let ms = if cli.monitor.is_some() || cli.nographic {
+                Some(Arc::clone(&monitor_state))
+            } else {
+                None
+            };
+            let gs = gdb_state.as_ref().map(Arc::clone);
+            run_machine_cycle(
+                &opts,
+                ram_size,
+                ms,
+                Arc::clone(&monitor_svc),
+                htif_tohost,
+                gs,
+            )
         };
-        let gs = gdb_state.as_ref().map(Arc::clone);
-        let reason = run_machine_cycle(
-            &opts,
-            ram_size,
-            ms,
-            Arc::clone(&monitor_svc),
-            htif_tohost,
-            gs,
-        );
 
         match reason {
             Some(ShutdownReason::Pass) => {

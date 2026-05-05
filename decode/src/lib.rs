@@ -647,8 +647,8 @@ fn emit_decode_trait(
         writeln!(
             w,
             "    fn trans_{}(\
-             &mut self, ir: &mut Ir, a: &{sname}\
-             ) -> bool;",
+             &mut self, _ir: &mut Ir, _a: &{sname}\
+             ) -> bool {{ false }}",
             p.name
         )?;
     }

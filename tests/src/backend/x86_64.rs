@@ -81,12 +81,16 @@ fn epilogue_ends_with_ret() {
 }
 
 #[test]
-fn prologue_contains_jmp_rsi() {
+fn prologue_jumps_to_sysv64_tb_entry_second_arg() {
     let (buf, gen) = gen_prologue_epilogue();
     let prologue = &buf.as_slice()[..gen.code_gen_start];
-    // jmp *%rsi = FF E6
-    let found = prologue.windows(2).any(|w| w[0] == 0xFF && w[1] == 0xE6);
-    assert!(found, "prologue should contain jmp *%rsi");
+    let target = TB_ENTRY_ARG_REGS[1];
+    let modrm = 0xC0 | ((Ext5Op::JmpN as u8) << 3) | target.low3();
+    let found = prologue.windows(2).any(|w| w[0] == 0xFF && w[1] == modrm);
+    assert!(
+        found,
+        "prologue should contain jmp through sysv64 TB entry second argument register {target:?}"
+    );
 }
 
 #[test]

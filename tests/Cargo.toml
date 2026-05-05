@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 machina-accel = { workspace = true }
 machina-guest-riscv = { workspace = true }
+machina-guest-loongarch = { workspace = true }
 machina-decode = { workspace = true }
 machina-system = { workspace = true }
 machina-memory = { workspace = true }
@@ -14,6 +15,7 @@ machina-core = { workspace = true }
 machina-hw-core = { workspace = true }
 machina-hw-intc = { workspace = true }
 machina-hw-char = { workspace = true }
+machina-hw-loongarch = { workspace = true }
 machina-hw-riscv = { workspace = true }
 machina-hw-virtio = { workspace = true }
 machina-disas = { workspace = true }
@@ -24,6 +26,7 @@ machina-util = { workspace = true }
 libc = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+flate2 = { workspace = true }
 
 [lints]
 workspace = true

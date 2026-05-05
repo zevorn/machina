@@ -196,6 +196,103 @@ fn ensure_machina_built() {
     assert!(status.success(), "cargo build machina-emu failed");
 }
 
+#[test]
+fn task84_loongarch_rejects_unsupported_gdb_options() {
+    ensure_machina_built();
+
+    for args in [
+        ["-M", "loongarch64-ref", "-S"].as_slice(),
+        ["-M", "loongarch64-ref", "-gdb", "tcp::0"].as_slice(),
+    ] {
+        let output = Command::new(bin_path("machina"))
+            .args(args)
+            .current_dir(project_root())
+            .output()
+            .expect("machina process failed to start");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            !output.status.success(),
+            "loongarch64-ref GDB option must be rejected; args={args:?}\n{combined}"
+        );
+        assert!(
+            combined.contains("loongarch64-ref does not support -S or -gdb"),
+            "missing LoongArch GDB rejection message; args={args:?}\n{combined}"
+        );
+    }
+}
+
+#[test]
+fn task87_loongarch_rejects_unsupported_monitor_options() {
+    ensure_machina_built();
+
+    let output = Command::new(bin_path("machina"))
+        .args(["-M", "loongarch64-ref", "-monitor", "tcp:127.0.0.1:0"])
+        .current_dir(project_root())
+        .output()
+        .expect("machina process failed to start");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !output.status.success(),
+        "loongarch64-ref monitor option must be rejected\n{combined}"
+    );
+    assert!(
+        combined.contains("loongarch64-ref does not support -monitor"),
+        "missing LoongArch monitor rejection message\n{combined}"
+    );
+}
+
+#[test]
+fn loongarch_ref_machine_name_is_listed_and_old_virt_name_is_rejected() {
+    ensure_machina_built();
+
+    let list = Command::new(bin_path("machina"))
+        .args(["-M", "?"])
+        .current_dir(project_root())
+        .output()
+        .expect("machina process failed to start");
+    let listed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&list.stdout),
+        String::from_utf8_lossy(&list.stderr),
+    );
+    assert!(list.status.success(), "machine list failed\n{listed}");
+    assert!(
+        listed.contains("loongarch64-ref"),
+        "LoongArch reference machine must be listed\n{listed}"
+    );
+    assert!(
+        !listed.contains("loongarch64-virt"),
+        "old virt-facing machine name must not be advertised\n{listed}"
+    );
+
+    let old = Command::new(bin_path("machina"))
+        .args(["-M", "loongarch64-virt", "-bios", "none"])
+        .current_dir(project_root())
+        .output()
+        .expect("machina process failed to start");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&old.stdout),
+        String::from_utf8_lossy(&old.stderr),
+    );
+    assert!(
+        !old.status.success(),
+        "old LoongArch machine name must be rejected\n{combined}"
+    );
+    assert!(
+        combined.contains("unknown machine: loongarch64-virt"),
+        "old machine name should fail as unknown\n{combined}"
+    );
+}
+
 fn sbi_smoke_bin() -> PathBuf {
     project_root().join("tests/firmware/sbi_smoke.bin")
 }

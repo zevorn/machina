@@ -4,6 +4,7 @@ pub mod builtin;
 pub mod cpus;
 pub mod gdb;
 pub mod gdb_csr;
+pub mod loongarch_cpu;
 
 pub use builtin::FirmwareCallFn;
 pub use cpus::FullSystemCpu;
@@ -17,10 +18,17 @@ use machina_accel::GuestCpu;
 use machina_accel::HostCodeGen;
 use machina_core::wfi::WfiWaker;
 
+use crate::loongarch_cpu::LoongArchFullSystemCpu;
+
+enum ManagedCpu {
+    Riscv(Box<FullSystemCpu>),
+    LoongArch(Box<LoongArchFullSystemCpu>),
+}
+
 pub struct CpuManager {
     running: Arc<AtomicBool>,
     wfi_waker: Option<Arc<WfiWaker>>,
-    cpus: Vec<FullSystemCpu>,
+    cpus: Vec<ManagedCpu>,
     /// Optional firmware call handler for builtin mode.
     /// When set, S-mode ecalls are dispatched here instead
     /// of being delivered as CPU trap exceptions.
@@ -55,23 +63,53 @@ impl CpuManager {
 
     /// Add a CPU to be managed. Ownership is transferred.
     pub fn add_cpu(&mut self, cpu: FullSystemCpu) {
-        self.cpus.push(cpu);
+        self.cpus.push(ManagedCpu::Riscv(Box::new(cpu)));
+    }
+
+    /// Add a LoongArch CPU to be managed. Ownership is transferred.
+    pub fn add_loongarch_cpu(&mut self, cpu: LoongArchFullSystemCpu) {
+        self.cpus.push(ManagedCpu::LoongArch(Box::new(cpu)));
+    }
+
+    /// Access a managed LoongArch CPU by index.
+    pub fn loongarch_cpu(&self, idx: usize) -> &LoongArchFullSystemCpu {
+        match &self.cpus[idx] {
+            ManagedCpu::LoongArch(cpu) => cpu.as_ref(),
+            ManagedCpu::Riscv(_) => {
+                panic!("managed CPU {idx} is not a LoongArch CPU")
+            }
+        }
     }
 
     /// Access a managed CPU by index.
     pub fn cpu(&self, idx: usize) -> &FullSystemCpu {
-        &self.cpus[idx]
+        match &self.cpus[idx] {
+            ManagedCpu::Riscv(cpu) => cpu.as_ref(),
+            ManagedCpu::LoongArch(_) => {
+                panic!("managed CPU {idx} is not a RISC-V CPU")
+            }
+        }
     }
 
     /// Access a managed CPU mutably by index.
     pub fn cpu_mut(&mut self, idx: usize) -> &mut FullSystemCpu {
-        &mut self.cpus[idx]
+        match &mut self.cpus[idx] {
+            ManagedCpu::Riscv(cpu) => cpu.as_mut(),
+            ManagedCpu::LoongArch(_) => {
+                panic!("managed CPU {idx} is not a RISC-V CPU")
+            }
+        }
     }
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(ref wk) = self.wfi_waker {
             wk.stop();
+        }
+        for cpu in &self.cpus {
+            if let ManagedCpu::LoongArch(cpu) = cpu {
+                cpu.wake_waiters();
+            }
         }
     }
 
@@ -97,7 +135,30 @@ impl CpuManager {
             return ExitReason::Exit(0);
         }
         let running = Arc::clone(&self.running);
+        let firmware_handler = self.firmware_handler.clone();
         let cpu = &mut self.cpus[0];
+        match cpu {
+            ManagedCpu::Riscv(cpu) => Self::run_riscv_cpu(
+                shared,
+                &running,
+                firmware_handler.as_ref(),
+                cpu.as_mut(),
+            ),
+            ManagedCpu::LoongArch(cpu) => {
+                Self::run_loongarch_cpu(shared, &running, cpu)
+            }
+        }
+    }
+
+    unsafe fn run_riscv_cpu<B>(
+        shared: &SharedState<B>,
+        running: &Arc<AtomicBool>,
+        firmware_handler: Option<&FirmwareCallFn>,
+        cpu: &mut FullSystemCpu,
+    ) -> ExitReason
+    where
+        B: HostCodeGen,
+    {
         let mut per_cpu = PerCpuState::new();
         loop {
             let r = cpu_exec_loop(shared, &mut per_cpu, cpu);
@@ -120,7 +181,7 @@ impl CpuManager {
                     // are dispatched to the host firmware
                     // handler instead of being raised as traps.
                     if priv_level == 1 {
-                        if let Some(ref fw) = self.firmware_handler {
+                        if let Some(fw) = firmware_handler {
                             fw(&mut cpu.cpu);
                             if !running.load(Ordering::Relaxed) {
                                 return ExitReason::Halted;
@@ -138,6 +199,35 @@ impl CpuManager {
                         _ => 11,
                     };
                     cpu.handle_exception(cause, 0);
+                }
+                other => return other,
+            }
+        }
+    }
+
+    unsafe fn run_loongarch_cpu<B>(
+        shared: &SharedState<B>,
+        running: &Arc<AtomicBool>,
+        cpu: &mut LoongArchFullSystemCpu,
+    ) -> ExitReason
+    where
+        B: HostCodeGen,
+    {
+        let mut per_cpu = PerCpuState::new();
+        loop {
+            let r = cpu_exec_loop(shared, &mut per_cpu, cpu);
+            if !running.load(Ordering::SeqCst) {
+                return ExitReason::Halted;
+            }
+            match r {
+                ExitReason::BufferFull => {
+                    let _guard = shared.translate_lock.lock().unwrap();
+                    shared
+                        .tb_store
+                        .invalidate_all(shared.code_buf(), &shared.backend);
+                    shared.tb_store.flush();
+                    shared.code_buf_mut().set_offset(shared.code_gen_start);
+                    per_cpu.jump_cache.invalidate();
                 }
                 other => return other,
             }

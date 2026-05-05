@@ -1,0 +1,23 @@
+pub const ECODE_INT: u32 = 0x0;
+pub const ECODE_PIL: u32 = 0x1;
+pub const ECODE_PIS: u32 = 0x2;
+pub const ECODE_PIF: u32 = 0x3;
+pub const ECODE_PME: u32 = 0x4;
+pub const ECODE_PNR: u32 = 0x5;
+pub const ECODE_PNX: u32 = 0x6;
+pub const ECODE_PPI: u32 = 0x7;
+pub const ECODE_ADE: u32 = 0x8;
+pub const ECODE_ALE: u32 = 0x9;
+pub const ECODE_BCE: u32 = 0xA;
+pub const ECODE_SYS: u32 = 0xB;
+pub const ECODE_BRK: u32 = 0xC;
+pub const ECODE_INE: u32 = 0xD;
+pub const ECODE_IPE: u32 = 0xE;
+pub const ECODE_FPD: u32 = 0xF;
+pub const ECODE_SXD: u32 = 0x10;
+pub const ECODE_ASXD: u32 = 0x11;
+pub const ECODE_FPE: u32 = 0x12;
+pub const ECODE_TLBR: u32 = 0x3F;
+
+pub const ESUBCODE_ADEF: u32 = 0x0;
+pub const ESUBCODE_ADEM: u32 = 0x1;

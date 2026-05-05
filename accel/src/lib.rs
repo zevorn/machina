@@ -13,7 +13,7 @@ pub mod x86_64;
 
 pub use code_buffer::CodeBuffer;
 pub use constraint::{ArgConstraint, OpConstraint};
-pub use cpu::GuestCpu;
+pub use cpu::{ArchExitAction, GuestCpu};
 pub use x86_64::X86_64CodeGen;
 
 /// Trait for host architecture code generators.
@@ -110,8 +110,8 @@ pub trait HostCodeGen {
     fn neg_align_offset(&self) -> i32;
 
     /// Return goto_tb (jmp_offset, reset_offset) pairs
-    /// recorded during the last codegen pass.
-    fn goto_tb_offsets(&self) -> Vec<(usize, usize)>;
+    /// recorded by explicit TB slot during the last codegen pass.
+    fn goto_tb_offsets(&self) -> [Option<(usize, usize)>; 2];
 
     /// Clear recorded goto_tb offsets before a new codegen
     /// pass.

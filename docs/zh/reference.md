@@ -1006,15 +1006,21 @@ qdev bridge 外，不再提供额外兼容层或迁移层。
 这样可以明确 transport/proxy 边界，并为后续更复杂的 backend
 关系预留扩展空间，而不会把它们和 machine assembly 混在一起。
 
-### 5. `RefMachine` 装配规则
+### 5. 参考机器装配规则
 
-`RefMachine` 是第一台完整遵守 MOM 装配规则的机器。
+`RefMachine` 是遵守 MOM 装配规则的 RISC-V 参考机器。
+LoongArch64 参考机器的用户可见名称是 `loongarch64-ref`，
+也遵守同样的 machine-side 原则：板级拥有的设备通过
+`sysbus` realize，realized mapping 加上生成的 FDT/boot data
+共同构成客户可见拓扑的单一事实来源。
 
 - UART、PLIC、ACLINT、virtio-mmio 都作为 MOM 设备创建
 - 它们统一通过 `sysbus` attach 和 realize
 - realized mapping 统一通过 `SysBus::mappings()` 暴露
 - migrated set 的 FDT node name 和 `reg` 字段从 realized
   sysbus mapping 派生
+- LoongArch64 参考机器同样拥有 UART、IPI、EIOINTC、PCH-PIC、
+  IOCSR dispatch、可选 VirtIO block MMIO 和 Linux 直接启动数据。
 
 对于已迁移设备集合，realized `sysbus` mapping 就是 machine 侧
 拓扑的单一事实来源。
@@ -1720,6 +1726,9 @@ x3 不能作为测试寄存器，因为 QEMU 侧的 `la gp, save_area`
 | 模块 | 测试数 | 说明 |
 |------|--------|------|
 | hw_ref_machine | 31 | RefMachine 初始化、内存映射、FDT、IRQ 接线、启动、UART、VirtIO、PLIC、多核 |
+| loongarch_virt_board | 8+ | `loongarch64-ref` 板级初始化、MMIO 映射、UART/VirtIO 级联、选项拒绝 |
+| loongarch_boot | 20+ | LoongArch64 ELF/Image/raw 加载、EFI/FDT boot data、initrd 放置 |
+| loongarch_boot_checkpoint | 15+ | LoongArch64 Linux 启动检查点和 shell prompt harness 证据 |
 | hw_uart | 12 | UART 16550A 寄存器读写、TX/RX、FIFO |
 | hw_aclint | 13 | ACLINT 定时器 MMIO、IPI、mtime/mtimecmp |
 | hw_plic | 9 | PLIC 优先级、pending、enable、claim/complete |

@@ -10,6 +10,9 @@
 pub mod exec_loop;
 pub mod tb_store;
 
+mod arch_exit;
+
+pub use arch_exit::handle_riscv_arch_exit;
 pub use exec_loop::{cpu_exec_loop_env, ExitReason};
 pub use tb_store::TbStore;
 

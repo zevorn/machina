@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use crate::code_buffer::CodeBuffer;
-use crate::x86_64::regs::Reg;
+use crate::x86_64::regs::{Reg, CALL_ARG_REGS};
 
 // -- Prefix flags (matching QEMU's P_* constants) --
 
@@ -1209,16 +1209,20 @@ pub struct SoftMmuConfig {
 }
 
 /// x86-64 backend code generator.
+pub const DEFAULT_GUEST_BASE_OFFSET: i32 = 520;
+
 pub struct X86_64CodeGen {
     pub prologue_offset: usize,
     pub epilogue_return_zero_offset: usize,
     pub tb_ret_offset: usize,
     pub code_gen_start: usize,
-    /// Recorded (jmp_offset, reset_offset) for each goto_tb.
-    pub(crate) goto_tb_info: Mutex<Vec<(usize, usize)>>,
+    /// Recorded (jmp_offset, reset_offset) by explicit goto_tb slot.
+    pub(crate) goto_tb_info: Mutex<[Option<(usize, usize)>; 2]>,
     /// SoftMMU config for full-system mode. When `None`,
     /// all guest memory accesses use direct [R14+addr].
     pub mmio: Option<SoftMmuConfig>,
+    /// Byte offset of guest_base from env (rbp).
+    pub guest_base_offset: i32,
     /// Byte offset of the neg_align exit flag from env
     /// (rbp). When non-zero, emit_goto_tb checks
     /// [rbp + neg_align_off] before the direct jump.
@@ -1232,10 +1236,16 @@ impl X86_64CodeGen {
             epilogue_return_zero_offset: 0,
             tb_ret_offset: 0,
             code_gen_start: 0,
-            goto_tb_info: Mutex::new(Vec::new()),
+            goto_tb_info: Mutex::new([None; 2]),
             mmio: None,
+            guest_base_offset: DEFAULT_GUEST_BASE_OFFSET,
             neg_align_off: 0,
         }
+    }
+
+    pub fn set_guest_base_offset(&mut self, offset: usize) {
+        self.guest_base_offset =
+            i32::try_from(offset).expect("guest_base offset fits in i32");
     }
 
     /// Emit `exit_tb(val)`: load return value into rax and jump to epilogue.
@@ -1354,6 +1364,29 @@ impl X86_64CodeGen {
         }
     }
 
+    fn emit_cross_page_slow_check(
+        buf: &mut CodeBuffer,
+        size_bytes: u32,
+    ) -> Option<usize> {
+        if size_bytes <= 1 {
+            return None;
+        }
+
+        emit_load(buf, true, Reg::Rax, Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_arith_ri(buf, ArithOp::And, true, Reg::Rax, 0xFFF);
+        emit_arith_ri(
+            buf,
+            ArithOp::Cmp,
+            true,
+            Reg::Rax,
+            (0x1000 - size_bytes) as i32,
+        );
+        emit_opc(buf, OPC_JCC_long + (X86Cond::Ja as u32), 0, 0);
+        let ja_off = buf.offset();
+        buf.emit_u32(0);
+        Some(ja_off)
+    }
+
     /// Emit QemuLd with inline TLB check.
     ///
     /// ```text
@@ -1405,6 +1438,8 @@ impl X86_64CodeGen {
         emit_store(buf, true, Reg::Rax, Reg::Rsp, Self::TLB_SAVE_RAX);
         emit_store(buf, true, Reg::R10, Reg::Rsp, Self::TLB_SAVE_R10);
         emit_store(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
+
+        let cross_page_off = Self::emit_cross_page_slow_check(buf, size_bytes);
 
         // -- TLB inline check --
         // r11 = TLB index = ((vpn ^ (vpn >> 8)) & mask)
@@ -1500,11 +1535,14 @@ impl X86_64CodeGen {
         let slow = buf.offset();
         Self::patch_disp(buf, jne_off, slow);
         Self::patch_disp(buf, je_off, slow);
+        if let Some(off) = cross_page_off {
+            Self::patch_disp(buf, off, slow);
+        }
 
         Self::emit_save_caller_regs(buf);
-        emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);
-        emit_load(buf, true, Reg::Rsi, Reg::Rsp, Self::MMIO_SCRATCH);
-        emit_mov_ri(buf, false, Reg::Rdx, size_bytes as u64);
+        emit_mov_rr(buf, true, CALL_ARG_REGS[0], Reg::Rbp);
+        emit_load(buf, true, CALL_ARG_REGS[1], Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_mov_ri(buf, false, CALL_ARG_REGS[2], size_bytes as u64);
         emit_mov_ri(buf, true, Reg::R11, cfg.load_helper);
         emit_call_reg(buf, Reg::R11);
 
@@ -1581,6 +1619,8 @@ impl X86_64CodeGen {
         emit_store(buf, true, Reg::R10, Reg::Rsp, Self::TLB_SAVE_R10);
         emit_store(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
 
+        let cross_page_off = Self::emit_cross_page_slow_check(buf, size_bytes);
+
         // -- TLB inline check --
         // index = ((vpn ^ (vpn >> 8)) & mask)
         emit_mov_rr(buf, true, Reg::R11, addr);
@@ -1640,12 +1680,21 @@ impl X86_64CodeGen {
         let slow = buf.offset();
         Self::patch_disp(buf, jne_off, slow);
         Self::patch_disp(buf, je_off, slow);
+        if let Some(off) = cross_page_off {
+            Self::patch_disp(buf, off, slow);
+        }
 
         Self::emit_save_caller_regs(buf);
-        emit_mov_rr(buf, true, Reg::Rdi, Reg::Rbp);
-        emit_load(buf, true, Reg::Rsi, Reg::Rsp, Self::MMIO_SCRATCH);
-        emit_load(buf, true, Reg::Rdx, Reg::Rsp, Self::MMIO_SCRATCH + 8);
-        emit_mov_ri(buf, false, Reg::Rcx, size_bytes as u64);
+        emit_mov_rr(buf, true, CALL_ARG_REGS[0], Reg::Rbp);
+        emit_load(buf, true, CALL_ARG_REGS[1], Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_load(
+            buf,
+            true,
+            CALL_ARG_REGS[2],
+            Reg::Rsp,
+            Self::MMIO_SCRATCH + 8,
+        );
+        emit_mov_ri(buf, false, CALL_ARG_REGS[3], size_bytes as u64);
         emit_mov_ri(buf, true, Reg::R11, cfg.store_helper);
         emit_call_reg(buf, Reg::R11);
         Self::emit_restore_caller_regs(buf);

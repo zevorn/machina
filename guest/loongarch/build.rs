@@ -1,0 +1,17 @@
+use std::env;
+use std::fs;
+use std::path::Path;
+
+fn main() {
+    let out_dir = env::var("OUT_DIR").unwrap();
+
+    let decode_file = Path::new("src/loongarch/insn.decode");
+    println!("cargo::rerun-if-changed={}", decode_file.display());
+    let input =
+        fs::read_to_string(decode_file).expect("failed to read insn.decode");
+    let mut output = Vec::new();
+    machina_decode::generate(&input, &mut output)
+        .expect("insn.decode code generation failed");
+    let out_path = Path::new(&out_dir).join("loongarch_decode.rs");
+    fs::write(&out_path, output).expect("failed to write loongarch_decode.rs");
+}

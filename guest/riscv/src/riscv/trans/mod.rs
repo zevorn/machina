@@ -33,8 +33,9 @@ use super::RiscvDisasContext;
 use crate::DisasJumpType;
 use machina_accel::ir::context::Context;
 use machina_accel::ir::tb::{
-    EXCP_EBREAK, EXCP_ECALL, EXCP_FENCE_I, EXCP_MRET, EXCP_SFENCE_VMA,
-    EXCP_SRET, EXCP_WFI, TB_EXIT_IDX0, TB_EXIT_NOCHAIN,
+    EXCP_RISCV_EBREAK, EXCP_RISCV_ECALL, EXCP_RISCV_FENCE_I, EXCP_RISCV_MRET,
+    EXCP_RISCV_SFENCE_VMA, EXCP_RISCV_SRET, EXCP_RISCV_WFI, TB_EXIT_IDX0,
+    TB_EXIT_NOCHAIN,
 };
 use machina_accel::ir::types::{Cond, MemOp, Type};
 
@@ -245,7 +246,7 @@ impl Decode<Context> for RiscvDisasContext {
         let next = self.base.pc_next + self.cur_insn_len as u64;
         let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
-        ir.gen_exit_tb(EXCP_FENCE_I);
+        ir.gen_exit_tb(EXCP_RISCV_FENCE_I);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -299,7 +300,7 @@ impl Decode<Context> for RiscvDisasContext {
     fn trans_ecall(&mut self, ir: &mut Context, _a: &ArgsEmpty) -> bool {
         let pc = ir.new_const(Type::I64, self.base.pc_next);
         ir.gen_mov(Type::I64, self.pc, pc);
-        ir.gen_exit_tb(EXCP_ECALL);
+        ir.gen_exit_tb(EXCP_RISCV_ECALL);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -307,7 +308,7 @@ impl Decode<Context> for RiscvDisasContext {
     fn trans_ebreak(&mut self, ir: &mut Context, _a: &ArgsEmpty) -> bool {
         let pc = ir.new_const(Type::I64, self.base.pc_next);
         ir.gen_mov(Type::I64, self.pc, pc);
-        ir.gen_exit_tb(EXCP_EBREAK);
+        ir.gen_exit_tb(EXCP_RISCV_EBREAK);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -316,7 +317,7 @@ impl Decode<Context> for RiscvDisasContext {
         let next = self.base.pc_next + self.cur_insn_len as u64;
         let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
-        ir.gen_exit_tb(EXCP_MRET);
+        ir.gen_exit_tb(EXCP_RISCV_MRET);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -325,7 +326,7 @@ impl Decode<Context> for RiscvDisasContext {
         let next = self.base.pc_next + self.cur_insn_len as u64;
         let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
-        ir.gen_exit_tb(EXCP_SRET);
+        ir.gen_exit_tb(EXCP_RISCV_SRET);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -334,7 +335,7 @@ impl Decode<Context> for RiscvDisasContext {
         let next = self.base.pc_next + self.cur_insn_len as u64;
         let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
-        ir.gen_exit_tb(EXCP_WFI);
+        ir.gen_exit_tb(EXCP_RISCV_WFI);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }
@@ -345,7 +346,7 @@ impl Decode<Context> for RiscvDisasContext {
         let next = self.base.pc_next + self.cur_insn_len as u64;
         let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
-        ir.gen_exit_tb(EXCP_SFENCE_VMA);
+        ir.gen_exit_tb(EXCP_RISCV_SFENCE_VMA);
         self.base.is_jmp = DisasJumpType::NoReturn;
         true
     }

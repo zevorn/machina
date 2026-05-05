@@ -6,8 +6,8 @@ use machina_accel::exec::exec_loop::{cpu_exec_loop_env, ExitReason};
 use machina_accel::exec::ExecEnv;
 use machina_accel::ir::context::Context;
 use machina_accel::ir::TempIdx;
-use machina_accel::GuestCpu;
 use machina_accel::X86_64CodeGen;
+use machina_accel::{ArchExitAction, GuestCpu};
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::exception::Exception;
 use machina_guest_riscv::riscv::ext::RiscvCfg;
@@ -106,6 +106,10 @@ impl GuestCpu for TestCpu {
             _ => Exception::IllegalInstruction,
         };
         self.cpu.raise_exception(e, tval);
+    }
+
+    fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
+        machina_accel::exec::handle_riscv_arch_exit(self, code)
     }
 
     fn set_jmp_env(&mut self, ptr: u64) {
@@ -865,6 +869,10 @@ impl GuestCpu for PrivTestCpu {
     }
     fn privilege_level(&self) -> u8 {
         self.priv_level
+    }
+
+    fn handle_arch_exit(&mut self, code: u64) -> ArchExitAction {
+        machina_accel::exec::handle_riscv_arch_exit(self, code)
     }
 }
 

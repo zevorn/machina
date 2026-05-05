@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  A modular RISC-V full-system emulator written in Rust, featuring a JIT dynamic binary translation engine.
+  A modular RISC-V and LoongArch64 full-system emulator written in Rust, featuring a JIT dynamic binary translation engine.
 </p>
 
 <p align="center">
@@ -13,12 +13,12 @@
 
 ## Overview
 
-Machina is a Rust reimplementation of core QEMU concepts — TCG (Tiny Code Generator), device models, and full-system emulation — for the RISC-V architecture.
+Machina is a Rust reimplementation of core QEMU concepts — TCG (Tiny Code Generator), device models, and full-system emulation — for RISC-V and LoongArch64 reference machines.
 
 ### Features
 
-- **JIT binary translation**: RISC-V → x86-64 with TB caching, chaining, and optimization
-- **Full-system emulation**: PLIC, ACLINT, UART, Sv39 MMU, SBI firmware
+- **JIT binary translation**: RISC-V and LoongArch64 → x86-64 with TB caching, chaining, and optimization
+- **Full-system emulation**: RISC-V PLIC/ACLINT/Sv39/SBI and LoongArch64 IOCSR/IPI/EIOINTC/PCH-PIC/Linux direct boot paths
 - **VirtIO block device**: mmap'd raw disk images
 - **Monitor console**: QMP-compatible JSON protocol + HMP text commands
 - **Difftest**: Instruction-level comparison against QEMU via GDB RSP
@@ -36,10 +36,16 @@ make release
 
 ```bash
 # Boot a kernel
-./target/release/machina -nographic -bios none -kernel path/to/kernel.elf
+./target/release/machina -M riscv64-ref -nographic -bios none -kernel path/to/kernel.elf
+
+# Boot a LoongArch64 Linux Image
+./target/release/machina -M loongarch64-ref -nographic \
+  -kernel path/to/loongarch64/vmlinuz.efi \
+  -initrd path/to/rootfs.cpio.gz \
+  -append "console=ttyS0 earlycon=uart8250,mmio,0x1fe001e0 rdinit=/init"
 
 # With VirtIO block device
-./target/release/machina -nographic \
+./target/release/machina -M riscv64-ref -nographic \
   -drive file=path/to/disk.img \
   -kernel path/to/kernel.elf
 

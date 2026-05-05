@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  用 Rust 编写的模块化 RISC-V 全系统模拟器，具有 JIT 动态二进制翻译引擎。
+  用 Rust 编写的模块化 RISC-V 与 LoongArch64 全系统模拟器，具有 JIT 动态二进制翻译引擎。
 </p>
 
 <p align="center">
@@ -13,12 +13,12 @@
 
 ## 概述
 
-Machina 是对 QEMU 核心概念的 Rust 重实现 — TCG（Tiny Code Generator）、设备模型和全系统模拟 — 针对 RISC-V 架构。
+Machina 是对 QEMU 核心概念的 Rust 重实现 — TCG（Tiny Code Generator）、设备模型和全系统模拟 — 面向 RISC-V 与 LoongArch64 参考机器。
 
 ### 功能
 
-- **JIT 二进制翻译**：RISC-V → x86-64，具有 TB 缓存、链接和优化
-- **全系统模拟**：PLIC、ACLINT、UART、Sv39 MMU、SBI 固件
+- **JIT 二进制翻译**：RISC-V 与 LoongArch64 → x86-64，具有 TB 缓存、链接和优化
+- **全系统模拟**：RISC-V PLIC/ACLINT/Sv39/SBI，以及 LoongArch64 IOCSR/IPI/EIOINTC/PCH-PIC/Linux 直接启动路径
 - **VirtIO 块设备**：mmap 原始磁盘镜像
 - **Monitor 控制台**：QMP 兼容 JSON 协议 + HMP 文本命令
 - **Difftest**：通过 GDB RSP 与 QEMU 进行逐指令对比
@@ -36,10 +36,16 @@ make release
 
 ```bash
 # 引导内核
-./target/release/machina -nographic -bios none -kernel path/to/kernel.elf
+./target/release/machina -M riscv64-ref -nographic -bios none -kernel path/to/kernel.elf
+
+# 引导 LoongArch64 Linux Image
+./target/release/machina -M loongarch64-ref -nographic \
+  -kernel path/to/loongarch64/vmlinuz.efi \
+  -initrd path/to/rootfs.cpio.gz \
+  -append "console=ttyS0 earlycon=uart8250,mmio,0x1fe001e0 rdinit=/init"
 
 # 带 VirtIO 块设备
-./target/release/machina -nographic \
+./target/release/machina -M riscv64-ref -nographic \
   -drive file=path/to/disk.img \
   -kernel path/to/kernel.elf
 

@@ -40,6 +40,21 @@ make release
 | `make clippy` | Lint with `-D warnings` |
 | `make fmt` | Auto-format all code |
 
+## 机器类型
+
+Machina 当前暴露两个用户可见的参考机器：
+
+| 机器 | 客户 ISA | 用途 |
+|------|----------|------|
+| `riscv64-ref` | RISC-V 64-bit | RISC-V 参考平台，包含 SBI、PLIC、ACLINT、UART 和 VirtIO MMIO |
+| `loongarch64-ref` | LoongArch64 | LoongArch64 参考平台，包含 Linux 直接启动、IOCSR、IPI、EIOINTC、PCH-PIC、UART 和 VirtIO block |
+
+列出支持的机器：
+
+```bash
+./target/release/machina -M ?
+```
+
 ## 在 Machina 上启动 RISC-V Linux 内核
 
 本文档介绍如何在 machina `riscv64-ref` 平台上启动标准
@@ -223,6 +238,47 @@ find . | cpio -o --format=newc | gzip > ../rootfs.cpio.gz
 | DRAM | `0x8000_0000` | — |
 
 指令集：`rv64imafdc_zba_zbb_zbc_zbs_zicsr_zifencei`
+
+## 在 Machina 上启动 LoongArch64 Linux
+
+`loongarch64-ref` 是 Machina 的 LoongArch64 参考平台。它实现
+当前 Linux 直接启动路径需要的 QEMU 兼容子集，但用户可见的
+machine 类型按 Machina reference machine 命名，而不是 QEMU
+`virt`。
+
+### LoongArch64 快速启动
+
+```bash
+./target/release/machina \
+    -M loongarch64-ref \
+    -nographic -m 256 \
+    -kernel /path/to/vmlinuz.efi \
+    -initrd /path/to/rootfs.cpio.gz \
+    -append "console=ttyS0 earlycon=uart8250,mmio,0x1fe001e0 rdinit=/init"
+```
+
+加载器支持 LoongArch64 ELF kernel、标准 LoongArch Linux
+`Image`/EFI 风格镜像，以及 raw fallback 镜像。直接启动 ABI
+设置 `a0=efi_boot`、`a1=cmdline`、`a2=system_table`；生成的
+EFI config table 提供 Linux 使用的 FDT 与 initrd 元数据。
+
+### LoongArch64 平台硬件信息
+
+| 设备 | 地址 | 中断/路由 |
+|------|------|-----------|
+| IPI | `0x0100_0000` | CPU IPI |
+| EIOINTC | `0x0200_0000` | CPU HWI |
+| PCH-PIC | `0x1000_0000` | 经 EIOINTC 路由 |
+| VirtIO MMIO 插槽 0 | `0x1000_8000` | PCH-PIC / EIOINTC |
+| UART 16550A | `0x1fe0_01e0` | PCH-PIC / EIOINTC |
+| DRAM | 低物理内存，FDT memory 中排除 MMIO hole | — |
+
+当前 `loongarch64-ref` 限制：
+
+- 此机器会拒绝 `-S` 和 `-gdb`。
+- 此机器会拒绝 `-monitor`。
+- 支持通过 `-drive file=...` 使用 VirtIO block；会拒绝
+  `virtio-net-device` 和 `-netdev`。
 
 ### 常见问题
 

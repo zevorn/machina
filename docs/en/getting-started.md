@@ -41,6 +41,21 @@ make release
 | `make clippy` | Lint with `-D warnings` |
 | `make fmt` | Auto-format all code |
 
+## Machine Types
+
+Machina currently exposes two user-facing reference machines:
+
+| Machine | Guest ISA | Purpose |
+|---------|-----------|---------|
+| `riscv64-ref` | RISC-V 64-bit | RISC-V reference platform with SBI, PLIC, ACLINT, UART, and VirtIO MMIO |
+| `loongarch64-ref` | LoongArch64 | LoongArch64 reference platform with direct Linux boot, IOCSR, IPI, EIOINTC, PCH-PIC, UART, and VirtIO block |
+
+List supported machines with:
+
+```bash
+./target/release/machina -M ?
+```
+
 ## Booting RISC-V Linux on Machina
 
 This section describes how to boot a standard RISC-V Linux
@@ -225,6 +240,47 @@ The `riscv64-ref` machine emulates:
 | DRAM | `0x8000_0000` | -- |
 
 ISA: `rv64imafdc_zba_zbb_zbc_zbs_zicsr_zifencei`
+
+## Booting LoongArch64 Linux on Machina
+
+The `loongarch64-ref` machine is Machina's LoongArch64 reference
+platform. It models the QEMU-compatible subset needed by the current
+direct-boot Linux path without exposing it as a QEMU `virt` machine
+type.
+
+### LoongArch64 Boot Quick Start
+
+```bash
+./target/release/machina \
+    -M loongarch64-ref \
+    -nographic -m 256 \
+    -kernel /path/to/vmlinuz.efi \
+    -initrd /path/to/rootfs.cpio.gz \
+    -append "console=ttyS0 earlycon=uart8250,mmio,0x1fe001e0 rdinit=/init"
+```
+
+The loader accepts LoongArch64 ELF kernels, standard LoongArch Linux
+`Image`/EFI-style images, and raw fallback images. The direct-boot ABI
+sets `a0=efi_boot`, `a1=cmdline`, and `a2=system_table`; the generated
+EFI config tables provide the FDT and initrd metadata consumed by Linux.
+
+### LoongArch64 Platform Details
+
+| Device | Address | IRQ / Route |
+|--------|---------|-------------|
+| IPI | `0x0100_0000` | CPU IPI |
+| EIOINTC | `0x0200_0000` | CPU HWI |
+| PCH-PIC | `0x1000_0000` | Routed through EIOINTC |
+| VirtIO MMIO slot 0 | `0x1000_8000` | PCH-PIC / EIOINTC |
+| UART 16550A | `0x1fe0_01e0` | PCH-PIC / EIOINTC |
+| DRAM | low physical RAM with MMIO holes excluded from FDT memory | -- |
+
+Current `loongarch64-ref` limitations:
+
+- `-S` and `-gdb` are rejected for this machine.
+- `-monitor` is rejected for this machine.
+- VirtIO block via `-drive file=...` is supported; `virtio-net-device`
+  and `-netdev` are rejected.
 
 ### Troubleshooting
 

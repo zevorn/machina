@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod accel_timer;
 #[cfg(test)]
+mod arch_exit;
+#[cfg(test)]
 mod backend;
 #[cfg(test)]
 mod cli_kernel;
@@ -27,11 +29,17 @@ mod hw_chardev;
 #[cfg(test)]
 mod hw_clock;
 #[cfg(test)]
+mod hw_eiointc;
+#[cfg(test)]
 mod hw_fdt;
+#[cfg(test)]
+mod hw_ipi;
 #[cfg(test)]
 mod hw_irq;
 #[cfg(test)]
 mod hw_loader;
+#[cfg(test)]
+mod hw_pch_pic;
 #[cfg(test)]
 mod hw_plic;
 #[cfg(test)]
@@ -44,6 +52,44 @@ mod hw_sysbus;
 mod hw_uart;
 #[cfg(test)]
 mod integration;
+#[cfg(test)]
+mod loongarch_atomic;
+#[cfg(test)]
+mod loongarch_boot;
+#[cfg(test)]
+mod loongarch_boot_checkpoint;
+#[cfg(test)]
+mod loongarch_branch;
+#[cfg(test)]
+mod loongarch_cpu_layout;
+#[cfg(test)]
+mod loongarch_decode;
+#[cfg(test)]
+mod loongarch_difftest;
+#[cfg(test)]
+mod loongarch_fpu;
+#[cfg(test)]
+mod loongarch_interrupt;
+#[cfg(test)]
+mod loongarch_interrupt_matrix;
+#[cfg(test)]
+mod loongarch_iocsr;
+#[cfg(test)]
+mod loongarch_irq_cascade;
+#[cfg(test)]
+mod loongarch_memory;
+#[cfg(test)]
+mod loongarch_memory_branch_atomic;
+#[cfg(test)]
+mod loongarch_priv;
+#[cfg(test)]
+mod loongarch_scheduler;
+#[cfg(test)]
+mod loongarch_system;
+#[cfg(test)]
+mod loongarch_translator;
+#[cfg(test)]
+mod loongarch_virt_board;
 #[cfg(test)]
 mod memory_region;
 #[cfg(test)]

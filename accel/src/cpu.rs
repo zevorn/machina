@@ -1,2 +1,2 @@
-//! Re-export GuestCpu from machina-core.
-pub use machina_core::cpu::GuestCpu;
+//! Re-export guest CPU traits from machina-core.
+pub use machina_core::cpu::{ArchExitAction, GuestCpu};

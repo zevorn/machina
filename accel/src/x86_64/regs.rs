@@ -59,11 +59,19 @@ pub const TCG_AREG0: Reg = Reg::Rbp;
 pub const TCG_GUEST_BASE_REG: Reg = Reg::R14;
 
 /// Callee-saved registers that the prologue must save/restore.
-/// Order matches QEMU's `tcg_target_callee_save_regs` (System V ABI).
 pub const CALLEE_SAVED: &[Reg] =
     &[Reg::Rbp, Reg::Rbx, Reg::R12, Reg::R13, Reg::R14, Reg::R15];
 
-/// Function argument registers (System V AMD64 ABI).
+/// TB entry argument registers.
+///
+/// Generated TBs are entered through an `extern "sysv64"` trampoline even on
+/// Windows, so the prologue always receives `(env, tb_ptr)` in RDI/RSI.
+pub const TB_ENTRY_ARG_REGS: &[Reg] = &[Reg::Rdi, Reg::Rsi];
+
+/// JIT helper function argument registers.
+///
+/// All helpers called from generated code use `extern "sysv64"` so translated
+/// code can use one stable register convention on every host.
 pub const CALL_ARG_REGS: &[Reg] =
     &[Reg::Rdi, Reg::Rsi, Reg::Rdx, Reg::Rcx, Reg::R8, Reg::R9];
 

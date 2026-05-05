@@ -4,7 +4,7 @@
 
 ## 1. 概述
 
-Machina 是一个 RISC-V 全系统仿真器，使用 Rust 重新实现了 QEMU 的 TCG（Tiny Code Generator）动态二进制翻译引擎。在运行时将客户架构指令转换为宿主机器码，并提供完整的设备模型、内存子系统和中断控制器，以支持全系统仿真。
+Machina 是一个 RISC-V 与 LoongArch64 全系统仿真器，使用 Rust 重新实现了 QEMU 的 TCG（Tiny Code Generator）动态二进制翻译引擎。在运行时将客户架构指令转换为宿主机器码，并提供设备模型、内存子系统和中断控制器，以支持全系统仿真。
 
 当前 MOM 设备模型架构说明见[设备模型参考](reference.md#part-3-设备模型参考)。
 
@@ -33,6 +33,7 @@ machina/
 +-- core/           # IR 定义层：CPU trait、地址类型、纯数据结构
 +-- accel/          # 加速层：IR 优化、寄存器分配、x86-64 codegen、执行引擎
 +-- guest/riscv/    # RISC-V 前端：RV64GC + 特权 ISA、Sv39 MMU
++-- guest/loongarch/# LoongArch64 前端：LA64 整数/FPU/特权/MMU
 +-- decode/         # 解码器生成器：解析 .decode 文件，生成 Rust 解码器
 +-- system/         # 全系统执行：CPU 管理、WFI 唤醒、FullSystemCpu
 +-- memory/         # 内存子系统：AddressSpace、MemoryRegion、MMIO 分发
@@ -40,6 +41,7 @@ machina/
 +-- hw/intc/        # 中断控制器：PLIC、ACLINT
 +-- hw/char/        # 字符设备：UART 16550A
 +-- hw/riscv/       # RISC-V 机器定义：riscv64-ref
++-- hw/loongarch/   # LoongArch64 机器定义：loongarch64-ref
 +-- disas/          # 反汇编器
 +-- monitor/        # 调试接口
 +-- util/           # 共享工具
@@ -1000,7 +1002,54 @@ UART -----> PLIC source 10
 - 其他扩展返回 `SBI_ERR_NOT_SUPPORTED (-2)`
 - `SbiResult { error, value }` 对应 `a0`/`a1` 返回值
 
-### 8.5 Sv39 MMU 集成
+### 8.5 hw/loongarch -- LoongArch64 机器定义
+
+#### loongarch64-ref 参考机器
+
+`hw/loongarch/src/virt_machine.rs` 定义了 CLI 机器名
+`loongarch64-ref` 对应的 LoongArch64 参考平台。内部拓扑使用
+Linux 当前启动路径所需的 QEMU LoongArch virt 内存映射子集，
+但用户可见 machine 名遵循 Machina reference-machine 约定，
+与 `riscv64-ref` 对齐。
+
+**内存与 MMIO 映射**：
+
+```
++------------------+------------------+---------------------------+
+| 地址范围         | 大小             | 设备                      |
++------------------+------------------+---------------------------+
+| 0x0100_0000      | 256 B            | IOCSR IPI MMIO alias      |
+| 0x0200_0000      | 64 KiB           | EIOINTC                   |
+| 0x1000_0000      | 1 KiB            | PCH-PIC                   |
+| 0x1000_8000      | 4 KiB            | VirtIO MMIO slot 0        |
+| 0x1fe0_01e0      | 8 B              | UART0 (16550A)            |
+| low PA RAM       | 可配置           | DRAM，排除 MMIO holes     |
++------------------+------------------+---------------------------+
+```
+
+**初始化流程** (`init()`):
+
+1. 分配客户 RAM 和板级 `AddressSpace`
+2. 创建一个 LoongArch CPU，并安装共享 IOCSR bus
+3. 创建 UART、IPI、EIOINTC、PCH-PIC 和可选 VirtIO block MMIO
+4. 将 UART/VirtIO 中断经 PCH-PIC 与 EIOINTC 路由到 CPU HWI
+5. 通过 `sysbus` 注册 MMIO region
+6. 在 `-nographic` 模式下连接 chardev frontend
+
+**启动流程** (`boot()`):
+
+- 加载 ELF、LoongArch Linux Image/EFI 风格镜像或 raw kernel
+- 以 PLV0 direct-address mode 启动，并关闭分页
+- 生成 FDT 和 EFI config table，提供 Linux boot data
+- 使用直接启动 ABI：`a0=efi_boot`、`a1=cmdline`、
+  `a2=system_table`
+- 放置 initrd，并从客户可见 memory 中排除 MMIO holes
+
+当前运行时限制会显式拒绝：`loongarch64-ref` 不支持 `-S`、
+`-gdb`、`-monitor` 和 `virtio-net-device`/`-netdev`；
+通过 `-drive file=...` 使用 VirtIO block 是支持的。
+
+### 8.6 Sv39 MMU 集成
 
 `guest/riscv/src/riscv/mmu.rs` 实现 RISC-V Sv39 虚拟内存管理单元，集成到全系统仿真路径中。
 

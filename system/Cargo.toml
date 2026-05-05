@@ -13,6 +13,7 @@ categories = ["emulators"]
 machina-core = { workspace = true }
 machina-accel = { workspace = true }
 machina-guest-riscv = { workspace = true }
+machina-guest-loongarch = { workspace = true }
 machina-memory = { workspace = true }
 machina-gdbstub = { workspace = true }
 machina-util = { workspace = true }

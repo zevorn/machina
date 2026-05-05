@@ -1,0 +1,20 @@
+[package]
+name = "machina-guest-loongarch"
+version.workspace = true
+edition.workspace = true
+description = "LoongArch64 guest frontend: instruction translation, privileged ISA, and TLB"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["loongarch", "emulator", "frontend", "translation"]
+categories = ["emulators"]
+
+[dependencies]
+machina-accel = { workspace = true }
+machina-softfloat = { workspace = true }
+
+[build-dependencies]
+machina-decode = { workspace = true }
+
+[lints]
+workspace = true
