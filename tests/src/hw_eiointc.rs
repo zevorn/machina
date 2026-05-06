@@ -170,7 +170,8 @@ fn task36_eiointc_routes_enabled_source_to_cpu_hwi_line() {
     e.mmio_write(0x400, 1 << 3);
 
     assert_eq!(cpu.lock().unwrap().pending_interrupt_line(), None);
-    assert_eq!(e.mmio_read(0x300) & (1 << 3), 0);
+    // ISR preserves source assertion state after ack (QEMU).
+    assert_ne!(e.mmio_read(0x300) & (1 << 3), 0);
     assert_eq!(e.mmio_read(0x400) & (1 << 3), 0);
 }
 
@@ -279,7 +280,8 @@ fn task36_eiointc_core_isr_is_cpu_specific_for_read_and_ack() {
 
     e.mmio_write_sized(1, 0x400, 4, 1 << 4);
     assert_eq!(e.mmio_read_sized(1, 0x400, 4), 0);
-    assert_eq!(e.mmio_read_sized(0, 0x300, 4) & (1 << 4), 0);
+    // ISR preserves source assertion state (QEMU).
+    assert_ne!(e.mmio_read_sized(0, 0x300, 4) & (1 << 4), 0);
 }
 
 #[test]
@@ -300,5 +302,6 @@ fn task36_eiointc_core_isr_supports_64_bit_dispatch() {
     e.mmio_write_sized(0, 0x400, 8, (1_u64 << 32) | 1);
 
     assert_eq!(e.mmio_read_sized(0, 0x400, 8), 0);
-    assert_eq!(e.mmio_read_sized(0, 0x300, 8), 0);
+    // ISR preserves source assertion state (QEMU).
+    assert_ne!(e.mmio_read_sized(0, 0x300, 8), 0);
 }

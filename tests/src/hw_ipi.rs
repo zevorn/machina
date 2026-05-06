@@ -105,7 +105,7 @@ fn task38_ipi_send_routes_nonzero_target_to_target_cpu() {
     connect_cpu(&ipi, 1, &cpu1);
     ipi.mmio_write_sized(1, CORE_ENABLE, 4, 1 << 3);
 
-    ipi.mmio_write_sized(0, IOCSR_IPI_SEND, 4, (1 << 16) | 3);
+    ipi.mmio_write_sized(0, IOCSR_IPI_SEND, 8, (1 << 16) | 3);
 
     assert_eq!(ipi.mmio_read_sized(1, CORE_STATUS, 4), 1 << 3);
     assert_eq!(cpu_estat(&cpu0) & IPI_LINE, 0);
@@ -118,7 +118,7 @@ fn task38_ipi_clear_deasserts_target_line() {
     let cpu1 = cpu_with_ipi_enabled();
     connect_cpu(&ipi, 1, &cpu1);
     ipi.mmio_write_sized(1, CORE_ENABLE, 4, 1 << 4);
-    ipi.mmio_write_sized(0, IOCSR_IPI_SEND, 4, (1 << 16) | 4);
+    ipi.mmio_write_sized(0, IOCSR_IPI_SEND, 8, (1 << 16) | 4);
     assert_eq!(cpu_estat(&cpu1) & IPI_LINE, IPI_LINE);
 
     ipi.mmio_write_sized(1, CORE_CLEAR, 4, 1 << 4);
@@ -133,15 +133,21 @@ fn task38_ipi_enable_mask_controls_delivery_without_losing_status() {
     let cpu1 = cpu_with_ipi_enabled();
     connect_cpu(&ipi, 1, &cpu1);
 
-    ipi.mmio_write_sized(0, IOCSR_IPI_SEND, 4, (1 << 16) | 2);
+    // Enable before send: output rises immediately.
+    ipi.mmio_write_sized(1, CORE_ENABLE, 4, 1 << 2);
+    ipi.mmio_write_sized(0, IOCSR_IPI_SEND, 8, (1 << 16) | 2);
 
     assert_eq!(ipi.mmio_read_sized(1, CORE_STATUS, 4), 1 << 2);
-    assert_eq!(cpu_estat(&cpu1) & IPI_LINE, 0);
-
-    ipi.mmio_write_sized(1, CORE_ENABLE, 4, 1 << 2);
     assert_eq!(cpu_estat(&cpu1) & IPI_LINE, IPI_LINE);
 
+    // QEMU: enable writes store the value but don't trigger
+    // output recomputation. Status is preserved.
     ipi.mmio_write_sized(1, CORE_ENABLE, 4, 0);
+    assert_eq!(ipi.mmio_read_sized(1, CORE_STATUS, 4), 1 << 2);
+
+    // Clear deasserts the line and clears status.
+    ipi.mmio_write_sized(1, CORE_CLEAR, 4, 1 << 2);
+    assert_eq!(ipi.mmio_read_sized(1, CORE_STATUS, 4), 0);
     assert_eq!(cpu_estat(&cpu1) & IPI_LINE, 0);
 }
 

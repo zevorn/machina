@@ -141,25 +141,15 @@ impl Eiointc {
         }
         {
             let mut regs = self.regs.borrow();
-            let route_cpu_count = self.route_cpu_count_for(0);
             let idx = (irq / 32) as usize;
             let bit = 1u32 << (irq % 32);
             if level {
                 regs.isr[idx] |= bit;
-                // Set per-CPU core_isr for the CPU this IRQ
-                // routes to (QEMU semantics).
-                let cpu =
-                    decoded_cpu_for_irq(&regs, irq as usize, route_cpu_count);
-                if (cpu as usize) < regs.core_isr.len() {
-                    regs.core_isr[cpu as usize][idx] |= bit;
-                }
             } else {
                 regs.isr[idx] &= !bit;
-                // Clear per-CPU core_isr for all CPUs.
-                for core in &mut regs.core_isr {
-                    core[idx] &= !bit;
-                }
             }
+            let route_cpu_count = self.hwi_outputs.lock().len().max(1) as u32;
+            rebuild_core_isr(&mut regs, route_cpu_count);
         }
         self.update_outputs();
     }
@@ -297,6 +287,27 @@ impl IrqSink for EiointcIrqSink {
     }
 }
 
+fn rebuild_core_isr(regs: &mut EiointcRegs, route_cpu_count: u32) {
+    for word in regs.core_isr.iter_mut().flatten() {
+        *word = 0;
+    }
+    let ncpus = regs.core_isr.len();
+    for irq in 0..NUM_IRQS {
+        let idx = irq / 32;
+        let bit = 1u32 << (irq % 32);
+        if regs.isr[idx] & bit == 0 {
+            continue;
+        }
+        if regs.enable[idx] & bit == 0 {
+            continue;
+        }
+        let cpu = decoded_cpu_for_irq(regs, irq, route_cpu_count) as usize;
+        if cpu < ncpus {
+            regs.core_isr[cpu][idx] |= bit;
+        }
+    }
+}
+
 fn hwi_bits_for_cpu(
     regs: &EiointcRegs,
     cpu_id: u32,
@@ -366,15 +377,18 @@ fn write_reg_byte(
         NODEMAP_BASE..=0x00BF => {
             let rel = (offset - NODEMAP_BASE) as usize;
             write_u32_byte(&mut regs.nodemap[rel / 4], rel % 4, val);
-            false
+            rebuild_core_isr(regs, route_cpu_count);
+            true
         }
         IPMAP_BASE..=0x00C7 => {
             regs.ipmap[(offset - IPMAP_BASE) as usize] = val;
+            rebuild_core_isr(regs, route_cpu_count);
             true
         }
         ENABLE_BASE..=0x021F => {
             let rel = (offset - ENABLE_BASE) as usize;
             write_u32_byte(&mut regs.enable[rel / 4], rel % 4, val);
+            rebuild_core_isr(regs, route_cpu_count);
             true
         }
         BOUNCE_BASE..=0x029F => {
@@ -388,6 +402,7 @@ fn write_reg_byte(
         }
         COREMAP_BASE..=0x08FF => {
             regs.coremap[(offset - COREMAP_BASE) as usize] = val;
+            rebuild_core_isr(regs, route_cpu_count);
             true
         }
         _ => false,

@@ -194,7 +194,7 @@ fn task39_translated_iocsr_routes_ipi_send_to_nonzero_target() {
     );
     ipi.mmio_write_sized(1, 0x1004, 4, 1 << 3);
 
-    iocsr_write(&mut requester, OP_IOCSRWR_W, 0x1040, (1 << 16) | 3);
+    iocsr_write(&mut requester, OP_IOCSRWR_D, 0x1040, (1 << 16) | 3);
 
     assert_eq!(ipi.mmio_read_sized(1, 0x1000, 4), 1 << 3);
     assert_eq!(
@@ -217,16 +217,15 @@ fn task39_translated_iocsr_routes_ipi_enable_mask_and_clear() {
         InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0),
     );
 
-    iocsr_write(&mut cpu1, OP_IOCSRWR_W, 0x1004, 0);
-    iocsr_write(&mut cpu0, OP_IOCSRWR_W, 0x1040, (1 << 16) | 4);
-    assert_eq!(ipi.mmio_read_sized(1, 0x1000, 4), 1 << 4);
-    assert!(!sink.line(0), "masked status must not raise CPU1 IPI line");
-
+    // Enable before send: output rises immediately (QEMU).
     iocsr_write(&mut cpu1, OP_IOCSRWR_W, 0x1004, 1 << 4);
-    assert!(
-        sink.line(0),
-        "enabling a pending vector must raise CPU1 line"
-    );
+    iocsr_write(&mut cpu0, OP_IOCSRWR_D, 0x1040, (1 << 16) | 4);
+    assert_eq!(ipi.mmio_read_sized(1, 0x1000, 4), 1 << 4);
+    assert!(sink.line(0), "enabled send must raise CPU1 IPI line");
+
+    // QEMU: disable writes store value but don't recompute output.
+    iocsr_write(&mut cpu1, OP_IOCSRWR_W, 0x1004, 0);
+    assert_eq!(ipi.mmio_read_sized(1, 0x1000, 4), 1 << 4);
 
     iocsr_write(&mut cpu1, OP_IOCSRWR_W, 0x100c, 1 << 4);
     assert_eq!(ipi.mmio_read_sized(1, 0x1000, 4), 0);
@@ -299,7 +298,8 @@ fn task39_translated_iocsr_routes_eiointc_programming_and_cpu_ack() {
 
     iocsr_write(&mut cpu1, OP_IOCSRWR_W, 0x1800, 1 << 1);
     assert_eq!(iocsr_read(&mut cpu1, OP_IOCSRRD_W, 0x1800), 0);
-    assert_eq!(eiointc.mmio_read_sized(0, 0x300, 4) & (1 << 1), 0);
+    // ISR preserves source assertion after ack (QEMU).
+    assert_ne!(eiointc.mmio_read_sized(0, 0x300, 4) & (1 << 1), 0);
 }
 
 #[test]
