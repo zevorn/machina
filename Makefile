@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 .PHONY: all build release test test-backend test-frontend test-integration \
-        clippy fmt fmt-check docs clean
+        clippy fmt fmt-check docs check-agent-skills clean
 
 all: build
 
@@ -35,6 +35,9 @@ fmt-check:
 
 docs:
 	cargo doc --workspace
+
+check-agent-skills:
+	python3 scripts/check-agent-skills.py
 
 clean:
 	cargo clean

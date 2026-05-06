@@ -3,6 +3,8 @@
 Cargo.lock
 .*/
 !.github/
+!.agents/
+!.agents/**
 *.pptx
 __pycache__/
 
