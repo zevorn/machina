@@ -158,14 +158,22 @@ impl I2cBus {
         *self.broadcast.lock().unwrap() = broadcast;
 
         let mut current = self.current_devs.lock().unwrap();
-        if current.is_empty() {
-            // First transfer — scan the bus
-            let found = self.scan_bus(address, broadcast);
-            if found.is_empty() {
-                return Err(I2cError::NoDevice);
+
+        // Finish any previous transfer before starting a new one.
+        // Repeated START can change the target address.
+        if !current.is_empty() {
+            for dev in current.iter() {
+                let _ = dev.event(I2cEvent::Finish);
             }
-            *current = found;
+            current.clear();
         }
+
+        // Scan the bus for the new address
+        let found = self.scan_bus(address, broadcast);
+        if found.is_empty() {
+            return Err(I2cError::NoDevice);
+        }
+        *current = found;
 
         let event = if is_recv {
             I2cEvent::StartRecv

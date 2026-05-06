@@ -37,7 +37,8 @@ pub trait SpiSlave: Send + Sync {
 
 struct SpiSlaveEntry {
     slave: Arc<dyn SpiSlave>,
-    cs_state: bool,
+    /// None = never configured by set_cs; treated as deselected.
+    cs_state: Option<bool>,
 }
 
 /// An SPI bus with attached peripheral devices.
@@ -62,6 +63,8 @@ impl SpiBus {
     /// Attach a slave to the bus at its declared CS index.
     ///
     /// Returns an error if the CS index is already occupied.
+    /// Newly-attached slaves start deselected regardless of CS
+    /// polarity.
     pub fn attach(&self, slave: Arc<dyn SpiSlave>) -> Result<(), SpiBusError> {
         let mut slaves = self.slaves.lock().unwrap();
         let idx = slave.cs_index();
@@ -70,7 +73,7 @@ impl SpiBus {
         }
         slaves.push(SpiSlaveEntry {
             slave,
-            cs_state: false,
+            cs_state: None,
         });
         Ok(())
     }
@@ -105,10 +108,10 @@ impl SpiBus {
         let mut slaves = self.slaves.lock().unwrap();
         for entry in slaves.iter_mut() {
             if entry.slave.cs_index() == cs_index {
-                if entry.cs_state != level {
+                if entry.cs_state != Some(level) {
                     entry.slave.set_cs(level);
                 }
-                entry.cs_state = level;
+                entry.cs_state = Some(level);
             }
         }
     }
@@ -126,8 +129,8 @@ impl SpiBus {
         for entry in slaves.iter() {
             let slave = &entry.slave;
             let selected = match slave.cs_polarity() {
-                SpiCsPolarity::High => entry.cs_state,
-                SpiCsPolarity::Low => !entry.cs_state,
+                SpiCsPolarity::High => entry.cs_state == Some(true),
+                SpiCsPolarity::Low => entry.cs_state == Some(false),
                 SpiCsPolarity::None => true,
             };
             if selected {

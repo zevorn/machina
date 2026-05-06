@@ -147,21 +147,31 @@ impl SdBus {
         }
     }
 
-    /// Attach the host controller callback.
+    /// Attach the host controller callback and synchronize any
+    /// existing card state.
     pub fn set_host(&self, host: Arc<dyn SdBusHost>) {
+        let cards = self.cards.lock().unwrap();
+        if let Some(card) = cards.first() {
+            host.set_inserted(card.card.get_inserted());
+            host.set_readonly(card.card.get_readonly());
+        }
+        drop(cards);
         *self.host.borrow() = Some(host);
     }
 
     /// Insert a card onto the bus.
     ///
-    /// Replaces any previously inserted card.
+    /// Replaces any previously inserted card. Notifies the host
+    /// of insertion and write-protect state.
     pub fn insert_card(&self, card: Arc<dyn SdCard>) {
+        let readonly = card.get_readonly();
         let mut cards = self.cards.lock().unwrap();
         cards.clear();
         cards.push(SdCardEntry { card });
+        drop(cards);
         if let Some(ref host) = *self.host.borrow() {
-            let h: &Arc<dyn SdBusHost> = host;
-            h.set_inserted(true);
+            host.set_inserted(true);
+            host.set_readonly(readonly);
         }
     }
 
@@ -169,8 +179,7 @@ impl SdBus {
     pub fn remove_card(&self) {
         self.cards.lock().unwrap().clear();
         if let Some(ref host) = *self.host.borrow() {
-            let h: &Arc<dyn SdBusHost> = host;
-            h.set_inserted(false);
+            host.set_inserted(false);
         }
     }
 
@@ -183,51 +192,69 @@ impl SdBus {
     /// Send a command to the card and collect the response.
     ///
     /// Returns `Ok(n)` with the number of response bytes on success,
-    /// or `Err(SdError::Timeout)` if no card is present.
+    /// `Err(SdError::NoCard)` if no card is present,
+    /// or `Err(SdError::Timeout)` if the command itself times out.
     pub fn do_command(
         &self,
         req: &SdRequest,
         resp: &mut [u8],
     ) -> Result<usize, SdError> {
-        if let Some(card) = self.card() {
-            Ok(card.do_command(req, resp))
-        } else {
-            Err(SdError::Timeout)
+        match self.card() {
+            Some(card) => Ok(card.do_command(req, resp)),
+            None => Err(SdError::NoCard),
         }
     }
 
     /// Write a byte to the card.
-    pub fn write_byte(&self, value: u8) {
-        if let Some(card) = self.card() {
-            card.write_byte(value);
+    ///
+    /// Returns `Err(SdError::NoCard)` if no card is present.
+    pub fn write_byte(&self, value: u8) -> Result<(), SdError> {
+        match self.card() {
+            Some(card) => {
+                card.write_byte(value);
+                Ok(())
+            }
+            None => Err(SdError::NoCard),
         }
     }
 
-    /// Read a byte from the card. Returns 0 if no card.
-    #[must_use]
-    pub fn read_byte(&self) -> u8 {
-        if let Some(card) = self.card() {
-            card.read_byte()
-        } else {
-            0
+    /// Read a byte from the card.
+    ///
+    /// Returns `Err(SdError::NoCard)` if no card is present.
+    pub fn read_byte(&self) -> Result<u8, SdError> {
+        match self.card() {
+            Some(card) => Ok(card.read_byte()),
+            None => Err(SdError::NoCard),
         }
     }
 
     /// Write multiple bytes to the card.
-    pub fn write_data(&self, buf: &[u8]) {
-        if let Some(card) = self.card() {
-            for &b in buf {
-                card.write_byte(b);
+    ///
+    /// Returns `Err(SdError::NoCard)` if no card is present.
+    pub fn write_data(&self, buf: &[u8]) -> Result<(), SdError> {
+        match self.card() {
+            Some(card) => {
+                for &b in buf {
+                    card.write_byte(b);
+                }
+                Ok(())
             }
+            None => Err(SdError::NoCard),
         }
     }
 
     /// Read multiple bytes from the card.
-    pub fn read_data(&self, buf: &mut [u8]) {
-        if let Some(card) = self.card() {
-            for dst in buf.iter_mut() {
-                *dst = card.read_byte();
+    ///
+    /// Returns `Err(SdError::NoCard)` if no card is present.
+    pub fn read_data(&self, buf: &mut [u8]) -> Result<(), SdError> {
+        match self.card() {
+            Some(card) => {
+                for dst in buf.iter_mut() {
+                    *dst = card.read_byte();
+                }
+                Ok(())
             }
+            None => Err(SdError::NoCard),
         }
     }
 

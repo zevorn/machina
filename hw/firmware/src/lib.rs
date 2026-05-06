@@ -139,6 +139,7 @@ pub trait FwCfgDataGenerator: Send + Sync {
 /// with IO-style selector/data access and DMA support.
 pub struct FwCfg {
     entries: DeviceRefCell<BTreeMap<u16, FwCfgEntry>>,
+    generators: DeviceRefCell<BTreeMap<u16, Box<dyn FwCfgDataGenerator>>>,
     cur_entry: Mutex<u16>,
     cur_offset: Mutex<u32>,
     dma_enabled: Mutex<bool>,
@@ -149,11 +150,12 @@ pub struct FwCfg {
 }
 
 impl FwCfg {
-    /// Create a new fw_cfg with room for `file_slots` file entries.
+    /// Create a new fw_cfg instance.
     #[must_use]
-    pub fn new(_file_slots: u16) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         let s = Arc::new(Self {
             entries: DeviceRefCell::new(BTreeMap::new()),
+            generators: DeviceRefCell::new(BTreeMap::new()),
             cur_entry: Mutex::new(0),
             cur_offset: Mutex::new(0),
             dma_enabled: Mutex::new(false),
@@ -217,6 +219,15 @@ impl FwCfg {
         self.add_bytes(key, value.to_le_bytes().to_vec());
     }
 
+    /// Register a lazy data generator for the given key.
+    ///
+    /// The generator is evaluated the first time the key is selected.
+    /// This is intended for device-driven fw_cfg entries (e.g. boot
+    /// order, CPU count) that are not known at fw_cfg construction time.
+    pub fn add_generator(&self, key: u16, gen: Box<dyn FwCfgDataGenerator>) {
+        self.generators.borrow().insert(key, gen);
+    }
+
     /// Return the entry for the given key, if it exists.
     #[must_use]
     pub fn get_entry(&self, key: u16) -> Option<FwCfgEntry> {
@@ -258,10 +269,27 @@ impl FwCfg {
     }
 
     fn commit_selector(&self, key: u16) {
-        // Build file directory on-demand when FILE_DIR is selected
-        if key == keys::FILE_DIR && !self.has_entry(keys::FILE_DIR) {
+        // Evaluate a registered generator on first selection
+        if !self.has_entry(key) {
+            if let Some(gen) = self.generators.borrow().get(&key) {
+                if let Ok(Some(data)) = gen.get_data() {
+                    self.add_bytes(key, data);
+                }
+            }
+        }
+        // Build file directory on every selection to reflect
+        // any entries/files added since the last access.
+        if key == keys::FILE_DIR {
             let dir = self.build_file_dir();
-            self.add_bytes(keys::FILE_DIR, dir);
+            // Replace rather than add — FILE_DIR must be fresh.
+            self.entries.borrow().insert(
+                keys::FILE_DIR,
+                FwCfgEntry {
+                    key: keys::FILE_DIR,
+                    data: dir,
+                    file: None,
+                },
+            );
         }
         *self.cur_entry.lock().unwrap() = key;
         *self.cur_offset.lock().unwrap() = 0;
@@ -351,6 +379,10 @@ impl FwCfg {
         desc_addr: u64,
         access: &dyn FwCfgDmaAccess,
     ) -> Result<(), String> {
+        // DMA is a no-op when the interface hasn't been enabled
+        if !*self.dma_enabled.lock().unwrap() {
+            return Ok(());
+        }
         let mut desc_buf = [0u8; 16];
         let n = access.dma_read(desc_addr, &mut desc_buf)?;
 

@@ -10,7 +10,7 @@ use machina_hw_firmware::{
 
 #[test]
 fn test_fw_cfg_new_has_signature() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     assert!(fw.has_entry(keys::SIGNATURE));
     let entry = fw.get_entry(keys::SIGNATURE).unwrap();
     assert_eq!(entry.data, vec![0x51, 0x45, 0x4D, 0x55]);
@@ -18,7 +18,7 @@ fn test_fw_cfg_new_has_signature() {
 
 #[test]
 fn test_fw_cfg_add_bytes() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x1000, vec![0x01, 0x02, 0x03]);
     assert!(fw.has_entry(0x1000));
     let entry = fw.get_entry(0x1000).unwrap();
@@ -27,7 +27,7 @@ fn test_fw_cfg_add_bytes() {
 
 #[test]
 fn test_fw_cfg_add_string() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_string(0x0009, "console=ttyS0");
     let entry = fw.get_entry(0x0009).unwrap();
     assert_eq!(entry.data, b"console=ttyS0\0".to_vec());
@@ -35,7 +35,7 @@ fn test_fw_cfg_add_string() {
 
 #[test]
 fn test_fw_cfg_add_file() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_file(0x8000, "etc/foo", vec![0xAA, 0xBB, 0xCC]);
     let entry = fw.get_entry(0x8000).unwrap();
     assert_eq!(entry.data, vec![0xAA, 0xBB, 0xCC]);
@@ -48,7 +48,7 @@ fn test_fw_cfg_add_file() {
 
 #[test]
 fn test_fw_cfg_add_i16() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_i16(0x1000, 0x1234);
     let entry = fw.get_entry(0x1000).unwrap();
     assert_eq!(entry.data, 0x1234u16.to_le_bytes().to_vec());
@@ -56,7 +56,7 @@ fn test_fw_cfg_add_i16() {
 
 #[test]
 fn test_fw_cfg_add_i32() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_i32(0x1000, 0x12345678);
     let entry = fw.get_entry(0x1000).unwrap();
     assert_eq!(entry.data, 0x12345678u32.to_le_bytes().to_vec());
@@ -64,7 +64,7 @@ fn test_fw_cfg_add_i32() {
 
 #[test]
 fn test_fw_cfg_add_i64() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_i64(0x1000, 0x123456789ABCDEF0);
     let entry = fw.get_entry(0x1000).unwrap();
     assert_eq!(entry.data, 0x123456789ABCDEF0u64.to_le_bytes().to_vec());
@@ -72,7 +72,7 @@ fn test_fw_cfg_add_i64() {
 
 #[test]
 fn test_fw_cfg_read_data_byte() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0003, vec![0x40, 0x00, 0x00, 0x00]);
     fw.set_selector(0x0003);
 
@@ -84,7 +84,7 @@ fn test_fw_cfg_read_data_byte() {
 
 #[test]
 fn test_fw_cfg_read_data_byte_past_end() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0003, vec![0x01, 0x02]);
     fw.set_selector(0x0003);
 
@@ -96,7 +96,7 @@ fn test_fw_cfg_read_data_byte_past_end() {
 
 #[test]
 fn test_fw_cfg_selector() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.set_selector(0x0019);
     assert_eq!(fw.selector(), 0x0019);
     fw.set_selector(0x0000);
@@ -105,7 +105,7 @@ fn test_fw_cfg_selector() {
 
 #[test]
 fn test_fw_cfg_entry_count() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     let base = fw.entry_count();
     fw.add_bytes(0x1000, vec![0x01]);
     assert_eq!(fw.entry_count(), base + 1);
@@ -113,7 +113,7 @@ fn test_fw_cfg_entry_count() {
 
 #[test]
 fn test_fw_cfg_dma_enabled() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     assert!(!fw.dma_enabled());
     fw.set_dma_enabled(true);
     assert!(fw.dma_enabled());
@@ -123,7 +123,7 @@ fn test_fw_cfg_dma_enabled() {
 
 #[test]
 fn test_fw_cfg_build_file_dir() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_file(0x8000, "etc/acpi/rsdp", vec![0x01]);
     fw.add_file(0x8001, "etc/table-loader", vec![0x02, 0x03]);
 
@@ -134,7 +134,7 @@ fn test_fw_cfg_build_file_dir() {
 
 #[test]
 fn test_fw_cfg_build_file_dir_empty() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     let dir = fw.build_file_dir();
     assert_eq!(&dir[0..4], 0u32.to_be_bytes().as_slice());
     assert_eq!(dir.len(), 4);
@@ -144,7 +144,7 @@ fn test_fw_cfg_build_file_dir_empty() {
 
 #[test]
 fn test_fw_cfg_write_selector_two_bytes() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     // Write selector 0x1234 as two bytes (big-endian IO): hi=0x12, lo=0x34
     fw.write_selector_byte(0x12); // lo byte (first write)
     fw.write_selector_byte(0x34); // hi byte (second write, commits)
@@ -153,7 +153,7 @@ fn test_fw_cfg_write_selector_two_bytes() {
 
 #[test]
 fn test_fw_cfg_write_selector_resets_offset() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0042, vec![0xAA, 0xBB]);
     fw.set_selector(0x0042);
     assert_eq!(fw.read_data_byte(), 0xAA);
@@ -167,7 +167,7 @@ fn test_fw_cfg_write_selector_resets_offset() {
 
 #[test]
 fn test_fw_cfg_read_data_word() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0004, vec![0x01, 0x02, 0x03, 0x04]);
     fw.set_selector(0x0004);
 
@@ -177,7 +177,7 @@ fn test_fw_cfg_read_data_word() {
 
 #[test]
 fn test_fw_cfg_read_data_dword() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0004, vec![0x01, 0x02, 0x03, 0x04]);
     fw.set_selector(0x0004);
 
@@ -186,7 +186,7 @@ fn test_fw_cfg_read_data_dword() {
 
 #[test]
 fn test_fw_cfg_read_data_word_past_end_padded() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0004, vec![0xAA]); // only 1 byte
     fw.set_selector(0x0004);
 
@@ -196,7 +196,7 @@ fn test_fw_cfg_read_data_word_past_end_padded() {
 
 #[test]
 fn test_fw_cfg_read_data_dword_past_end_padded() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0004, vec![0x11, 0x22]); // only 2 bytes
     fw.set_selector(0x0004);
 
@@ -277,7 +277,7 @@ impl FwCfgDmaAccess for MockDmaAccess {
 
 #[test]
 fn test_fw_cfg_dma_read() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0003, vec![0x40, 0x00, 0x00, 0x00]);
     fw.set_dma_enabled(true);
 
@@ -303,7 +303,8 @@ fn test_fw_cfg_dma_read() {
 
 #[test]
 fn test_fw_cfg_dma_skip() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
+    fw.set_dma_enabled(true);
     fw.add_bytes(0x0003, vec![0x01, 0x02, 0x03, 0x04, 0x05]);
     fw.set_selector(0x0003);
 
@@ -324,7 +325,7 @@ fn test_fw_cfg_dma_skip() {
 
 #[test]
 fn test_fw_cfg_dma_write_denied() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.set_dma_enabled(true);
 
     let access = MockDmaAccess::new();
@@ -345,7 +346,7 @@ fn test_fw_cfg_dma_write_denied() {
 
 #[test]
 fn test_fw_cfg_dma_read_past_end_zero_fill() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0003, vec![0xAA, 0xBB]); // only 2 bytes
     fw.set_dma_enabled(true);
 
@@ -366,7 +367,7 @@ fn test_fw_cfg_dma_read_past_end_zero_fill() {
 
 #[test]
 fn test_fw_cfg_dma_read_no_entry_zero_fill() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     // No entry at key 0xDEAD
     fw.set_dma_enabled(true);
 
@@ -389,7 +390,7 @@ fn test_fw_cfg_dma_read_no_entry_zero_fill() {
 
 #[test]
 fn test_fw_cfg_file_dir_auto_build() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_file(0x8000, "etc/test", vec![0x01, 0x02]);
 
     // Selecting FILE_DIR triggers auto-build
@@ -405,47 +406,47 @@ fn test_fw_cfg_file_dir_auto_build() {
 
 #[test]
 fn test_fw_cfg_read_data_byte_no_entry() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.set_selector(0xFFFF);
     assert_eq!(fw.read_data_byte(), 0);
 }
 
 #[test]
 fn test_fw_cfg_read_data_word_no_entry() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.set_selector(0xFFFF);
     assert_eq!(fw.read_data_word(), 0);
 }
 
 #[test]
 fn test_fw_cfg_read_data_dword_no_entry() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.set_selector(0xFFFF);
     assert_eq!(fw.read_data_dword(), 0);
 }
 
 #[test]
 fn test_fw_cfg_read_data_byte_nonexistent_entry() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.set_selector(0xFFFF);
     assert_eq!(fw.read_data_byte(), 0);
 }
 
 #[test]
 fn test_fw_cfg_get_entry_nonexistent() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     assert!(fw.get_entry(0xDEAD).is_none());
 }
 
 #[test]
 fn test_fw_cfg_has_entry_nonexistent() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     assert!(!fw.has_entry(0xDEAD));
 }
 
 #[test]
 fn test_fw_cfg_overwrite_entry() {
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x1000, vec![0x01, 0x02]);
     fw.add_bytes(0x1000, vec![0x03]);
     let entry = fw.get_entry(0x1000).unwrap();
@@ -565,7 +566,7 @@ impl FwCfgDmaAccess for DmaMem {
 fn test_fw_cfg_dma_status_writeback_preserves_length_address() {
     // After a successful DMA transfer, only the 4-byte big-endian control
     // field is written back.  Length and address must be preserved.
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0003, vec![0x01, 0x02, 0x03, 0x04]);
     fw.set_dma_enabled(true);
 
@@ -594,7 +595,7 @@ fn test_fw_cfg_dma_write_denied_returns_ok() {
     // Guest WRITE denial must set ERROR in the descriptor status and
     // return Ok(()) — the error is guest-visible descriptor status,
     // not a Rust-level operation error.
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.set_dma_enabled(true);
 
     let mem = DmaMem::new(256);
@@ -619,7 +620,7 @@ fn test_fw_cfg_dma_write_denied_returns_ok() {
 fn test_fw_cfg_dma_short_descriptor_read_sets_error() {
     // When dma_read returns fewer than 16 bytes for the descriptor,
     // do_dma must set ERROR status (when status writeback is possible).
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.set_dma_enabled(true);
 
     // Descriptor at the end of a small buffer: only 8 bytes readable.
@@ -646,7 +647,7 @@ fn test_fw_cfg_dma_read_write_skip_priority() {
     // QEMU priority: READ takes precedence over WRITE, which takes
     // precedence over SKIP. Combined bits execute only the
     // highest-priority operation.
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0042, vec![0xAA, 0xBB, 0xCC, 0xDD]);
     fw.set_dma_enabled(true);
 
@@ -674,7 +675,7 @@ fn test_fw_cfg_dma_partial_write_sets_error() {
     // When dma_write cannot write the full requested length, the DMA
     // must flag ERROR and stop advancing cur_offset past what was
     // actually written.
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0005, vec![0x11, 0x22, 0x33, 0x44]);
     fw.set_dma_enabled(true);
 
@@ -700,7 +701,7 @@ fn test_fw_cfg_dma_partial_write_sets_error() {
 fn test_fw_cfg_dma_write_denied_advances_offset() {
     // Denied guest WRITE must still consume bytes and advance
     // cur_offset against a valid selected entry (QEMU-equivalent).
-    let fw = FwCfg::new(10);
+    let fw = FwCfg::new();
     fw.add_bytes(0x0042, vec![0xAA, 0xBB, 0xCC, 0xDD]);
     fw.set_selector(0x0042);
     fw.set_dma_enabled(true);

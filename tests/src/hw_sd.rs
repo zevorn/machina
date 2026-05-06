@@ -181,7 +181,7 @@ fn test_sd_do_command_no_card() {
     let mut resp = [0u8; 16];
     let req = SdRequest::new(0, 0);
     let result = bus.do_command(&req, &mut resp);
-    assert_eq!(result.unwrap_err(), SdError::Timeout);
+    assert_eq!(result.unwrap_err(), SdError::NoCard);
 }
 
 #[test]
@@ -190,20 +190,19 @@ fn test_sd_write_read_byte() {
     let card = MockSdCard::new(true);
     bus.insert_card(card.clone());
 
-    bus.write_byte(0xAA);
-    bus.write_byte(0xBB);
+    bus.write_byte(0xAA).unwrap();
+    bus.write_byte(0xBB).unwrap();
     assert_eq!(card.written(), vec![0xAA, 0xBB]);
 
-    assert_eq!(bus.read_byte(), 0x11);
-    assert_eq!(bus.read_byte(), 0x22);
+    assert_eq!(bus.read_byte().unwrap(), 0x11);
+    assert_eq!(bus.read_byte().unwrap(), 0x22);
 }
 
 #[test]
 fn test_sd_read_write_no_card() {
     let bus = SdBus::new();
-    assert_eq!(bus.read_byte(), 0);
-    // write_byte with no card should not panic
-    bus.write_byte(0xFF);
+    assert_eq!(bus.read_byte().unwrap_err(), SdError::NoCard);
+    assert_eq!(bus.write_byte(0xFF).unwrap_err(), SdError::NoCard);
 }
 
 #[test]
@@ -318,6 +317,6 @@ fn test_sd_reparent_card() {
     assert_eq!(
         bus1.do_command(&SdRequest::new(1, 0), &mut resp)
             .unwrap_err(),
-        SdError::Timeout
+        SdError::NoCard
     );
 }
