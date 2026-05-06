@@ -705,13 +705,6 @@ fn test_oracle_batch1_sifive_u_prci() {
 #[test]
 fn test_oracle_batch1_pvpanic() {
     use machina_hw_misc::{Pvpanic, PvpanicEvent, PvpanicMmio};
-    let pvp = Pvpanic::new(PvpanicEvent::PANICKED);
-    let pvp2 = pvp.clone();
-    let events = Arc::new(std::sync::Mutex::new(0u8));
-    let events2 = events.clone();
-    pvp.set_event_handler(Box::new(move |e| {
-        *events2.lock().unwrap() = e;
-    }));
 
     let fixture = OracleFixture {
         device: "pvpanic".into(),
@@ -738,15 +731,22 @@ fn test_oracle_batch1_pvpanic() {
 
     let applier: Box<ScenarioApplier> =
         Box::new(move |scenario: &OracleScenario| {
+            let events = Arc::new(std::sync::Mutex::new(0u8));
+            let events2 = events.clone();
+            let dev = Pvpanic::new(PvpanicEvent::PANICKED);
+            dev.set_event_handler(Box::new(move |e| {
+                *events2.lock().unwrap() = e;
+            }));
+
             let (mut aspace, mut bus) = crate::hw_misc::make_test_aspace();
             let region = MemoryRegion::io(
                 "pvpanic",
                 0x2,
-                Arc::new(PvpanicMmio(pvp2.clone())),
+                Arc::new(PvpanicMmio(dev.clone())),
             );
-            pvp2.attach_to_bus(&mut bus).unwrap();
-            pvp2.register_mmio(region, GPA(0x1000_0000)).unwrap();
-            pvp2.realize_onto(&mut bus, &mut aspace).unwrap();
+            dev.attach_to_bus(&mut bus).unwrap();
+            dev.register_mmio(region, GPA(0x1000_0000)).unwrap();
+            dev.realize_onto(&mut bus, &mut aspace).unwrap();
 
             for &(offset, val, size) in &scenario.writes {
                 aspace.write(GPA(0x1000_0000 + offset), u32::from(size), val);
@@ -764,13 +764,6 @@ fn test_oracle_batch1_pvpanic() {
 #[test]
 fn test_oracle_batch1_pvpanic_mmio() {
     use machina_hw_misc::{Pvpanic, PvpanicEvent, PvpanicMmio};
-    let pvp = Pvpanic::new(PvpanicEvent::PANICKED | PvpanicEvent::CRASH_LOADED);
-    let pvp2 = pvp.clone();
-    let events = Arc::new(std::sync::Mutex::new(0u8));
-    let events2 = events.clone();
-    pvp.set_event_handler(Box::new(move |e| {
-        *events2.lock().unwrap() = e;
-    }));
 
     let fixture = OracleFixture {
         device: "pvpanic-mmio".into(),
@@ -797,15 +790,24 @@ fn test_oracle_batch1_pvpanic_mmio() {
 
     let applier: Box<ScenarioApplier> =
         Box::new(move |scenario: &OracleScenario| {
+            let events = Arc::new(std::sync::Mutex::new(0u8));
+            let events2 = events.clone();
+            let dev = Pvpanic::new(
+                PvpanicEvent::PANICKED | PvpanicEvent::CRASH_LOADED,
+            );
+            dev.set_event_handler(Box::new(move |e| {
+                *events2.lock().unwrap() = e;
+            }));
+
             let (mut aspace, mut bus) = crate::hw_misc::make_test_aspace();
             let region = MemoryRegion::io(
                 "pvpanic-mmio",
                 0x2,
-                Arc::new(PvpanicMmio(pvp2.clone())),
+                Arc::new(PvpanicMmio(dev.clone())),
             );
-            pvp2.attach_to_bus(&mut bus).unwrap();
-            pvp2.register_mmio(region, GPA(0x1000_0000)).unwrap();
-            pvp2.realize_onto(&mut bus, &mut aspace).unwrap();
+            dev.attach_to_bus(&mut bus).unwrap();
+            dev.register_mmio(region, GPA(0x1000_0000)).unwrap();
+            dev.realize_onto(&mut bus, &mut aspace).unwrap();
 
             for &(offset, val, size) in &scenario.writes {
                 aspace.write(GPA(0x1000_0000 + offset), u32::from(size), val);

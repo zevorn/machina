@@ -97,11 +97,19 @@ impl Pvpanic {
         f(&*guard)
     }
 
-    fn do_read(&self, _offset: u64, _size: u32) -> u64 {
+    fn do_read(&self, _offset: u64, size: u32) -> u64 {
+        // QEMU pvpanic ISA: min_access_size=1, max_access_size=1.
+        if size != 1 {
+            return 0;
+        }
         u64::from(self.events)
     }
 
-    fn do_write(&self, _offset: u64, _size: u32, val: u64) {
+    fn do_write(&self, _offset: u64, size: u32, val: u64) {
+        // QEMU pvpanic ISA: min_access_size=1, max_access_size=1.
+        if size != 1 {
+            return;
+        }
         let event = val as u8;
         if let Some(ref handler) = *self.on_event.lock() {
             if event & event::PANICKED != 0 {

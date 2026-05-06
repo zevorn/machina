@@ -96,8 +96,7 @@ impl QemuProbe {
                 return Err(format!("unsupported qtest read size {other}"))
             }
         };
-        writeln!(stdin, "{cmd}")
-            .map_err(|e| format!("qemu send read: {e}"))?;
+        writeln!(stdin, "{cmd}").map_err(|e| format!("qemu send read: {e}"))?;
         self.cmd_count += 1;
         Ok(())
     }
