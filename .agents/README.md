@@ -1,8 +1,7 @@
 # Machina Agent Skills
 
-This directory contains agent-agnostic skills for working in Machina.
-The root `AGENTS.md` delegates policy to `CLAUDE.md`; these skills add
-task-specific workflows for common development and review work.
+This directory contains agent-agnostic skills for working in Machina. The root
+`AGENTS.md` is the shared project guide and lists when to use each skill.
 
 Available skills:
 
@@ -17,3 +16,5 @@ Available skills:
 - `machina-issue-helper`: summarize GitHub issue context before debugging.
 - `machina-qemu-oracle`: compare Machina behavior against QEMU and the
   oracle tooling.
+
+Validate skill metadata with `make check-agent-skills`.
