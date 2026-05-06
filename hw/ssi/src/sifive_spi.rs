@@ -239,16 +239,18 @@ impl SiFiveSpi {
         if let Some(ref line) = *self.irq.lock() {
             line.lower();
         }
-        for l in self.cs_lines.lock().iter().flatten() {
-            l.lower();
-        }
-        // Deassert all CS lines: CSDEF is the inactive/default
-        // physical level of each CS pin.
-        if let Some(ref bus) = *self.ssi_bus.lock() {
-            let regs = self.regs.borrow();
-            for i in 0..self.num_cs {
-                let csdef_bit = (regs.regs[R_CSDEF] >> i) & 1;
-                let default_level = csdef_bit != 0;
+        // Deassert all CS lines (external GPIO and bus) to the
+        // CSDEF inactive/default level.
+        let regs = self.regs.borrow();
+        let cs_lines = self.cs_lines.lock();
+        let ssi = self.ssi_bus.lock();
+        for i in 0..self.num_cs as usize {
+            let csdef_bit = (regs.regs[R_CSDEF] >> i) & 1;
+            let default_level = csdef_bit != 0;
+            if let Some(ref line) = cs_lines[i] {
+                line.set(default_level);
+            }
+            if let Some(ref bus) = *ssi {
                 bus.set_cs(i as u8, default_level);
             }
         }

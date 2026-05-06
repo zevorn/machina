@@ -1329,3 +1329,77 @@ fn test_pl022_active_low_unrealize_deasserts() {
         "unrealize must deassert CS (true) for PL022 active-low nSSP"
     );
 }
+
+// -- Regression: external CS lines (connect_cs) deassertion --
+
+#[test]
+fn test_sifive_spi_external_cs_unrealize_deasserts() {
+    // External cs_lines connected via connect_cs() must be driven
+    // to CSDEF default_level on unrealize, not unconditionally
+    // lowered.  CSDEF=1 (reset default) → default_level = true.
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    let sink = Arc::new(TestSink::new());
+    let cs_line =
+        InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+    spi.connect_cs(0, cs_line);
+
+    // CSDEF=1 is reset default.  Set HOLD mode to select the CS
+    // line: assert_level = !default_level = false.
+    mmio.write(0x18, 4, 2); // HOLD
+                            // update_cs() drives external CS to false (asserted for
+                            // CSDEF=1 active-low).
+    assert!(!sink.level(), "HOLD must assert external CS (false)");
+
+    // unrealize must drive external CS to CSDEF default_level
+    // (= true for CSDEF=1).
+    use machina_core::address::GPA;
+    use machina_hw_core::bus::SysBus;
+    use machina_memory::address_space::AddressSpace;
+    use machina_memory::region::MemoryRegion;
+
+    let mut bus_sys = SysBus::new("sysbus");
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let mut aspace = AddressSpace::new(root);
+    let region = MemoryRegion::io(
+        "mmio",
+        0x1000,
+        Arc::new(SiFiveSpiMmio(Arc::clone(&spi))),
+    );
+    spi.attach_to_bus(&mut bus_sys).unwrap();
+    spi.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    spi.realize_onto(&mut bus_sys, &mut aspace).unwrap();
+    spi.unrealize_from(&mut bus_sys, &mut aspace).unwrap();
+
+    assert!(
+        sink.level(),
+        "unrealize must drive external CS to default_level=true \
+         for CSDEF=1"
+    );
+}
+
+#[test]
+fn test_sifive_spi_external_cs_reset_deasserts() {
+    // External cs_lines must be driven to CSDEF default_level on
+    // reset_runtime().  CSDEF=1 → default_level = true (high).
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    let sink = Arc::new(TestSink::new());
+    let cs_line =
+        InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+    spi.connect_cs(0, cs_line);
+
+    // CSDEF=1 (reset default), HOLD mode → assert_level=false
+    mmio.write(0x18, 4, 2); // HOLD
+    assert!(!sink.level(), "HOLD must assert external CS (false)");
+
+    // Reset must drive external CS to CSDEF default_level=true
+    spi.reset_runtime();
+    assert!(
+        sink.level(),
+        "reset must drive external CS to default_level=true \
+         for CSDEF=1"
+    );
+}
