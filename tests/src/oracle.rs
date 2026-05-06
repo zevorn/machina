@@ -470,6 +470,154 @@ fn test_runtime_oracle_perm_denied_returns_error() {
     }
 }
 
+// -- Real Probe Binary Tests (machina-qemu-hw-probe) ---------------
+
+/// Path to the real probe binary built in this workspace.
+fn real_probe_path() -> String {
+    // The test binary lives in target/debug/deps/; the probe binary
+    // is in target/debug/.  Walk up two levels from current_exe.
+    let exe_dir = std::env::current_exe()
+        .unwrap()
+        .parent() // deps/
+        .unwrap()
+        .parent() // target/<profile>/
+        .unwrap()
+        .to_path_buf();
+    let probe = exe_dir.join("machina-qemu-hw-probe");
+    probe.to_str().unwrap().into()
+}
+
+#[test]
+fn test_real_probe_reset_output() {
+    // The real probe binary must emit valid JSON for --probe reset.
+    use std::process::Command;
+    let path = real_probe_path();
+    let output = Command::new(&path)
+        .args(["sifive_e_prci", "--probe", "reset"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "probe should exit 0 on reset");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(parsed["registers"].is_object());
+    assert_eq!(parsed["registers"]["PLLCFG"].as_u64().unwrap(), 0x8006_0000);
+    assert_eq!(
+        parsed["registers"]["HFROSCCFG"].as_u64().unwrap(),
+        0xC000_0000
+    );
+}
+
+#[test]
+fn test_real_probe_scenario_output() {
+    use std::process::Command;
+    let path = real_probe_path();
+    let output = Command::new(&path)
+        .args(["sifive_e_prci", "--probe", "scenario", "write PLLCFG"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "probe should exit 0 on scenario");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(parsed["registers"].is_object());
+    assert_eq!(parsed["registers"]["PLLCFG"].as_u64().unwrap(), 0x9234_5678);
+}
+
+#[test]
+fn test_real_probe_unknown_device_exits_nonzero() {
+    use std::process::Command;
+    let path = real_probe_path();
+    let output = Command::new(&path)
+        .args(["nonexistent_device", "--probe", "reset"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown device"));
+}
+
+#[test]
+fn test_real_probe_unknown_scenario_exits_nonzero() {
+    use std::process::Command;
+    let path = real_probe_path();
+    let output = Command::new(&path)
+        .args([
+            "sifive_e_prci",
+            "--probe",
+            "scenario",
+            "nonexistent_scenario",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown scenario"));
+}
+
+#[test]
+fn test_real_probe_invalid_args_exits_nonzero() {
+    use std::process::Command;
+    let path = real_probe_path();
+    let output = Command::new(&path)
+        .args(["sifive_e_prci", "--bad-flag"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_real_probe_batch1_oracle_wired() {
+    // Wire a Batch 1 device through the real probe binary.
+    // This exercises the full RuntimeOracle → probe → JSON parse →
+    // register comparison pipeline.
+    use machina_hw_misc::SifiveEPRCI;
+    let prci = SifiveEPRCI::new();
+
+    let fixture = OracleFixture {
+        device: "sifive_e_prci".into(),
+        reset_regs: {
+            let mut m = BTreeMap::new();
+            m.insert("HFROSCCFG".into(), 0xC000_0000);
+            m.insert("HFXOSCCFG".into(), 0xC000_0000);
+            m.insert("PLLCFG".into(), 0x8006_0000);
+            m.insert("PLLOUTDIV".into(), 0x0000_0100);
+            m
+        },
+        scenarios: vec![],
+        quirks: vec![],
+    };
+
+    let mut actual = BTreeMap::new();
+    actual.insert("HFROSCCFG".into(), 0xC000_0000);
+    actual.insert("HFXOSCCFG".into(), 0xC000_0000);
+    actual.insert("PLLCFG".into(), 0x8006_0000);
+    actual.insert("PLLOUTDIV".into(), 0x0000_0100);
+
+    let json = serde_json::to_vec(&fixture).unwrap();
+    let runtime =
+        RuntimeOracle::new(&json, real_probe_path(), &["sifive_e_prci".into()])
+            .unwrap();
+
+    match runtime.check_reset(&actual, &BTreeMap::new()) {
+        OracleCheckResult::Pass { total } => {
+            assert!(total >= 4, "should check at least 4 registers");
+        }
+        OracleCheckResult::Skip(reason) => {
+            panic!("real probe should not be skipped: {reason}");
+        }
+        OracleCheckResult::Mismatch(r) => {
+            panic!(
+                "real probe mismatch: {}/{} mismatched: {:?}",
+                r.mismatches, r.total, r.details
+            );
+        }
+        OracleCheckResult::Error(e) => {
+            panic!("real probe error: {e}");
+        }
+    }
+}
+
 // -- Batch 1 Device Oracle Tests -----------------------------------
 
 /// Resolve the probe command from MACHINA_QEMU_HW_PROBE env var.
