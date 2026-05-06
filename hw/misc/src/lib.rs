@@ -1,8 +1,11 @@
 pub mod cmgcr;
 pub mod cpc;
 pub mod led;
+pub mod pl050;
 pub mod pvpanic;
+pub mod sifive_e_aon;
 pub mod sifive_e_prci;
+pub mod sifive_u_otp;
 pub mod sifive_u_prci;
 pub mod unimp;
 pub mod virt_ctrl;
@@ -11,8 +14,13 @@ pub use cmgcr::{Cmgcr, CmgcrMmio, CpuResetBaseCb};
 pub use cpc::{Cpc, CpcMmio, CpcMtimeCb, CpcVpActionCb};
 pub use led::Led;
 pub use led::LedColor;
+pub use pl050::{Pl050, Pl050Mmio};
 pub use pvpanic::{Pvpanic, PvpanicEvent, PvpanicMmio};
+pub use sifive_e_aon::{
+    SiFiveEAon, SiFiveEAonMmio, SIFIVE_E_AON_WDOGFEED,
+};
 pub use sifive_e_prci::{SifiveEPRCI, SifiveEPRCIMmio};
+pub use sifive_u_otp::{SiFiveUOtp, SiFiveUOtpMmio};
 pub use sifive_u_prci::{SifiveUPRCI, SifiveUPRCIMmio};
 pub use unimp::{Unimp, UnimpMmio};
 pub use virt_ctrl::{VirtCtrl, VirtCtrlAction, VirtCtrlMmio};

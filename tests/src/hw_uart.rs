@@ -381,3 +381,451 @@ fn test_uart_unrealize_drops_runtime_wiring() {
     assert!(!address_space.is_mapped(GPA::new(0x1000_0000), 4));
     assert!(bus.mappings().is_empty());
 }
+
+// -- PL011 tests --
+
+use machina_hw_char::pl011::{Pl011, Pl011Mmio, PL011_IRQ_COMBINED};
+use machina_hw_core::irq::InterruptSource;
+use machina_memory::region::MmioOps;
+
+const PL011_INT_RX: u64 = 1 << 4;
+const PL011_INT_TX: u64 = 1 << 5;
+
+struct Pl011TestSink {
+    pub levels: Mutex<Vec<bool>>,
+}
+
+impl Pl011TestSink {
+    fn new(n: usize) -> Self {
+        Self {
+            levels: Mutex::new(vec![false; n]),
+        }
+    }
+
+    fn level(&self, irq: u32) -> bool {
+        self.levels.lock().unwrap()[irq as usize]
+    }
+}
+
+impl IrqSink for Pl011TestSink {
+    fn set_irq(&self, irq: u32, level: bool) {
+        let mut levels = self.levels.lock().unwrap();
+        if let Some(slot) = levels.get_mut(irq as usize) {
+            *slot = level;
+        }
+    }
+}
+
+#[test]
+fn test_pl011_defaults() {
+    let pl011 = Arc::new(Pl011::new());
+    let mmio = Pl011Mmio(Arc::clone(&pl011));
+
+    assert_eq!(mmio.read(0x00, 4), 0);
+    assert_eq!(mmio.read(0x04, 4), 0);
+    let fr = mmio.read(0x18, 4);
+    assert_eq!(fr & 0x10, 0x10, "RXFE should be set");
+    assert_eq!(fr & 0x80, 0x80, "TXFE should be set");
+    assert_eq!(mmio.read(0x30, 4), 0x300);
+    assert_eq!(mmio.read(0x34, 4), 0x12);
+    assert_eq!(mmio.read(0x38, 4), 0);
+    assert_eq!(mmio.read(0xFE0, 4), 0x11);
+    assert_eq!(mmio.read(0xFE4, 4), 0x10);
+    assert_eq!(mmio.read(0xFE8, 4), 0x14);
+    assert_eq!(mmio.read(0xFEC, 4), 0x00);
+}
+
+#[test]
+fn test_pl011_rx_fifo_and_irq() {
+    let pl011 = Arc::new(Pl011::new());
+    let sink = Arc::new(Pl011TestSink::new(6));
+    let mmio = Pl011Mmio(Arc::clone(&pl011));
+
+    pl011.connect_output(
+        PL011_IRQ_COMBINED,
+        InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0),
+    );
+
+    mmio.write(0x38, 4, PL011_INT_RX);
+    assert!(!sink.level(0));
+    pl011.receive(0x41);
+    assert!(sink.level(0));
+    assert_eq!(mmio.read(0x00, 4), 0x41);
+    assert!(!sink.level(0));
+}
+
+#[test]
+fn test_pl011_tx_irq() {
+    let pl011 = Arc::new(Pl011::new());
+    let sink = Arc::new(Pl011TestSink::new(6));
+    let mmio = Pl011Mmio(Arc::clone(&pl011));
+
+    pl011.connect_output(
+        PL011_IRQ_COMBINED,
+        InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0),
+    );
+
+    mmio.write(0x38, 4, PL011_INT_TX);
+    mmio.write(0x00, 4, 0x42);
+    assert!(sink.level(0));
+
+    mmio.write(0x44, 4, PL011_INT_TX);
+    assert!(!sink.level(0));
+}
+
+#[test]
+fn test_pl011_write_to_flag_register_ignored() {
+    let pl011 = Arc::new(Pl011::new());
+    let mmio = Pl011Mmio(Arc::clone(&pl011));
+
+    let fr_before = mmio.read(0x18, 4);
+    mmio.write(0x18, 4, 0xFFFF_FFFF);
+    assert_eq!(mmio.read(0x18, 4), fr_before);
+}
+
+#[test]
+fn test_pl011_ibrd_fbrd_masked() {
+    let pl011 = Arc::new(Pl011::new());
+    let mmio = Pl011Mmio(Arc::clone(&pl011));
+
+    mmio.write(0x24, 4, 0xFFFF_FFFF);
+    assert_eq!(mmio.read(0x24, 4), 0xFFFF);
+
+    mmio.write(0x28, 4, 0xFFFF_FFFF);
+    assert_eq!(mmio.read(0x28, 4), 0x3F);
+}
+
+#[test]
+fn test_pl011_reset_runtime() {
+    let pl011 = Arc::new(Pl011::new());
+    let mmio = Pl011Mmio(Arc::clone(&pl011));
+
+    mmio.write(0x24, 4, 0x1234);
+    mmio.write(0x38, 4, 0xFF);
+    assert_eq!(mmio.read(0x24, 4), 0x1234);
+
+    pl011.reset_runtime();
+    assert_eq!(mmio.read(0x24, 4), 0);
+    assert_eq!(mmio.read(0x38, 4), 0);
+    assert_eq!(mmio.read(0x30, 4), 0x300);
+}
+
+#[test]
+fn test_pl011_ris_mis_icr() {
+    let pl011 = Arc::new(Pl011::new());
+    let mmio = Pl011Mmio(Arc::clone(&pl011));
+
+    mmio.write(0x38, 4, PL011_INT_RX);
+    assert_eq!(mmio.read(0x3C, 4), 0);
+    assert_eq!(mmio.read(0x40, 4), 0);
+
+    pl011.receive(0x55);
+    assert_eq!(mmio.read(0x3C, 4) & PL011_INT_RX, PL011_INT_RX);
+    assert_eq!(mmio.read(0x40, 4) & PL011_INT_RX, PL011_INT_RX);
+
+    mmio.write(0x44, 4, PL011_INT_RX);
+    assert_eq!(mmio.read(0x3C, 4) & PL011_INT_RX, 0);
+}
+
+#[test]
+fn test_pl011_loopback() {
+    let pl011 = Arc::new(Pl011::new());
+    let mmio = Pl011Mmio(Arc::clone(&pl011));
+
+    mmio.write(0x30, 4, 0x380);
+
+    mmio.write(0x00, 4, 0x41);
+    assert_eq!(mmio.read(0x00, 4), 0x41);
+}
+
+// -- SiFive UART tests --
+
+use machina_hw_char::sifive_uart::{SiFiveUart, SiFiveUartMmio};
+
+#[test]
+fn test_sifive_uart_defaults() {
+    let uart = Arc::new(SiFiveUart::new());
+    let mmio = SiFiveUartMmio(Arc::clone(&uart));
+
+    assert_eq!(mmio.read(0x08, 4), 0); // txfifo
+    assert_eq!(mmio.read(0x0C, 4), 0); // rxctrl
+    assert_eq!(mmio.read(0x10, 4), 0); // ie
+    assert_eq!(mmio.read(0x14, 4), 0); // ip
+    assert_eq!(mmio.read(0x18, 4), 0); // div
+                                       // RX FIFO empty returns 0x8000_0000
+    assert_eq!(mmio.read(0x04, 4), 0x8000_0000);
+}
+
+#[test]
+fn test_sifive_uart_tx_rx_watermark_irq() {
+    let uart = Arc::new(SiFiveUart::new());
+    let sink = Arc::new(Pl011TestSink::new(1));
+    let mmio = SiFiveUartMmio(Arc::clone(&uart));
+
+    uart.connect_output(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    // Enable TX, set TX watermark to 1
+    mmio.write(0x08, 4, 1); // txctrl = TXEN=1, TXCNT=0 (cnt=0 means watermk=1)
+                            // Enable RX with watermark = 0
+    mmio.write(0x0C, 4, 1); // rxctrl = RXEN=1, RXCNT=0
+                            // Enable interrupts
+    mmio.write(0x10, 4, 3); // IE_TXWM | IE_RXWM
+
+    // No IRQ initially
+    assert!(!sink.level(0));
+
+    // Write TX FIFO
+    mmio.write(0x00, 4, 0x41);
+
+    // Receive a byte via RX
+    uart.receive(0x42);
+
+    // RX watermark triggered (1 > 0)
+    assert!(sink.level(0));
+}
+
+#[test]
+fn test_sifive_uart_rx_disabled_by_rxctrl() {
+    let uart = Arc::new(SiFiveUart::new());
+    let mmio = SiFiveUartMmio(Arc::clone(&uart));
+
+    // RXEN=0
+    mmio.write(0x0C, 4, 0);
+
+    // Try to receive
+    uart.receive(0x41);
+
+    // Should be dropped
+    assert_eq!(mmio.read(0x04, 4), 0x8000_0000);
+}
+
+#[test]
+fn test_sifive_uart_tx_disabled_ignores_write() {
+    let uart = Arc::new(SiFiveUart::new());
+    let mmio = SiFiveUartMmio(Arc::clone(&uart));
+
+    // TXEN=0, write to TXFIFO should be ignored
+    mmio.write(0x00, 4, 0x41);
+    assert_eq!(mmio.read(0x00, 4) & 0x8000_0000, 0);
+}
+
+#[test]
+fn test_sifive_uart_div() {
+    let uart = Arc::new(SiFiveUart::new());
+    let mmio = SiFiveUartMmio(Arc::clone(&uart));
+
+    mmio.write(0x18, 4, 0xABCD);
+    assert_eq!(mmio.read(0x18, 4), 0xABCD);
+}
+
+#[test]
+fn test_sifive_uart_reset_runtime() {
+    let uart = Arc::new(SiFiveUart::new());
+    let mmio = SiFiveUartMmio(Arc::clone(&uart));
+
+    mmio.write(0x18, 4, 0x1234);
+    mmio.write(0x10, 4, 0xFF);
+    assert_eq!(mmio.read(0x18, 4), 0x1234);
+
+    uart.reset_runtime();
+    assert_eq!(mmio.read(0x18, 4), 0);
+    assert_eq!(mmio.read(0x10, 4), 0);
+}
+
+// -- HTIF tests --
+
+use machina_hw_char::riscv_htif::{Htif, HtifMmio};
+use std::sync::atomic::AtomicI32;
+
+#[test]
+fn test_htif_defaults() {
+    let htif = Arc::new(Htif::new());
+    let mmio = HtifMmio(Arc::clone(&htif));
+
+    // tohost low/high
+    assert_eq!(mmio.read(0, 4), 0);
+    assert_eq!(mmio.read(4, 4), 0);
+    // fromhost low/high
+    assert_eq!(mmio.read(8, 4), 0);
+    assert_eq!(mmio.read(12, 4), 0);
+}
+
+#[test]
+fn test_htif_tohost_two_phase_write() {
+    let htif = Arc::new(Htif::new());
+    let mmio = HtifMmio(Arc::clone(&htif));
+
+    // device=1 (console), cmd=1 (PUTC), payload='X'=0x58
+    // tohost = (1 << 56) | (1 << 48) | 0x58 = 0x0101_0000_0000_0058
+    let tohost: u64 = (1 << 56) | (1 << 48) | 0x58;
+    let lo = (tohost & 0xFFFF_FFFF) as u32;
+    let hi = (tohost >> 32) as u32;
+
+    // Phase 1: write low 32 bits (tohost was 0, so allow_tohost=true)
+    mmio.write(0, 4, u64::from(lo));
+    assert_eq!(mmio.read(0, 4), u64::from(lo));
+    assert_eq!(mmio.read(4, 4), 0);
+
+    // Phase 2: write high 32 bits -> triggers handling
+    mmio.write(4, 4, u64::from(hi));
+    // After handling, tohost should be cleared
+    assert_eq!(mmio.read(0, 4), 0);
+    assert_eq!(mmio.read(4, 4), 0);
+}
+
+#[test]
+fn test_htif_fromhost_two_phase_write() {
+    let htif = Arc::new(Htif::new());
+    let mmio = HtifMmio(Arc::clone(&htif));
+
+    mmio.write(8, 4, 0xBEEF);
+    assert_eq!(mmio.read(8, 4), 0xBEEF);
+
+    mmio.write(12, 4, 0xDEAD);
+    assert_eq!(mmio.read(12, 4), 0xDEAD);
+    assert_eq!(mmio.read(8, 4), 0xBEEF);
+}
+
+#[test]
+fn test_htif_console_putc() {
+    let htif = Arc::new(Htif::new());
+    let mmio = HtifMmio(Arc::clone(&htif));
+
+    // device=1 (console), cmd=1 (PUTC), payload='A'
+    // tohost = (1 << 56) | (1 << 48) | 0x41 = 0x0101_0000_0000_0041
+    let tohost: u64 = (1 << 56) | (1 << 48) | 0x41;
+    let lo = (tohost & 0xFFFF_FFFF) as u32;
+    let hi = (tohost >> 32) as u32;
+
+    mmio.write(0, 4, u64::from(lo));
+    mmio.write(4, 4, u64::from(hi));
+
+    // fromhost should have response: device+cmd from tohost, resp=0x100|'A'
+    let fromhost = mmio.read(8, 4) as u64 | ((mmio.read(12, 4) as u64) << 32);
+    let expected = (tohost & 0xFFFF_0000_0000_0000) | 0x141;
+    assert_eq!(fromhost, expected);
+}
+
+#[test]
+fn test_htif_console_getc() {
+    let htif = Arc::new(Htif::new());
+    let mmio = HtifMmio(Arc::clone(&htif));
+
+    // device=1 (console), cmd=0 (GETC)
+    let tohost: u64 = (1 << 56) | (0 << 48);
+    let lo = (tohost & 0xFFFF_FFFF) as u32;
+    let hi = (tohost >> 32) as u32;
+
+    mmio.write(0, 4, u64::from(lo));
+    mmio.write(4, 4, u64::from(hi));
+
+    // tohost should be cleared (indicating we read)
+    assert_eq!(mmio.read(0, 4), 0);
+    assert_eq!(mmio.read(4, 4), 0);
+
+    // fromhost should still be 0 (no response until receive())
+    assert_eq!(mmio.read(8, 4), 0);
+    assert_eq!(mmio.read(12, 4), 0);
+
+    // Now receive a byte from chardev
+    htif.receive(0x51);
+
+    // fromhost should have resp=0x100|0x51 in low 16 bits
+    let fromhost = mmio.read(8, 4) as u64 | ((mmio.read(12, 4) as u64) << 32);
+    assert_eq!(fromhost & 0xFFFF, 0x151);
+    // device+cmd bits preserved from pending_read (which was tohost value)
+    assert_eq!((fromhost >> 56) & 0xFF, 1); // device=1
+    assert_eq!((fromhost >> 48) & 0xFF, 0); // cmd=0
+}
+
+#[test]
+fn test_htif_system_exit() {
+    let htif = Arc::new(Htif::new());
+    let mmio = HtifMmio(Arc::clone(&htif));
+
+    let exit_code = Arc::new(AtomicI32::new(-1));
+    let ec = Arc::clone(&exit_code);
+    htif.set_exit_callback(Box::new(move |code| {
+        ec.store(code, Ordering::Relaxed);
+    }));
+
+    // device=0 (system), cmd=0 (syscall), payload with bit0=1 (exit)
+    // exit_code = 42, payload = (42 << 1) | 1 = 85
+    let tohost: u64 = 85;
+    let lo = (tohost & 0xFFFF_FFFF) as u32;
+    let hi = (tohost >> 32) as u32;
+
+    mmio.write(0, 4, u64::from(lo));
+    mmio.write(4, 4, u64::from(hi));
+
+    assert_eq!(exit_code.load(Ordering::Relaxed), 42);
+}
+
+#[test]
+fn test_htif_tohost_reject_when_busy() {
+    let htif = Arc::new(Htif::new());
+    let mmio = HtifMmio(Arc::clone(&htif));
+
+    // First write sets tohost non-zero
+    mmio.write(0, 4, 0xDEAD);
+
+    // Second write to offset 0 should set allow_tohost=false
+    // since tohost is non-zero
+    mmio.write(0, 4, 0xBEEF);
+    // The value stored is still set but allow_tohost is false
+    // Now write high bits - should NOT trigger handle because
+    // allow_tohost is false
+    mmio.write(4, 4, 0xCAFE);
+    // tohost should have both parts since allow_tohost was false
+    // and high bits were combined
+    // Actually allow_tohost was false so the write to offset 4 is
+    // ignored. But since we wrote 0xBEEF last to low bits, and
+    // allow_tohost=false means write to offset 4 is a no-op,
+    // tohost should still be 0xBEEF (just the low write, unhandled).
+    assert_ne!(mmio.read(0, 4), 0);
+}
+
+#[test]
+fn test_htif_reset_runtime() {
+    let htif = Arc::new(Htif::new());
+    let mmio = HtifMmio(Arc::clone(&htif));
+
+    // Write tohost
+    mmio.write(0, 4, 0x1234);
+    mmio.write(4, 4, 0x5678);
+    // Write fromhost
+    mmio.write(8, 4, 0xABCD);
+    mmio.write(12, 4, 0xEF01);
+
+    htif.reset_runtime();
+
+    assert_eq!(mmio.read(0, 4), 0);
+    assert_eq!(mmio.read(4, 4), 0);
+    assert_eq!(mmio.read(8, 4), 0);
+    assert_eq!(mmio.read(12, 4), 0);
+}
+
+#[test]
+fn test_htif_unknown_device() {
+    let htif = Arc::new(Htif::new());
+    let mmio = HtifMmio(Arc::clone(&htif));
+
+    // device=2 (unknown), cmd=0
+    let tohost: u64 = 2u64 << 56;
+    let lo = (tohost & 0xFFFF_FFFF) as u32;
+    let hi = (tohost >> 32) as u32;
+
+    mmio.write(0, 4, u64::from(lo));
+    mmio.write(4, 4, u64::from(hi));
+
+    // fromhost should have response with resp=0 (no handler)
+    let fromhost = mmio.read(8, 4) as u64 | ((mmio.read(12, 4) as u64) << 32);
+    // device+cmd preserved, resp=0
+    assert_eq!(fromhost, tohost & 0xFFFF_0000_0000_0000);
+    // tohost cleared
+    assert_eq!(mmio.read(0, 4), 0);
+    assert_eq!(mmio.read(4, 4), 0);
+}

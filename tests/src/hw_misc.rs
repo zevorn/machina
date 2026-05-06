@@ -1,11 +1,14 @@
-// Tests for hw/misc devices: PRCI, pvpanic, unimp, led, virt_ctrl.
+// Tests for hw/misc devices: PRCI, pvpanic, unimp, led, virt_ctrl,
+// PL050, SiFive E AON, SiFive U OTP.
 
 use std::sync::Arc;
 
 use machina_core::address::GPA;
 use machina_hw_core::bus::SysBus;
+use machina_hw_core::irq::{InterruptSource, IrqSink};
 use machina_hw_misc::{
-    Led, LedColor, Pvpanic, PvpanicEvent, PvpanicMmio, SifiveEPRCI,
+    Led, LedColor, Pl050, Pl050Mmio, Pvpanic, PvpanicEvent, PvpanicMmio,
+    SiFiveEAon, SiFiveEAonMmio, SiFiveUOtp, SiFiveUOtpMmio, SifiveEPRCI,
     SifiveEPRCIMmio, SifiveUPRCI, SifiveUPRCIMmio, Unimp, UnimpMmio, VirtCtrl,
     VirtCtrlAction, VirtCtrlMmio,
 };
@@ -780,4 +783,395 @@ fn test_virt_ctrl_rejects_large_access() {
         vc.do_write(0x04, 8, 1); // CMD_RESET in 8-byte access
         assert!(actions.lock().unwrap().is_empty());
     }
+}
+
+// ---- PL050 tests ----
+
+struct Sink {
+    level: std::sync::Mutex<bool>,
+}
+
+impl Sink {
+    fn new() -> Self {
+        Self {
+            level: std::sync::Mutex::new(false),
+        }
+    }
+
+    fn level(&self) -> bool {
+        *self.level.lock().unwrap()
+    }
+}
+
+impl IrqSink for Sink {
+    fn set_irq(&self, _irq: u32, level: bool) {
+        *self.level.lock().unwrap() = level;
+    }
+}
+
+#[test]
+fn test_pl050_defaults() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    assert_eq!(mmio.read(0x00, 4), 0); // CR
+    assert_eq!(mmio.read(0x0C, 4), 0); // CLK
+    assert_eq!(mmio.read(0x10, 4), 0x02); // IIR (pending|2)
+}
+
+#[test]
+fn test_pl050_id_registers() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    assert_eq!(mmio.read(0xFE0, 4), 0x50);
+    assert_eq!(mmio.read(0xFE4, 4), 0x10);
+    assert_eq!(mmio.read(0xFE8, 4), 0x04);
+    assert_eq!(mmio.read(0xFEC, 4), 0x00);
+    assert_eq!(mmio.read(0xFF0, 4), 0x0D);
+    assert_eq!(mmio.read(0xFF4, 4), 0xF0);
+    assert_eq!(mmio.read(0xFF8, 4), 0x05);
+    assert_eq!(mmio.read(0xFFC, 4), 0xB1);
+}
+
+#[test]
+fn test_pl050_stat_txempty() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    let stat = mmio.read(0x04, 4) as u32;
+    assert!(stat & 0x40 != 0); // TXEMPTY set
+}
+
+#[test]
+fn test_pl050_cr_enables_irq() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+    let sink = Arc::new(Sink::new());
+    let irq = InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    );
+    pl050.connect_irq(irq);
+
+    assert!(!sink.level());
+
+    // Set CR bit 4 (RX enable) — IRQ asserts if pending && cr & 0x10
+    // With no pending, bit 4 alone shouldn't trigger unless bit 3 also set
+    mmio.write(0x00, 4, 0x10);
+    assert!(!sink.level());
+
+    // Set CR bit 3 — direct IRQ assert
+    mmio.write(0x00, 4, 0x08);
+    assert!(sink.level());
+}
+
+#[test]
+fn test_pl050_ps2_irq_input() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+    let sink = Arc::new(Sink::new());
+    let irq = InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    );
+    pl050.connect_irq(irq);
+
+    // Enable RX interrupt (CR bit 4)
+    mmio.write(0x00, 4, 0x10);
+    assert!(!sink.level());
+
+    // PS2 IRQ input sets pending
+    pl050.set_ps2_irq(true);
+    assert!(sink.level());
+
+    // Deassert
+    pl050.set_ps2_irq(false);
+    assert!(!sink.level());
+}
+
+#[test]
+fn test_pl050_clk_write() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    mmio.write(0x0C, 4, 0x1234);
+    assert_eq!(mmio.read(0x0C, 4), 0x1234);
+}
+
+#[test]
+fn test_pl050_data_write_read() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    mmio.write(0x08, 4, 0xAB);
+    assert_eq!(mmio.read(0x08, 4), 0xAB);
+}
+
+#[test]
+fn test_pl050_reset_runtime() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    mmio.write(0x00, 4, 0x18);
+    mmio.write(0x0C, 4, 0x5555);
+
+    pl050.reset_runtime();
+
+    assert_eq!(mmio.read(0x00, 4), 0);
+    assert_eq!(mmio.read(0x0C, 4), 0);
+}
+
+// -- SiFive E AON tests --
+
+#[test]
+fn test_sifive_e_aon_defaults() {
+    let aon = Arc::new(SiFiveEAon::default());
+    let mmio = SiFiveEAonMmio(Arc::clone(&aon));
+
+    assert_eq!(mmio.read(0x00, 4), 0); // WDOGCFG
+    assert_eq!(mmio.read(0x20, 4), 0xbeef); // WDOGCMP0
+}
+
+#[test]
+fn test_sifive_e_aon_key_unlock_flow() {
+    let aon = Arc::new(SiFiveEAon::default());
+    let mmio = SiFiveEAonMmio(Arc::clone(&aon));
+
+    // WDOGKEY starts at 0
+    assert_eq!(mmio.read(0x1C, 4), 0);
+
+    // Write unlock key
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    assert_eq!(mmio.read(0x1C, 4), 1); // unlocked
+}
+
+#[test]
+fn test_sifive_e_aon_cfg_write_needs_unlock() {
+    let aon = Arc::new(SiFiveEAon::default());
+    let mmio = SiFiveEAonMmio(Arc::clone(&aon));
+
+    // Write WDOGCFG without unlock — should be ignored
+    mmio.write(0x00, 4, 0x1000);
+    assert_eq!(mmio.read(0x00, 4), 0);
+
+    // Unlock then write
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x00, 4, 0x1000); // EN_ALWAYS
+    assert_eq!(mmio.read(0x00, 4), 0x1000);
+}
+
+#[test]
+fn test_sifive_e_aon_feed_resets_count() {
+    let aon = Arc::new(SiFiveEAon::default());
+    let mmio = SiFiveEAonMmio(Arc::clone(&aon));
+
+    // Unlock, set EN_ALWAYS, set non-zero count
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x00, 4, 0x1000); // EN_ALWAYS
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x08, 4, 100); // WDOGCOUNT
+
+    // Feed
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x18, 4, 0xD09F_00D);
+
+    // Counter should be reset to 0
+    assert_eq!(mmio.read(0x08, 4), 0);
+}
+
+#[test]
+fn test_sifive_e_aon_cmp_ip_trigger() {
+    let aon = Arc::new(SiFiveEAon::default());
+    let mmio = SiFiveEAonMmio(Arc::clone(&aon));
+    let sink = Arc::new(Sink::new());
+    let irq = InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    );
+    aon.connect_irq(irq);
+
+    // Set EN_ALWAYS, set low compare
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x00, 4, 0x1000); // EN_ALWAYS
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x20, 4, 0); // WDOGCMP0 = 0
+
+    // Count >= 0 cmp → IP should be set
+    let cfg = mmio.read(0x00, 4) as u32;
+    assert!(cfg & (1 << 28) != 0); // IP0 set
+
+    // IRQ should be asserted
+    assert!(sink.level());
+}
+
+#[test]
+fn test_sifive_e_aon_rtc_region_unimplemented() {
+    let aon = Arc::new(SiFiveEAon::default());
+    let mmio = SiFiveEAonMmio(Arc::clone(&aon));
+
+    // RTC and beyond are unimplemented, return 0 on read
+    assert_eq!(mmio.read(0x40, 4), 0);
+    assert_eq!(mmio.read(0x70, 4), 0);
+    assert_eq!(mmio.read(0x80, 4), 0);
+    assert_eq!(mmio.read(0x100, 4), 0);
+
+    // Beyond max
+    assert_eq!(mmio.read(0x150, 4), 0);
+}
+
+#[test]
+fn test_sifive_e_aon_reset_runtime() {
+    let aon = Arc::new(SiFiveEAon::default());
+    let mmio = SiFiveEAonMmio(Arc::clone(&aon));
+
+    // Unlock and set config
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x00, 4, 0x1000); // EN_ALWAYS
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x20, 4, 0x1234); // WDOGCMP0
+
+    aon.reset_runtime();
+
+    // EN_ALWAYS should be cleared
+    let cfg = mmio.read(0x00, 4) as u32;
+    assert!(cfg & 0x1000 == 0);
+
+    // WDOGCMP0 reset to 0xbeef
+    assert_eq!(mmio.read(0x20, 4), 0xbeef);
+}
+
+// -- SiFive U OTP tests --
+
+#[test]
+fn test_sifive_u_otp_defaults() {
+    let otp = Arc::new(SiFiveUOtp::new());
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    assert_eq!(mmio.read(0x00, 4), 0); // PA
+    assert_eq!(mmio.read(0x04, 4), 0); // PAIO
+    assert_eq!(mmio.read(0x08, 4), 0); // PAS
+    assert_eq!(mmio.read(0x0C, 4), 0); // PCE
+    assert_eq!(mmio.read(0x10, 4), 0); // PCLK
+    assert_eq!(mmio.read(0x14, 4), 0); // PDIN
+    assert_eq!(mmio.read(0x1C, 4), 0); // PDSTB
+    assert_eq!(mmio.read(0x20, 4), 0); // PPROG
+    assert_eq!(mmio.read(0x34, 4), 0); // PTRIM
+    assert_eq!(mmio.read(0x38, 4), 0); // PWE
+}
+
+#[test]
+fn test_sifive_u_otp_pa_masked() {
+    let otp = Arc::new(SiFiveUOtp::new());
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    mmio.write(0x00, 4, 0xDEAD);
+    assert_eq!(mmio.read(0x00, 4), 0xDEAD & 0xFFF);
+}
+
+#[test]
+fn test_sifive_u_otp_pdout_no_enable_returns_ff() {
+    let otp = Arc::new(SiFiveUOtp::new());
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    // Without PCE/PDSTB/PTRIM enables, PDOUT returns 0xFF
+    assert_eq!(mmio.read(0x18, 4), 0xFF);
+}
+
+#[test]
+fn test_sifive_u_otp_pdout_with_enables() {
+    let otp = Arc::new(SiFiveUOtp::new());
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    // Enable reading
+    mmio.write(0x0C, 4, 1); // PCE_EN
+    mmio.write(0x1C, 4, 1); // PDSTB_EN
+    mmio.write(0x34, 4, 1); // PTRIM_EN
+
+    // Set address 0
+    mmio.write(0x00, 4, 0);
+
+    // Should read fuse[0] = 0xFFFF_FFFF
+    assert_eq!(mmio.read(0x18, 4), 0xFFFF_FFFF);
+}
+
+#[test]
+fn test_sifive_u_otp_serial_number() {
+    let otp = Arc::new(SiFiveUOtp::with_serial(0x1234_5678));
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    // Enable reading
+    mmio.write(0x0C, 4, 1); // PCE_EN
+    mmio.write(0x1C, 4, 1); // PDSTB_EN
+    mmio.write(0x34, 4, 1); // PTRIM_EN
+
+    // Read serial address
+    mmio.write(0x00, 4, 0xFC);
+    assert_eq!(mmio.read(0x18, 4), 0x1234_5678);
+
+    mmio.write(0x00, 4, 0xFD);
+    assert_eq!(mmio.read(0x18, 4), u64::from(!(0x1234_5678u32)));
+}
+
+#[test]
+fn test_sifive_u_otp_pwe_write() {
+    let otp = Arc::new(SiFiveUOtp::new());
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    // Set up write
+    mmio.write(0x00, 4, 0); // PA=0
+    mmio.write(0x04, 4, 5); // PAIO=5 (bit 5)
+    mmio.write(0x08, 4, 0); // PAS=0 (no redundancy)
+    mmio.write(0x14, 4, 1); // PDIN=1 (set bit)
+
+    // Enable reading for verification
+    mmio.write(0x0C, 4, 1); // PCE_EN
+    mmio.write(0x1C, 4, 1); // PDSTB_EN
+    mmio.write(0x34, 4, 1); // PTRIM_EN
+
+    // Before write, fuse[0] = 0xFFFF_FFFF
+    assert_eq!(mmio.read(0x18, 4), 0xFFFF_FFFF);
+
+    // Clear bit 5: PDIN=0, then PWE=1
+    mmio.write(0x04, 4, 5); // PAIO=5
+    mmio.write(0x14, 4, 0); // PDIN=0
+    mmio.write(0x38, 4, 0x01);
+
+    // Verify bit 5 cleared: 0xFFFF_FFFF & ~(1<<5) = 0xFFFF_FFDF
+    assert_eq!(mmio.read(0x18, 4), 0xFFFF_FFDF);
+}
+
+#[test]
+fn test_sifive_u_otp_pwe_write_once() {
+    let otp = Arc::new(SiFiveUOtp::new());
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    // First write
+    mmio.write(0x00, 4, 0); // PA=0
+    mmio.write(0x04, 4, 3); // PAIO=3
+    mmio.write(0x08, 4, 0); // PAS=0
+    mmio.write(0x14, 4, 1); // PDIN=1
+    mmio.write(0x38, 4, 0x01); // PWE=1
+
+    // Try to write same bit again
+    mmio.write(0x14, 4, 0); // PDIN=0 (try to clear)
+    mmio.write(0x38, 4, 0x01); // PWE=1
+
+    // Enable reading
+    mmio.write(0x0C, 4, 1); // PCE_EN
+    mmio.write(0x1C, 4, 1); // PDSTB_EN
+    mmio.write(0x34, 4, 1); // PTRIM_EN
+
+    // Bit should still be set (write-once protects)
+    assert_eq!(mmio.read(0x18, 4) as u32 & (1 << 3), 1 << 3);
+}
+
+#[test]
+fn test_sifive_u_otp_pdout_read_only() {
+    let otp = Arc::new(SiFiveUOtp::new());
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    mmio.write(0x18, 4, 0xDEAD_BEEF);
+    // PDOUT is read-only, value depends on enables
+    assert_eq!(mmio.read(0x18, 4), 0xFF);
 }

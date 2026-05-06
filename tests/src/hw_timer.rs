@@ -1,9 +1,16 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use machina_accel::timer::VirtualClock;
+use machina_hw_core::irq::{InterruptSource, IrqSink};
 use machina_hw_timer::policy;
+use machina_hw_timer::sifive_pwm::{SiFivePwm, SiFivePwmMmio};
+use machina_hw_timer::sse_counter::{
+    SseCounter, SseCounterControlMmio, SseCounterStatusMmio,
+};
+use machina_hw_timer::sse_timer::{SseTimer, SseTimerMmio};
 use machina_hw_timer::{self as timer, Ptimer};
+use machina_memory::region::MmioOps;
 
 /// Utility: create a timer with a callback that increments a counter.
 fn counting_timer(policy_mask: u8) -> (Arc<Ptimer>, Arc<AtomicU64>) {
@@ -577,4 +584,488 @@ fn test_drive_ptimer_clock_advances() {
 
     timer::drive_ptimer(&timer, &clock, 5_000_000);
     assert_eq!(clock.get_ns(), 5_000_000);
+}
+
+// -- Test helper for IRQ devices --
+
+struct TestIrqSink {
+    level: AtomicBool,
+}
+
+impl TestIrqSink {
+    fn new() -> Self {
+        Self {
+            level: AtomicBool::new(false),
+        }
+    }
+
+    fn level(&self) -> bool {
+        self.level.load(Ordering::Relaxed)
+    }
+}
+
+impl IrqSink for TestIrqSink {
+    fn set_irq(&self, _irq: u32, level: bool) {
+        self.level.store(level, Ordering::Relaxed);
+    }
+}
+
+// -- SiFive PWM tests --
+
+#[test]
+fn test_sifive_pwm_defaults() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    assert_eq!(mmio.read(0x00, 4), 0); // CONFIG
+    assert_eq!(mmio.read(0x08, 4), 0); // COUNT
+    assert_eq!(mmio.read(0x10, 4), 0); // PWMS
+    assert_eq!(mmio.read(0x20, 4), 0); // PWMCMP0
+    assert_eq!(mmio.read(0x24, 4), 0); // PWMCMP1
+    assert_eq!(mmio.read(0x28, 4), 0); // PWMCMP2
+    assert_eq!(mmio.read(0x2C, 4), 0); // PWMCMP3
+}
+
+#[test]
+fn test_sifive_pwm_config_write() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    // Write scale=3, enalways=1
+    let val: u32 = 3 | (1 << 12);
+    mmio.write(0x00, 4, u64::from(val));
+    assert_eq!(mmio.read(0x00, 4), u64::from(val));
+}
+
+#[test]
+fn test_sifive_pwm_count_write() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    mmio.write(0x08, 4, 100);
+    assert_eq!(mmio.read(0x08, 4), 100);
+}
+
+#[test]
+fn test_sifive_pwm_pwmcmp_write() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    mmio.write(0x20, 4, 0xABCD);
+    assert_eq!(mmio.read(0x20, 4), 0xABCD);
+
+    mmio.write(0x24, 4, 0x1234);
+    assert_eq!(mmio.read(0x24, 4), 0x1234);
+}
+
+#[test]
+fn test_sifive_pwm_pwms_scaled() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    // Write count = 0x100 (shifted by scale=0 gives pwms=0x100)
+    mmio.write(0x08, 4, 0x100);
+    // PWMS = count >> scale & PWMCMP_MASK
+    assert_eq!(mmio.read(0x10, 4), 0x100 & 0xFFFF);
+}
+
+#[test]
+fn test_sifive_pwm_irq_fires() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+    let sink = Arc::new(TestIrqSink::new());
+    pwm.connect_output(
+        0,
+        InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0),
+    );
+
+    assert!(!sink.level());
+
+    // Set pwmcmp0 = 0 (matches pwms=0) and enable
+    let cfg = (1u32 << 12); // ENALWAYS
+    mmio.write(0x00, 4, u64::from(cfg));
+    // IRQ should fire since pwms(0) >= pwmcmp0(0)
+    assert!(sink.level());
+}
+
+#[test]
+fn test_sifive_pwm_reset_runtime() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    mmio.write(0x00, 4, 0xDEAD);
+    mmio.write(0x20, 4, 1234);
+
+    pwm.reset_runtime();
+
+    assert_eq!(mmio.read(0x00, 4), 0);
+    assert_eq!(mmio.read(0x20, 4), 0);
+}
+
+#[test]
+fn test_sifive_pwm_pwmcmp_mask() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    // Write value larger than 16-bit mask
+    mmio.write(0x20, 4, 0x1ABCD);
+    // Should be masked to 16 bits
+    assert_eq!(mmio.read(0x20, 4), 0xABCD);
+}
+
+// -- SSE Counter tests --
+
+#[test]
+fn test_sse_counter_control_defaults() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    assert_eq!(mmio.read(0x00, 4), 0); // CNTCR
+    assert_eq!(mmio.read(0x04, 4), 0); // CNTSR
+    assert_eq!(mmio.read(0x08, 4), 0); // CNTCV_LO
+    assert_eq!(mmio.read(0x0C, 4), 0); // CNTCV_HI
+}
+
+#[test]
+fn test_sse_counter_status_defaults() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterStatusMmio(Arc::clone(&counter));
+
+    assert_eq!(mmio.read(0x00, 4), 0); // CNTCV_LO
+    assert_eq!(mmio.read(0x04, 4), 0); // CNTCV_HI
+}
+
+#[test]
+fn test_sse_counter_control_id_registers() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    assert_eq!(mmio.read(0xFD0, 4), 0x04); // PID4
+    assert_eq!(mmio.read(0xFE0, 4), 0xBA); // PID0
+    assert_eq!(mmio.read(0xFF0, 4), 0x0D); // CID0
+    assert_eq!(mmio.read(0xFFC, 4), 0xB1); // CID3
+}
+
+#[test]
+fn test_sse_counter_status_id_registers() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterStatusMmio(Arc::clone(&counter));
+
+    assert_eq!(mmio.read(0xFD0, 4), 0x04); // PID4
+    assert_eq!(mmio.read(0xFE0, 4), 0xBB); // PID0
+    assert_eq!(mmio.read(0xFFC, 4), 0xB1); // CID3
+}
+
+#[test]
+fn test_sse_counter_cntid() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    // CNTSC=1, CNTSELCLK=1
+    let id = mmio.read(0x1C, 4);
+    assert_eq!(id & 1, 1); // CNTSC bit 0
+}
+
+#[test]
+fn test_sse_counter_enable_disable() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    // Enable counter
+    mmio.write(0x00, 4, 1); // CNTCR.EN = 1
+    assert_eq!(mmio.read(0x00, 4), 1);
+
+    // Disable
+    mmio.write(0x00, 4, 0);
+    assert_eq!(mmio.read(0x00, 4), 0);
+}
+
+#[test]
+fn test_sse_counter_write_cntcv() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    mmio.write(0x08, 4, 0x12345678); // CNTCV_LO
+    assert_eq!(mmio.read(0x08, 4), 0x12345678);
+
+    mmio.write(0x0C, 4, 0x9ABCDEF0); // CNTCV_HI
+    assert_eq!(mmio.read(0x0C, 4), 0x9ABCDEF0);
+    // CNTCV_LO should be 0 (HI write clears LO)
+    assert_eq!(mmio.read(0x08, 4), 0);
+}
+
+#[test]
+fn test_sse_counter_write_cntscr() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    // Default CNTSCR0 = 0x0100_0000
+    assert_eq!(mmio.read(0x10, 4), 0x0100_0000);
+
+    mmio.write(0x10, 4, 0x0200_0000);
+    assert_eq!(mmio.read(0x10, 4), 0x0200_0000);
+}
+
+#[test]
+fn test_sse_counter_tick_advances() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    // Enable counter
+    mmio.write(0x00, 4, 1);
+    // Tick 1 second = 1_000_000_000 ns
+    counter.tick(1_000_000_000);
+
+    // At 1MHz, 1 second = 1_000_000 ticks
+    let lo = mmio.read(0x08, 4);
+    assert_eq!(lo, 1_000_000);
+}
+
+#[test]
+fn test_sse_counter_tick_disabled() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    // Counter disabled by default
+    counter.tick(1_000_000_000);
+    assert_eq!(mmio.read(0x08, 4), 0);
+}
+
+#[test]
+fn test_sse_counter_reset_runtime() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    mmio.write(0x00, 4, 1);
+    mmio.write(0x08, 4, 1234);
+    mmio.write(0x10, 4, 0xDEAD);
+
+    counter.reset_runtime();
+
+    assert_eq!(mmio.read(0x00, 4), 0);
+    assert_eq!(mmio.read(0x10, 4), 0x0100_0000); // default CNTSCR0
+}
+
+#[test]
+fn test_sse_counter_status_frame_read_only() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let ctrl_mmio = SseCounterControlMmio(Arc::clone(&counter));
+    let status_mmio = SseCounterStatusMmio(Arc::clone(&counter));
+
+    ctrl_mmio.write(0x08, 4, 0xABCD);
+    // Status frame should see the same value
+    assert_eq!(status_mmio.read(0x00, 4), 0xABCD);
+
+    // Write to status frame is ignored
+    status_mmio.write(0x00, 4, 0xFFFF);
+    assert_eq!(status_mmio.read(0x00, 4), 0xABCD); // unchanged
+}
+
+// -- SSE Timer tests --
+
+#[test]
+fn test_sse_timer_defaults() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    assert_eq!(mmio.read(0x00, 4), 0); // CNTPCT_LO
+    assert_eq!(mmio.read(0x04, 4), 0); // CNTPCT_HI
+    assert_eq!(mmio.read(0x10, 4), 0); // CNTFRQ
+    assert_eq!(mmio.read(0x20, 4), 0); // CNTP_CVAL_LO
+    assert_eq!(mmio.read(0x24, 4), 0); // CNTP_CVAL_HI
+    assert_eq!(mmio.read(0x28, 4), 0); // CNTP_TVAL
+    assert_eq!(mmio.read(0x2C, 4), 0); // CNTP_CTL
+    assert_eq!(mmio.read(0x40, 4), 0); // CNTP_AIVAL_LO
+    assert_eq!(mmio.read(0x44, 4), 0); // CNTP_AIVAL_HI
+    assert_eq!(mmio.read(0x48, 4), 0); // CNTP_AIVAL_RELOAD
+    assert_eq!(mmio.read(0x4C, 4), 0); // CNTP_AIVAL_CTL
+    assert_eq!(mmio.read(0x50, 4), 1); // CNTP_CFG
+}
+
+#[test]
+fn test_sse_timer_id_registers() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    assert_eq!(mmio.read(0xFD0, 4), 0x04); // PID4
+    assert_eq!(mmio.read(0xFE0, 4), 0xB7); // PID0
+    assert_eq!(mmio.read(0xFF0, 4), 0x0D); // CID0
+    assert_eq!(mmio.read(0xFFC, 4), 0xB1); // CID3
+}
+
+#[test]
+fn test_sse_timer_write_cntfrq() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    mmio.write(0x10, 4, 100_000_000);
+    assert_eq!(mmio.read(0x10, 4), 100_000_000);
+}
+
+#[test]
+fn test_sse_timer_write_cval() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    mmio.write(0x20, 4, 0x12345678); // CNTP_CVAL_LO
+    assert_eq!(mmio.read(0x20, 4), 0x12345678);
+
+    mmio.write(0x24, 4, 0x9ABC); // CNTP_CVAL_HI
+    assert_eq!(mmio.read(0x24, 4), 0x9ABC);
+}
+
+#[test]
+fn test_sse_timer_tval_reflects_cval_minus_counter() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let ctrl_mmio = SseCounterControlMmio(Arc::clone(&counter));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    // Enable counter and advance to 100
+    ctrl_mmio.write(0x00, 4, 1);
+    counter.tick(100_000); // At 1MHz, 100000ns = 100 ticks
+    assert_eq!(ctrl_mmio.read(0x08, 4), 100);
+
+    // Set cval to 200
+    mmio.write(0x20, 4, 200);
+    // TVAL = cval - counter = 200 - 100 = 100
+    assert_eq!(mmio.read(0x28, 4), 100);
+}
+
+#[test]
+fn test_sse_timer_irq_fires_when_counter_reaches_cval() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let ctrl_mmio = SseCounterControlMmio(Arc::clone(&counter));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+    let sink = Arc::new(TestIrqSink::new());
+    timer.connect_output(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    // Enable counter
+    ctrl_mmio.write(0x00, 4, 1);
+
+    // Set cval to 1000 and enable timer
+    mmio.write(0x20, 4, 1000);
+    mmio.write(0x2C, 4, 1); // CTL.ENABLE = 1
+
+    assert!(!sink.level());
+
+    // Advance counter past cval
+    counter.tick(2_000_000); // 2000 ticks (2ms at 1MHz)
+
+    // Timer tick checks condition
+    timer.tick();
+    assert!(sink.level());
+    assert_eq!(mmio.read(0x2C, 4) & 4, 4); // ISTATUS set
+}
+
+#[test]
+fn test_sse_timer_imask_blocks_irq() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let ctrl_mmio = SseCounterControlMmio(Arc::clone(&counter));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+    let sink = Arc::new(TestIrqSink::new());
+    timer.connect_output(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    // Enable with IMASK set
+    mmio.write(0x20, 4, 100);
+    mmio.write(0x2C, 4, 3); // ENABLE | IMASK
+    ctrl_mmio.write(0x00, 4, 1);
+    counter.tick(200_000);
+    timer.tick();
+
+    assert!(!sink.level(), "IRQ should be blocked when IMASK set");
+}
+
+#[test]
+fn test_sse_timer_autoinc_mode() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let ctrl_mmio = SseCounterControlMmio(Arc::clone(&counter));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+    let sink = Arc::new(TestIrqSink::new());
+    timer.connect_output(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    // Set reload and enable auto-inc
+    mmio.write(0x48, 4, 1000); // AIVAL_RELOAD
+    mmio.write(0x4C, 4, 1); // AIVAL_CTL.EN
+    mmio.write(0x2C, 4, 1); // CTL.ENABLE
+    ctrl_mmio.write(0x00, 4, 1);
+
+    // Advance counter
+    counter.tick(2_000_000); // past AIVAL
+    timer.tick();
+
+    // CLR should be set (auto-increment fired)
+    assert_eq!(mmio.read(0x4C, 4) & 2, 2);
+    assert!(sink.level());
+}
+
+#[test]
+fn test_sse_timer_aival_ctl_clr_write_zero_clears() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let ctrl_mmio = SseCounterControlMmio(Arc::clone(&counter));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    // Set reload and enable auto-inc
+    mmio.write(0x48, 4, 100);
+    mmio.write(0x4C, 4, 1); // EN
+    mmio.write(0x2C, 4, 1); // CTL.ENABLE
+    ctrl_mmio.write(0x00, 4, 1);
+
+    // Fire auto-increment
+    counter.tick(200_000);
+    timer.tick();
+    assert_eq!(mmio.read(0x4C, 4) & 2, 2); // CLR set
+
+    // Write 0 to CLR bit to clear
+    mmio.write(0x4C, 4, 1); // keep EN, clear CLR
+    assert_eq!(mmio.read(0x4C, 4) & 2, 0); // CLR cleared
+}
+
+#[test]
+fn test_sse_timer_tval_write_sets_cval() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let ctrl_mmio = SseCounterControlMmio(Arc::clone(&counter));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    ctrl_mmio.write(0x00, 4, 1);
+    counter.tick(100_000); // counter = 100
+
+    // Write TVAL = 500 → cval = counter + 500 = 600
+    mmio.write(0x28, 4, 500);
+    assert_eq!(mmio.read(0x20, 4), 600); // CNTP_CVAL_LO
+}
+
+#[test]
+fn test_sse_timer_reset_runtime() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    mmio.write(0x10, 4, 1234);
+    mmio.write(0x20, 4, 5678);
+    mmio.write(0x2C, 4, 1);
+
+    timer.reset_runtime();
+
+    assert_eq!(mmio.read(0x10, 4), 0);
+    assert_eq!(mmio.read(0x20, 4), 0);
+    assert_eq!(mmio.read(0x2C, 4), 0);
 }

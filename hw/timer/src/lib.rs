@@ -11,6 +11,10 @@
 //! callbacks; each callback calls `Ptimer::tick()`. For periodic
 //! timers the callback re-schedules itself.
 
+pub mod sifive_pwm;
+pub mod sse_counter;
+pub mod sse_timer;
+
 use std::sync::Arc;
 
 use machina_accel::timer::VirtualClock;

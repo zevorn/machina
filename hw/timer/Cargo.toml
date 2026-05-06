@@ -13,6 +13,8 @@ categories = ["emulators", "hardware-support"]
 machina-accel = { workspace = true }
 machina-core = { workspace = true }
 machina-hw-core = { workspace = true }
+machina-memory = { workspace = true }
+parking_lot = { workspace = true }
 
 [lints]
 workspace = true

@@ -10,6 +10,7 @@ keywords = ["riscv", "emulator", "misc"]
 categories = ["emulators", "hardware-support"]
 
 [dependencies]
+machina-accel = { workspace = true }
 machina-core = { workspace = true }
 machina-hw-core = { workspace = true }
 machina-memory = { workspace = true }

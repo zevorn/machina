@@ -59,6 +59,8 @@ mod hw_qdev;
 #[cfg(test)]
 mod hw_ref_machine;
 #[cfg(test)]
+mod hw_rtc;
+#[cfg(test)]
 mod hw_sd;
 #[cfg(test)]
 mod hw_ssi;
