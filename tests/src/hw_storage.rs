@@ -1,6 +1,7 @@
 use machina_hw_storage::{
     BlockBackend, BlockMedia, FileBackend, FlashMedia, MemBackend, StorageError,
 };
+use std::sync::Mutex;
 use tempfile::NamedTempFile;
 
 // -- StorageError tests --
@@ -30,6 +31,10 @@ fn test_storage_error_display() {
         "short I/O: expected 8 bytes, got 4"
     );
     assert_eq!(
+        format!("{}", StorageError::InvalidInput("bad".to_string())),
+        "bad"
+    );
+    assert_eq!(
         format!("{}", StorageError::Backend("boom".to_string())),
         "boom"
     );
@@ -39,6 +44,10 @@ fn test_storage_error_display() {
 fn test_storage_error_eq() {
     assert_eq!(StorageError::ReadOnly, StorageError::ReadOnly);
     assert_ne!(StorageError::ReadOnly, StorageError::Overflow);
+    assert_ne!(
+        StorageError::ReadOnly,
+        StorageError::InvalidInput("".to_string())
+    );
     assert_eq!(
         StorageError::ShortIO {
             expected: 4,
@@ -131,6 +140,33 @@ fn test_mem_backend_flush() {
     assert!(backend.flush().is_ok());
 }
 
+// -- MemBackend empty write regression --
+
+#[test]
+fn test_mem_backend_empty_write_is_noop() {
+    let backend = MemBackend::new(vec![0xCC; 16], false);
+    let sz_before = backend.size();
+    let n = backend.write(0, &[]).unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(backend.size(), sz_before);
+    // Data must be unchanged
+    let mut buf = [0u8; 16];
+    backend.read_exact(0, &mut buf).unwrap();
+    assert_eq!(buf, [0xCC; 16]);
+}
+
+#[test]
+fn test_mem_backend_huge_offset_returns_error() {
+    let backend = MemBackend::new(vec![0; 4], false);
+    // 1 TiB offset — this must not panic with allocation failure
+    let offset = 1u64 << 40;
+    let err = backend.write(offset, &[0xAA; 4096]).unwrap_err();
+    assert!(
+        matches!(err, StorageError::Overflow | StorageError::Backend(_)),
+        "expected Overflow or Backend, got {err}"
+    );
+}
+
 // -- Exact read/write tests --
 
 #[test]
@@ -145,7 +181,6 @@ fn test_read_exact_success() {
 fn test_read_exact_out_of_range() {
     let backend = MemBackend::new(vec![0; 16], false);
     let mut buf = [0u8; 8];
-    // offset past end of backend
     let err = backend.read_exact(20, &mut buf).unwrap_err();
     assert_eq!(err, StorageError::OutOfRange);
 }
@@ -154,7 +189,6 @@ fn test_read_exact_out_of_range() {
 fn test_read_exact_span_out_of_range() {
     let backend = MemBackend::new(vec![0; 16], false);
     let mut buf = [0u8; 8];
-    // offset within range but offset+len exceeds size
     let err = backend.read_exact(12, &mut buf).unwrap_err();
     assert_eq!(err, StorageError::OutOfRange);
 }
@@ -163,7 +197,6 @@ fn test_read_exact_span_out_of_range() {
 fn test_read_exact_overflow() {
     let backend = MemBackend::new(vec![0; 16], false);
     let mut buf = [0u8; 8];
-    // offset + len wraps around u64
     let err = backend.read_exact(u64::MAX - 3, &mut buf).unwrap_err();
     assert_eq!(err, StorageError::Overflow);
 }
@@ -188,7 +221,6 @@ fn test_write_exact_readonly() {
 #[test]
 fn test_write_exact_overflow() {
     let backend = MemBackend::new(vec![0; 16], false);
-    // offset + len wraps around u64
     let err = backend
         .write_exact(u64::MAX - 1, &[0xAA, 0xBB])
         .unwrap_err();
@@ -201,7 +233,6 @@ fn test_write_exact_overflow() {
 fn test_mem_backend_read_overflow_usiz() {
     let backend = MemBackend::new(vec![0; 4], false);
     let mut buf = [0u8; 4];
-    // On 64-bit, u64::MAX is a valid usize; past-end returns Ok(0)
     let n = backend.read(u64::MAX, &mut buf).unwrap();
     assert_eq!(n, 0);
 }
@@ -209,10 +240,7 @@ fn test_mem_backend_read_overflow_usiz() {
 #[test]
 fn test_mem_backend_write_overflow_usiz() {
     let backend = MemBackend::new(vec![0; 4], false);
-    // u64::MAX offset; on 64-bit usize == u64, so no truncation;
-    // but u64::MAX as usize + buf.len() wraps, so checked_add fails
     let result = backend.write(u64::MAX, &[0xAA]);
-    // u64::MAX as usize + 1 wraps → checked_add returns None → error
     assert!(result.is_err());
 }
 
@@ -281,6 +309,24 @@ fn test_file_backend_size_after_write() {
     assert_eq!(backend.size(), 5);
 }
 
+// -- FileBackend empty write regression --
+
+#[test]
+fn test_file_backend_empty_write_preserves_size() {
+    let tmp = NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), &[0xAA; 8]).unwrap();
+
+    let backend = FileBackend::open(tmp.path(), false).unwrap();
+    assert_eq!(backend.size(), 8);
+
+    // Empty write at a sparse offset must not change cached or real size
+    let n = backend.write(1u64 << 40, &[]).unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(backend.size(), 8);
+    // Real file metadata must still be 8
+    assert_eq!(std::fs::metadata(tmp.path()).unwrap().len(), 8);
+}
+
 // -- File persistence round-trip --
 
 #[test]
@@ -288,7 +334,6 @@ fn test_file_backend_persistence_round_trip() {
     let tmp = NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
 
-    // Write data through one backend instance
     {
         let backend = FileBackend::open(&path, false).unwrap();
         backend.write_exact(0, &[0x10, 0x20, 0x30, 0x40]).unwrap();
@@ -296,7 +341,6 @@ fn test_file_backend_persistence_round_trip() {
         backend.flush().unwrap();
     }
 
-    // Re-open and verify
     {
         let backend = FileBackend::open(&path, false).unwrap();
         assert_eq!(backend.size(), 6);
@@ -329,11 +373,65 @@ fn test_file_backend_write_exact_readonly_rejection() {
     assert_eq!(err, StorageError::ReadOnly);
 }
 
+// -- BlockMedia geometry validation --
+
+#[test]
+fn test_block_media_rejects_zero_block_size() {
+    let backend = MemBackend::new(vec![0; 1024], false);
+    match BlockMedia::new(backend, 0) {
+        Err(e @ StorageError::InvalidInput(_)) => {
+            assert!(format!("{e}").contains("below minimum 512"));
+        }
+        Ok(_) => panic!("expected InvalidInput, got Ok"),
+        Err(other) => panic!("expected InvalidInput, got {other}"),
+    }
+}
+
+#[test]
+fn test_block_media_rejects_small_block_size() {
+    let backend = MemBackend::new(vec![0; 1024], false);
+    match BlockMedia::new(backend, 256) {
+        Err(e @ StorageError::InvalidInput(_)) => {
+            assert!(format!("{e}").contains("below minimum 512"));
+        }
+        Ok(_) => panic!("expected InvalidInput, got Ok"),
+        Err(other) => panic!("expected InvalidInput, got {other}"),
+    }
+}
+
+#[test]
+fn test_block_media_rejects_non_power_of_two() {
+    let backend = MemBackend::new(vec![0; 1024], false);
+    match BlockMedia::new(backend, 768) {
+        Err(e @ StorageError::InvalidInput(_)) => {
+            assert!(format!("{e}").contains("not a power of two"));
+        }
+        Ok(_) => panic!("expected InvalidInput, got Ok"),
+        Err(other) => panic!("expected InvalidInput, got {other}"),
+    }
+}
+
+#[test]
+fn test_block_media_accepts_512() {
+    let backend = MemBackend::new(vec![0; 1024], false);
+    let media = BlockMedia::new(backend, 512).unwrap();
+    assert_eq!(media.block_size(), 512);
+    assert_eq!(media.sector_count(), 2);
+}
+
+#[test]
+fn test_block_media_accepts_4096() {
+    let backend = MemBackend::new(vec![0; 8192], false);
+    let media = BlockMedia::new(backend, 4096).unwrap();
+    assert_eq!(media.block_size(), 4096);
+    assert_eq!(media.sector_count(), 2);
+}
+
 // -- BlockMedia tests --
 
 fn make_block_media(data: Vec<u8>) -> BlockMedia<MemBackend> {
     let backend = MemBackend::new(data, false);
-    BlockMedia::new(backend, 512)
+    BlockMedia::new(backend, 512).unwrap()
 }
 
 #[test]
@@ -350,14 +448,13 @@ fn test_block_media_read_write_one_sector() {
     media.read_block(0, &mut buf).unwrap();
     assert_eq!(buf, sector_data);
 
-    // Sector 1 should still be zero
     media.read_block(1, &mut buf).unwrap();
     assert_eq!(buf, vec![0u8; 512]);
 }
 
 #[test]
 fn test_block_media_read_block_out_of_range() {
-    let media = make_block_media(vec![0; 1024]); // 2 sectors
+    let media = make_block_media(vec![0; 1024]);
     let mut buf = vec![0u8; 512];
     let err = media.read_block(2, &mut buf).unwrap_err();
     assert_eq!(err, StorageError::OutOfRange);
@@ -373,7 +470,6 @@ fn test_block_media_write_block_out_of_range() {
 #[test]
 fn test_block_media_buf_size_mismatch() {
     let media = make_block_media(vec![0; 1024]);
-    // Buffer smaller than block size
     let mut buf = vec![0u8; 256];
     let err = media.read_block(0, &mut buf).unwrap_err();
     assert_eq!(
@@ -396,15 +492,14 @@ fn test_block_media_buf_size_mismatch() {
 
 #[test]
 fn test_block_media_multi_sector_read_write() {
-    let media = make_block_media(vec![0; 2048]); // 4 sectors
-    let data = vec![0xCC; 1024]; // 2 sectors worth
+    let media = make_block_media(vec![0; 2048]);
+    let data = vec![0xCC; 1024];
     media.write_blocks(1, &data).unwrap();
 
     let mut buf = vec![0u8; 1024];
     media.read_blocks(1, &mut buf).unwrap();
     assert_eq!(buf, data);
 
-    // Sector 0 and 3 should still be zero
     let mut buf512 = vec![0u8; 512];
     media.read_block(0, &mut buf512).unwrap();
     assert_eq!(buf512, vec![0u8; 512]);
@@ -415,7 +510,7 @@ fn test_block_media_multi_sector_read_write() {
 #[test]
 fn test_block_media_multi_sector_unaligned_buf() {
     let media = make_block_media(vec![0; 4096]);
-    let buf = vec![0u8; 700]; // not a multiple of 512
+    let buf = vec![0u8; 700];
     let err = media.read_blocks(0, &mut buf.clone()).unwrap_err();
     assert!(matches!(err, StorageError::ShortIO { .. }));
 
@@ -432,7 +527,6 @@ fn test_block_media_sector_count() {
 
 #[test]
 fn test_block_media_sector_overflow() {
-    // sector * block_size overflows u64
     let media = make_block_media(vec![0; 2048]);
     let err = media
         .read_block(u64::MAX / 512 + 1, &mut vec![0u8; 512])
@@ -440,11 +534,34 @@ fn test_block_media_sector_overflow() {
     assert_eq!(err, StorageError::Overflow);
 }
 
+// -- FlashMedia geometry validation --
+
+#[test]
+fn test_flash_media_rejects_zero_erase_block_size() {
+    let backend = MemBackend::new(vec![0xFF; 4096], false);
+    match FlashMedia::new(backend, 0) {
+        Err(e @ StorageError::InvalidInput(_)) => {
+            assert!(
+                format!("{e}").contains("erase_block_size must be non-zero",)
+            );
+        }
+        Ok(_) => panic!("expected InvalidInput, got Ok"),
+        Err(other) => panic!("expected InvalidInput, got {other}"),
+    }
+}
+
+#[test]
+fn test_flash_media_accepts_valid_erase_block_size() {
+    let backend = MemBackend::new(vec![0xFF; 4096], false);
+    let flash = FlashMedia::new(backend, 4096).unwrap();
+    assert_eq!(flash.erase_block_size(), 4096);
+}
+
 // -- FlashMedia tests --
 
 fn make_flash(data: Vec<u8>) -> FlashMedia<MemBackend> {
     let backend = MemBackend::new(data, false);
-    FlashMedia::new(backend, 4096)
+    FlashMedia::new(backend, 4096).unwrap()
 }
 
 #[test]
@@ -465,7 +582,6 @@ fn test_flash_media_read_out_of_range() {
 
 #[test]
 fn test_flash_media_program_fresh() {
-    // Programming onto an erased (0xFF) region
     let flash = make_flash(vec![0xFF; 128]);
     flash.program(0, &[0x0F, 0xF0, 0x55, 0xAA]).unwrap();
 
@@ -476,29 +592,28 @@ fn test_flash_media_program_fresh() {
 
 #[test]
 fn test_flash_media_program_modifies_existing() {
-    // Start with 0xF0, program 0x0F → result 0x00
     let flash = make_flash(vec![0xF0; 128]);
     flash.program(0, &[0x0F]).unwrap();
 
     let mut buf = [0u8; 1];
     flash.read(0, &mut buf).unwrap();
-    assert_eq!(buf[0], 0x00); // 0xF0 & 0x0F = 0x00
+    assert_eq!(buf[0], 0x00);
 }
 
 #[test]
 fn test_flash_media_program_preserves_ones() {
-    // Start with 0x00, program 0xFF → preserves existing (0x00)
     let flash = make_flash(vec![0x00; 128]);
     flash.program(0, &[0xFF]).unwrap();
 
     let mut buf = [0u8; 1];
     flash.read(0, &mut buf).unwrap();
-    assert_eq!(buf[0], 0x00); // 0x00 & 0xFF = 0x00 (no change)
+    assert_eq!(buf[0], 0x00);
 }
 
 #[test]
 fn test_flash_media_program_readonly() {
     let flash = FlashMedia::new(MemBackend::new(vec![0xFF; 128], false), 4096)
+        .unwrap()
         .with_readonly(true);
     let err = flash.program(0, &[0x00]).unwrap_err();
     assert_eq!(err, StorageError::ReadOnly);
@@ -521,20 +636,17 @@ fn test_flash_media_program_overflow() {
 #[test]
 fn test_flash_media_program_empty_buf() {
     let flash = make_flash(vec![0xFF; 16]);
-    flash.program(0, &[]).unwrap(); // no-op
+    flash.program(0, &[]).unwrap();
 }
 
 #[test]
 fn test_flash_media_erase_region() {
-    let flash = make_flash(vec![0x00; 16384]); // 4 erase blocks of 4096
-                                               // Erase the second block
+    let flash = make_flash(vec![0x00; 16384]);
     flash.erase(4096, 4096).unwrap();
 
     let mut buf = [0u8; 4];
-    // First block still 0x00
     flash.read(0, &mut buf).unwrap();
     assert_eq!(buf, [0x00, 0x00, 0x00, 0x00]);
-    // Second block now 0xFF
     flash.read(4096, &mut buf).unwrap();
     assert_eq!(buf, [0xFF, 0xFF, 0xFF, 0xFF]);
 }
@@ -555,7 +667,7 @@ fn test_flash_media_erase_unaligned_len() {
 
 #[test]
 fn test_flash_media_erase_out_of_range() {
-    let flash = make_flash(vec![0x00; 8192]); // 2 erase blocks
+    let flash = make_flash(vec![0x00; 8192]);
     let err = flash.erase(8192, 4096).unwrap_err();
     assert_eq!(err, StorageError::OutOfRange);
 }
@@ -563,6 +675,7 @@ fn test_flash_media_erase_out_of_range() {
 #[test]
 fn test_flash_media_erase_readonly() {
     let flash = FlashMedia::new(MemBackend::new(vec![0x00; 4096], false), 4096)
+        .unwrap()
         .with_readonly(true);
     let err = flash.erase(0, 4096).unwrap_err();
     assert_eq!(err, StorageError::ReadOnly);
@@ -581,6 +694,7 @@ fn test_flash_media_erase_all() {
 #[test]
 fn test_flash_media_erase_all_readonly() {
     let flash = FlashMedia::new(MemBackend::new(vec![0x00; 4096], false), 4096)
+        .unwrap()
         .with_readonly(true);
     let err = flash.erase_all().unwrap_err();
     assert_eq!(err, StorageError::ReadOnly);
@@ -589,18 +703,19 @@ fn test_flash_media_erase_all_readonly() {
 #[test]
 fn test_flash_media_erase_all_empty() {
     let flash = make_flash(vec![]);
-    flash.erase_all().unwrap(); // no-op, should not panic
+    flash.erase_all().unwrap();
 }
 
 #[test]
 fn test_flash_media_erase_value_custom() {
     let flash = FlashMedia::new(MemBackend::new(vec![0x00; 4096], false), 4096)
+        .unwrap()
         .with_erase_value(0x00);
     flash.erase_all().unwrap();
 
     let mut buf = [0u8; 4];
     flash.read(0, &mut buf).unwrap();
-    assert_eq!(buf, [0x00, 0x00, 0x00, 0x00]); // erase value is 0x00
+    assert_eq!(buf, [0x00, 0x00, 0x00, 0x00]);
 }
 
 #[test]
@@ -612,39 +727,132 @@ fn test_flash_media_erase_value_default() {
 
 #[test]
 fn test_flash_media_program_then_erase_round_trip() {
-    // Full lifecycle: erase → program → read → erase → read
     let flash = make_flash(vec![0xFF; 4096]);
 
-    // Program some data
     let data: Vec<u8> = (0..128).map(|i| i as u8).collect();
     flash.program(0, &data).unwrap();
 
-    // Verify programmed data
     let mut buf = vec![0u8; 128];
     flash.read(0, &mut buf).unwrap();
     assert_eq!(buf, data);
 
-    // Erase the block
     flash.erase(0, 4096).unwrap();
 
-    // Verify erased
     flash.read(0, &mut buf).unwrap();
     assert_eq!(buf, vec![0xFF; 128]);
 }
 
 #[test]
 fn test_flash_media_multiple_programs() {
-    // Two consecutive programs on the same region
     let flash = make_flash(vec![0xFF; 128]);
 
-    // First program: write 0xF0 → 0xFF & 0xF0 = 0xF0
     flash.program(0, &[0xF0]).unwrap();
-    // Second program: write 0x0F → 0xF0 & 0x0F = 0x00
     flash.program(0, &[0x0F]).unwrap();
 
     let mut buf = [0u8; 1];
     flash.read(0, &mut buf).unwrap();
     assert_eq!(buf[0], 0x00);
+}
+
+#[test]
+fn test_flash_media_erase_chunked_large_span() {
+    // 256 KiB — larger than ERASE_CHUNK_BYTES (64 KiB) to
+    // prove erase uses bounded writes.
+    let flash = make_flash(vec![0x00; 256 * 1024]);
+    flash.erase(0, 256 * 1024).unwrap();
+
+    let mut buf = vec![0u8; 256 * 1024];
+    flash.read(0, &mut buf).unwrap();
+    assert_eq!(buf, vec![0xFF; 256 * 1024]);
+}
+
+// -- MockBackend for ShortIO testing --
+
+/// A backend that reports a large `size()` but performs partial
+/// transfers, forcing `read_exact` / `write_exact` to return
+/// `StorageError::ShortIO`.
+struct MockBackend {
+    reported_size: u64,
+    read_limit: usize,
+    write_limit: usize,
+    data: Mutex<Vec<u8>>,
+}
+
+impl MockBackend {
+    fn new(reported_size: u64, read_limit: usize, write_limit: usize) -> Self {
+        Self {
+            reported_size,
+            read_limit,
+            write_limit,
+            data: Mutex::new(vec![0u8; reported_size as usize]),
+        }
+    }
+}
+
+impl BlockBackend for MockBackend {
+    fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StorageError> {
+        let data = self.data.lock().unwrap();
+        let start = offset as usize;
+        if start >= data.len() {
+            return Ok(0);
+        }
+        let max = buf.len().min(self.read_limit);
+        let n = max.min(data.len() - start);
+        buf[..n].copy_from_slice(&data[start..start + n]);
+        Ok(n)
+    }
+
+    fn write(&self, offset: u64, buf: &[u8]) -> Result<usize, StorageError> {
+        let mut data = self.data.lock().unwrap();
+        let start = offset as usize;
+        if start >= data.len() {
+            return Ok(0);
+        }
+        let max = buf.len().min(self.write_limit);
+        let n = max.min(data.len() - start);
+        data[start..start + n].copy_from_slice(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.reported_size
+    }
+
+    fn readonly(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn test_read_exact_short_io() {
+    let backend = MockBackend::new(1024, 64, 1024);
+    let mut buf = vec![0u8; 256];
+    let err = backend.read_exact(0, &mut buf).unwrap_err();
+    assert_eq!(
+        err,
+        StorageError::ShortIO {
+            expected: 256,
+            actual: 64
+        }
+    );
+}
+
+#[test]
+fn test_write_exact_short_io() {
+    let backend = MockBackend::new(1024, 1024, 128);
+    let data = vec![0xAA; 512];
+    let err = backend.write_exact(0, &data).unwrap_err();
+    assert_eq!(
+        err,
+        StorageError::ShortIO {
+            expected: 512,
+            actual: 128
+        }
+    );
 }
 
 // -- BlockMedia on FileBackend tests --
@@ -659,8 +867,6 @@ fn test_block_media_file_round_trip() {
     data[511] = 0xAD;
 
     {
-        // Pre-allocate the file to the expected size via the raw
-        // backend since BlockMedia rejects writes past capacity.
         let fb = FileBackend::open(&path, false).unwrap();
         fb.write_exact(0, &vec![0u8; 512]).unwrap();
         fb.flush().unwrap();
@@ -668,14 +874,14 @@ fn test_block_media_file_round_trip() {
 
     {
         let fb = FileBackend::open(&path, false).unwrap();
-        let media = BlockMedia::new(fb, 512);
+        let media = BlockMedia::new(fb, 512).unwrap();
         media.write_block(0, &data).unwrap();
         media.backend().flush().unwrap();
     }
 
     {
         let fb = FileBackend::open(&path, false).unwrap();
-        let media = BlockMedia::new(fb, 512);
+        let media = BlockMedia::new(fb, 512).unwrap();
         assert_eq!(media.sector_count(), 1);
         let mut buf = vec![0u8; 512];
         media.read_block(0, &mut buf).unwrap();

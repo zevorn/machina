@@ -29,6 +29,8 @@ pub enum StorageError {
         /// Number of bytes actually transferred.
         actual: usize,
     },
+    /// A caller-supplied argument is invalid (e.g. zero block size).
+    InvalidInput(String),
     /// A backend-specific I/O failure.
     Backend(String),
 }
@@ -42,6 +44,7 @@ impl fmt::Display for StorageError {
             Self::ShortIO { expected, actual } => {
                 write!(f, "short I/O: expected {expected} bytes, got {actual}")
             }
+            Self::InvalidInput(msg) => f.write_str(msg),
             Self::Backend(msg) => f.write_str(msg),
         }
     }
@@ -205,6 +208,9 @@ impl BlockBackend for FileBackend {
         if self.readonly {
             return Err(StorageError::ReadOnly);
         }
+        if buf.is_empty() {
+            return Ok(0);
+        }
         let end = offset
             .checked_add(buf.len() as u64)
             .ok_or(StorageError::Overflow)?;
@@ -303,6 +309,9 @@ impl BlockBackend for MemBackend {
         if self.readonly {
             return Err(StorageError::ReadOnly);
         }
+        if buf.is_empty() {
+            return Ok(0);
+        }
         let mut data = self
             .data
             .lock()
@@ -313,6 +322,10 @@ impl BlockBackend for MemBackend {
         }
         let end = start.checked_add(buf.len()).ok_or(StorageError::Overflow)?;
         if end > data.len() {
+            let extra = end - data.len();
+            data.try_reserve(extra).map_err(|e| {
+                StorageError::Backend(format!("allocation failed: {e}"))
+            })?;
             data.resize(end, 0);
         }
         data[start..end].copy_from_slice(buf);
@@ -349,12 +362,21 @@ impl<B: BlockBackend> BlockMedia<B> {
     /// Wrap `backend` as a block device with the given sector size.
     ///
     /// `block_size` must be a power of two and at least 512.
-    #[must_use]
-    pub fn new(backend: B, block_size: u32) -> Self {
-        Self {
+    pub fn new(backend: B, block_size: u32) -> Result<Self, StorageError> {
+        if block_size < 512 {
+            return Err(StorageError::InvalidInput(format!(
+                "block_size {block_size} is below minimum 512"
+            )));
+        }
+        if !block_size.is_power_of_two() {
+            return Err(StorageError::InvalidInput(format!(
+                "block_size {block_size} is not a power of two"
+            )));
+        }
+        Ok(Self {
             backend,
             block_size,
-        }
+        })
     }
 
     /// Return the sector size in bytes.
@@ -491,19 +513,30 @@ pub struct FlashMedia<B: BlockBackend> {
     readonly: bool,
 }
 
+/// Maximum chunk size for erase operations to avoid unbounded
+/// allocation on large flash images.
+const ERASE_CHUNK_BYTES: usize = 64 * 1024;
+
 impl<B: BlockBackend> FlashMedia<B> {
     /// Wrap `backend` as NOR flash.
     ///
-    /// `erase_block_size` is the minimum erase unit in bytes.
-    /// Default `erase_value` is `0xFF`.
-    #[must_use]
-    pub fn new(backend: B, erase_block_size: u32) -> Self {
-        Self {
+    /// `erase_block_size` is the minimum erase unit in bytes and must
+    /// be non-zero. Default `erase_value` is `0xFF`.
+    pub fn new(
+        backend: B,
+        erase_block_size: u32,
+    ) -> Result<Self, StorageError> {
+        if erase_block_size == 0 {
+            return Err(StorageError::InvalidInput(
+                "erase_block_size must be non-zero".to_string(),
+            ));
+        }
+        Ok(Self {
             backend,
             erase_block_size,
             erase_value: 0xFF,
             readonly: false,
-        }
+        })
     }
 
     /// Set the erase value (default `0xFF`).
@@ -580,7 +613,8 @@ impl<B: BlockBackend> FlashMedia<B> {
     /// Erase `len` bytes starting at `offset`.
     ///
     /// Both `offset` and `len` must be multiples of
-    /// `erase_block_size`.
+    /// `erase_block_size`. Writes through bounded chunks to avoid
+    /// allocating for the full span.
     pub fn erase(&self, offset: u64, len: u64) -> Result<(), StorageError> {
         if self.readonly {
             return Err(StorageError::ReadOnly);
@@ -596,21 +630,37 @@ impl<B: BlockBackend> FlashMedia<B> {
         if offset > size || end > size {
             return Err(StorageError::OutOfRange);
         }
-        let fill = vec![self.erase_value; len as usize];
-        self.backend.write_exact(offset, &fill)
+        self.erase_chunked(offset, len)
     }
 
     /// Erase the entire backend to the erase value.
+    ///
+    /// Uses the same chunked write path as [`erase`] but does not
+    /// require the total backend size to be erase-block-aligned.
     pub fn erase_all(&self) -> Result<(), StorageError> {
-        if self.readonly {
-            return Err(StorageError::ReadOnly);
-        }
         let size = self.backend.size();
         if size == 0 {
             return Ok(());
         }
-        let fill = vec![self.erase_value; size as usize];
-        self.backend.write_exact(0, &fill)
+        if self.readonly {
+            return Err(StorageError::ReadOnly);
+        }
+        self.erase_chunked(0, size)
+    }
+
+    /// Write `self.erase_value` across `[offset, offset+len)` using
+    /// a bounded fill buffer.
+    fn erase_chunked(&self, offset: u64, len: u64) -> Result<(), StorageError> {
+        let chunk = vec![self.erase_value; ERASE_CHUNK_BYTES];
+        let mut pos = offset;
+        let mut remaining = len as usize;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len());
+            self.backend.write_exact(pos, &chunk[..n])?;
+            pos += n as u64;
+            remaining -= n;
+        }
+        Ok(())
     }
 
     /// Access the inner backend.
