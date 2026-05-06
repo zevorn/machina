@@ -242,15 +242,13 @@ impl SiFiveSpi {
         for l in self.cs_lines.lock().iter().flatten() {
             l.lower();
         }
-        // Deassert all CS lines: drive each line to its default
-        // (idle) level per CSDEF. CSDEF bit = 1 means active-high,
-        // so idle = low = false; CSDEF bit = 0 means active-low,
-        // so idle = high = true.
+        // Deassert all CS lines: CSDEF is the inactive/default
+        // physical level of each CS pin.
         if let Some(ref bus) = *self.ssi_bus.lock() {
             let regs = self.regs.borrow();
             for i in 0..self.num_cs {
                 let csdef_bit = (regs.regs[R_CSDEF] >> i) & 1;
-                let default_level = csdef_bit == 0;
+                let default_level = csdef_bit != 0;
                 bus.set_cs(i as u8, default_level);
             }
         }
@@ -262,18 +260,19 @@ impl SiFiveSpi {
         let ssi = self.ssi_bus.lock();
         for i in 0..self.num_cs as usize {
             let csdef_bit = (regs.regs[R_CSDEF] >> i) & 1;
-            // CSDEF=1 → active-high → assert=true,  idle=false
-            // CSDEF=0 → active-low  → assert=false, idle=true
+            // CSDEF is the inactive/default level.
+            // default_level = bit(CSDEF, cs) != 0
+            // assert_level  = !default_level
             let level = match regs.regs[R_CSMODE] {
-                0 /* AUTO */ => csdef_bit == 0, // idle = deasserted
+                0 /* AUTO */ => csdef_bit != 0, // idle = deasserted
                 2 /* HOLD */ => {
                     if i == regs.regs[R_CSID] as usize {
-                        csdef_bit != 0 // selected = asserted
+                        csdef_bit == 0 // selected = asserted
                     } else {
-                        csdef_bit == 0 // idle = deasserted
+                        csdef_bit != 0 // idle = deasserted
                     }
                 }
-                _ => csdef_bit == 0, /* OFF or invalid: idle */
+                _ => csdef_bit != 0, /* OFF or invalid: idle */
             };
             if i < cs_lines.len() {
                 if let Some(ref line) = cs_lines[i] {
@@ -310,16 +309,16 @@ impl SiFiveSpi {
         let mut regs = self.regs.borrow();
         let auto_mode = regs.regs[R_CSMODE] == 0;
         let cs_id = regs.regs[R_CSID] as u8;
-        let csdef_assert = if auto_mode {
-            (regs.regs[R_CSDEF] >> cs_id) & 1 != 0
-        } else {
-            false
-        };
+        // CSDEF is the inactive/default level.
+        // assert_level = !bit(CSDEF, cs_id).
+        let csdef_bit = (regs.regs[R_CSDEF] >> cs_id) & 1 != 0;
+        let assert_level = auto_mode && !csdef_bit;
+        let default_level = csdef_bit;
         while !regs.tx_fifo.is_empty() {
             let tx = regs.tx_fifo.pop();
             if auto_mode {
                 if let Some(bus) = ssi {
-                    bus.set_cs(cs_id, csdef_assert);
+                    bus.set_cs(cs_id, assert_level);
                 }
             }
             let rx = if let Some(bus) = ssi {
@@ -329,7 +328,7 @@ impl SiFiveSpi {
             };
             if auto_mode {
                 if let Some(bus) = ssi {
-                    bus.set_cs(cs_id, !csdef_assert);
+                    bus.set_cs(cs_id, default_level);
                 }
             }
             if !regs.rx_fifo.is_full() && regs.regs[R_FMT] & FMT_DIR == 0 {

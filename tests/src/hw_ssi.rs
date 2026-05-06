@@ -721,27 +721,32 @@ fn test_sifive_spi_auto_mode_cs_assertion() {
 
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    // Reset defaults: CSMODE=AUTO(0), CSDEF=1, CSID=0
+    // CsspySlave is active-high. CSDEF=0 (idle low) makes
+    // assert_level = true (high) → selects the slave.
+    // This write also calls update_cs(), producing a CS call.
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (idle low = active-high)
+    let cs_calls_before = slave.cs_calls().len();
+
     // In AUTO mode, writing TXDATA asserts CS before transfer
     // and deasserts after.
     mmio.write(0x48, 4, 0x42); // TXDATA
 
     let rx = mmio.read(0x4C, 4);
-    // Slave returns val ^ 0x5A, not 0xFF
     assert_eq!(rx, 0x42 ^ 0x5A);
 
-    // Verify CS was asserted then deasserted
+    // Verify the transfer produced exactly 2 CS calls
     let calls = slave.cs_calls();
-    assert_eq!(calls.len(), 2);
-    assert!(calls[0]); // assert (CSDEF=1 → active-high → CS true = selected)
-    assert!(!calls[1]); // deassert
-                        // CS is now deasserted after the transfer
+    let new_calls = &calls[cs_calls_before..];
+    assert_eq!(new_calls.len(), 2);
+    assert!(new_calls[0]); // assert (true = high) for active-high
+    assert!(!new_calls[1]); // deassert (false = low) for active-high
     assert!(!slave.selected());
 }
 
 #[test]
 fn test_sifive_spi_active_low_cs_auto_mode() {
-    // Active-low slave with CSDEF=0: CS low = selected in AUTO mode
+    // Active-low slave with CSDEF=1 (reset default): idle high,
+    // assert low. AUTO mode toggles CS: assert=false, deassert=true.
     let bus = Arc::new(SpiBus::new());
 
     struct ActiveLowEchoSlave {
@@ -779,10 +784,8 @@ fn test_sifive_spi_active_low_cs_auto_mode() {
     spi.connect_ssi_bus(Arc::clone(&bus));
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    // CSDEF=0 (bit 0 = 0): active-low → CS low means selected.
-    // This write now calls update_cs() which drives default_level
-    // (true for CSDEF=0, deasserted idle state in AUTO mode).
-    mmio.write(0x14, 4, 0x00); // CSDEF=0
+    // CSDEF=1 (reset default): idle high, active-low
+    // No explicit CSDEF write needed — it's the reset value.
 
     let cs_calls_before = slave.cs_calls.lock().unwrap().len();
 
@@ -790,10 +793,9 @@ fn test_sifive_spi_active_low_cs_auto_mode() {
     mmio.write(0x48, 4, 0x7F);
     let rx = mmio.read(0x4C, 4);
 
-    // CSDEF=0, AUTO mode: csdef_assert = (0 & 1) != 0 = false
-    // Before transfer: set_cs(0, false) → active-low selected
-    // After transfer: set_cs(0, true) → active-low deselected
-    // With slave selected, returns val ^ 0x3C
+    // CSDEF=1, AUTO: assert_level = !bit(CSDEF,0) = false
+    // assert=false → active-low selected → slave responds
+    // deassert=true → deselected
     assert_eq!(rx, 0x7F ^ 0x3C);
 
     let calls = slave.cs_calls.lock().unwrap().clone();
@@ -814,7 +816,9 @@ fn test_sifive_spi_hold_mode_cs_persistent() {
     spi.connect_ssi_bus(Arc::clone(&bus));
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    // Switch to HOLD mode (CSMODE=2)
+    // CsspySlave is active-high. CSDEF=0 (idle low) makes
+    // assert_level = true (high) → selects the slave in HOLD.
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (idle low = active-high)
     mmio.write(0x18, 4, 2); // CSMODE=HOLD
 
     // In HOLD mode, update_cs() asserts CS persistently
@@ -843,14 +847,15 @@ fn test_sifive_spi_reset_deasserts_cs() {
     spi.connect_ssi_bus(Arc::clone(&bus));
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    // Set HOLD mode → CS asserted
+    // CsspySlave is active-high. CSDEF=0 (idle low) →
+    // assert_level=true selects in HOLD; reset drives
+    // default_level=false which deasserts.
+    mmio.write(0x14, 4, 0x00); // CSDEF=0
     mmio.write(0x18, 4, 2); // CSMODE=HOLD
     assert!(slave.selected());
 
     // Reset → CS must deassert
     spi.reset_runtime();
-    // After reset, CSMODE=AUTO(0), CSDEF=1 → CS=high (asserted for
-    // active-high slaves but we verify the cs transition was called)
     assert!(slave.cs_calls().len() > 0);
 }
 
@@ -983,9 +988,10 @@ impl SpiSlave for ActiveLowCsSpy {
 
 #[test]
 fn test_sifive_spi_active_low_off_deasserts() {
-    // CSDEF=0 (active-low), OFF mode: CS must be deasserted (high/true).
-    // With hard-coded false in update_cs() OFF path, an active-low
-    // slave would see CS=false=selected.
+    // CSDEF=1 (reset default = idle high), OFF mode:
+    // CS must be deasserted (default_level = high/true).
+    // Active-low slave is selected by CS=false, so high=true
+    // must not select it.
     let bus = Arc::new(SpiBus::new());
     let slave = ActiveLowCsSpy::new();
     bus.attach(slave.clone()).unwrap();
@@ -994,21 +1000,22 @@ fn test_sifive_spi_active_low_off_deasserts() {
     spi.connect_ssi_bus(Arc::clone(&bus));
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
+    // CSDEF=1 (reset default) — idle high, active-low
     mmio.write(0x18, 4, 3); // CSMODE=OFF
 
-    // For CSDEF=0: default_level = true (high) = deasserted
-    // Active-low slave: CS=true → logically deselected
+    // default_level = bit(CSDEF,0) != 0 = true (high)
+    // Active-low slave: CS=true → deselected
     assert!(
         !slave.selected(),
-        "active-low slave must be deselected in OFF mode"
+        "active-low slave must be deselected in OFF mode with CSDEF=1"
     );
 }
 
 #[test]
 fn test_sifive_spi_active_low_hold_persists_and_off_deasserts() {
-    // CSDEF=0 (active-low), HOLD mode: selected CS stays asserted (low).
-    // Switch to OFF: CS must deassert (high).
+    // CSDEF=1 (idle high), HOLD mode: selected CS stays asserted
+    // (assert_level = false = low). Switch to OFF: CS must deassert
+    // (default_level = true = high).
     let bus = Arc::new(SpiBus::new());
     let slave = ActiveLowCsSpy::new();
     bus.attach(slave.clone()).unwrap();
@@ -1017,41 +1024,33 @@ fn test_sifive_spi_active_low_hold_persists_and_off_deasserts() {
     spi.connect_ssi_bus(Arc::clone(&bus));
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
+    // CSDEF=1 is reset default
     mmio.write(0x18, 4, 2); // CSMODE=HOLD
 
-    // HOLD mode selected: assert_level = bit(CSDEF,0) = false = low
-    // Active-low slave → CS=false → logically selected
-    assert!(
-        slave.selected(),
-        "active-low slave must be selected (CS=false) in HOLD mode"
-    );
+    // HOLD selected: assert_level = !CSDEF = false (low)
+    // Active-low slave → CS=false → selected
+    assert!(slave.selected(), "CS=false must select active-low slave");
 
-    // Transfer a byte — CS stays asserted, transfer reaches slave
+    // Transfer — CS stays asserted throughout flush_txfifo
     mmio.write(0x48, 4, 0x77);
     let rx = mmio.read(0x4C, 4);
     assert_eq!(rx, 0x77 ^ 0x5A);
-    assert!(
-        slave.selected(),
-        "CS must stay asserted after transfer in HOLD mode"
-    );
+    assert!(slave.selected(), "CS must stay asserted in HOLD mode");
 
-    // Switch to OFF → CS deasserts (high/true for CSDEF=0)
-    mmio.write(0x18, 4, 3); // CSMODE=OFF
+    // Switch to OFF → default_level = true (high)
+    mmio.write(0x18, 4, 3);
     assert!(
         !slave.selected(),
-        "CS must deassert after switching to OFF mode"
+        "OFF must deassert CS (true) for CSDEF=1 active-low"
     );
 }
 
 #[test]
 fn test_sifive_spi_active_low_reset_deasserts() {
-    // CSDEF=0 (active-low), HOLD mode (CS asserted low).
-    // lower_outputs() runs before regs.reset() and must deassert
-    // using the CURRENT (old) CSDEF=0: default_level=true.
-    // After regs.reset(), CSDEF=1 so update_cs() may re-assert
-    // for the new active-high default_level=false. Verify the
-    // lower_outputs path deasserts correctly.
+    // CSDEF=1 (reset default, idle high), HOLD mode asserts CS low.
+    // After reset_runtime(), update_cs() runs with CSDEF=1 in AUTO:
+    // default_level = true = deasserted. Active-low slave must be
+    // deselected in the final post-reset state.
     let bus = Arc::new(SpiBus::new());
     let slave = ActiveLowCsSpy::new();
     bus.attach(slave.clone()).unwrap();
@@ -1060,28 +1059,25 @@ fn test_sifive_spi_active_low_reset_deasserts() {
     spi.connect_ssi_bus(Arc::clone(&bus));
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
+    // Default CSDEF=1 (idle high)
     mmio.write(0x18, 4, 2); // CSMODE=HOLD
-    assert!(slave.selected()); // asserted low = selected
-
-    let cs_calls_before = slave.cs_calls().len();
+    assert!(slave.selected()); // CS=false asserted
 
     spi.reset_runtime();
-    // Sequence: lower_outputs (CSDEF=0 → true) then
-    //           regs.reset (CSDEF→1) then
-    //           update_cs (CSDEF=1 → false).
-    // The deassert call (CS=true) from lower_outputs must be present.
-    let new_calls = &slave.cs_calls()[cs_calls_before..];
+    // After reset: regs back to CSDEF=1, update_cs in AUTO drives
+    // default_level = true (high) → active-low slave deselected
     assert!(
-        new_calls.iter().any(|&c| c),
-        "lower_outputs must drive CS=true (deassert) for CSDEF=0"
+        !slave.selected(),
+        "reset must leave active-low slave deselected with CSDEF=1"
     );
 }
 
 #[test]
 fn test_sifive_spi_csdef_write_propagates_to_bus() {
-    // CSDEF=0, HOLD mode: assert_level = false.
-    // Write CSDEF=1 → assert_level changes to true → CS must transition.
+    // CSDEF=0 (idle low = active-high), HOLD mode: assert_level = true.
+    // Write CSDEF=1 → idle high → assert_level changes to false.
+    // Active-low slave goes from deselected (CS=true) to selected
+    // (CS=false).
     let bus = Arc::new(SpiBus::new());
     let slave = ActiveLowCsSpy::new();
     bus.attach(slave.clone()).unwrap();
@@ -1090,32 +1086,91 @@ fn test_sifive_spi_csdef_write_propagates_to_bus() {
     spi.connect_ssi_bus(Arc::clone(&bus));
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (idle low, active-high)
     mmio.write(0x18, 4, 2); // CSMODE=HOLD
-    assert!(slave.selected()); // CS=false asserted for active-low
-
-    let cs_calls_before = slave.cs_calls().len();
-
-    // Change CSDEF while in HOLD mode: must propagate to bus
-    mmio.write(0x14, 4, 0x01); // CSDEF=1 (active-high)
-                               // New assert_level for CSDEF=1 = true
-                               // Slave is active-low → needs false to be selected → deselected
-
-    let calls_after = slave.cs_calls();
-    assert!(
-        calls_after.len() > cs_calls_before,
-        "CSDEF write in HOLD mode must update bus CS state"
-    );
+                            // CSDEF=0 HOLD: assert_level = true (high)
+                            // Active-low slave needs CS=false → not selected
     assert!(
         !slave.selected(),
-        "active-low slave deselected after CSDEF changes assert level to true"
+        "CSDEF=0 idle-low: CS=true, active-low slave not selected"
+    );
+
+    // Write CSDEF=1: idle high → assert_level = false (low) →
+    // active-low slave gets selected
+    mmio.write(0x14, 4, 0x01);
+    assert!(
+        slave.selected(),
+        "CSDEF=1 idle-high: assert_level=false selects active-low slave"
     );
 }
 
 #[test]
 fn test_sifive_spi_active_low_auto_steady_state_deasserted() {
-    // After an AUTO-mode transfer, update_cs() (called on CSID write)
-    // must drive default_level (true for CSDEF=0), keeping the
+    // Reset-default CSDEF=1 (idle high). After an AUTO-mode
+    // transfer, the controller restores default_level = true.
+    // update_cs() (called on CSID write) must also drive
+    // default_level = true, keeping the active-low slave deselected.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CSDEF=1 is reset default, CSMODE defaults to 0 (AUTO)
+
+    // Transfer: assert=false, transfer, deassert=true
+    mmio.write(0x48, 4, 0x33);
+    let rx = mmio.read(0x4C, 4);
+    assert_eq!(rx, 0x33 ^ 0x5A, "transfer must reach active-low slave");
+    assert!(!slave.selected(), "deasserted after transfer");
+
+    // CSID write triggers update_cs: AUTO → default_level = true
+    mmio.write(0x10, 4, 0); // CSID=0 (same value, triggers update_cs)
+    assert!(
+        !slave.selected(),
+        "update_cs() in AUTO must keep CS deasserted (true)"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_auto_transfer_cs_toggle() {
+    // Reset-default CSDEF=1 (idle high). AUTO transfer must:
+    // 1. assert CS=false (low) → slave receives CS assertion
+    // 2. transfer reaches the selected slave
+    // 3. deassert CS=true (high) → slave deselected
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CSDEF=1 is reset default, CSMODE defaults to AUTO
+
+    let cs_calls_before = slave.cs_calls().len();
+    mmio.write(0x48, 4, 0x88);
+    let calls = &slave.cs_calls()[cs_calls_before..];
+
+    // flush_txfifo in AUTO mode: assert=false, then deassert=true
+    assert_eq!(calls.len(), 2, "AUTO must toggle CS: assert + deassert");
+    assert!(
+        !calls[0],
+        "assert must be false (low) for CSDEF=1 active-low"
+    );
+    assert!(calls[1], "deassert must be true (high) for CSDEF=1");
+    assert!(
+        !slave.selected(),
+        "slave must be deselected after AUTO transfer"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_unrealize_deasserts() {
+    // unrealize must leave CS at default_level (deasserted).
+    // CSDEF=1 (reset default) → default_level = true (high) →
     // active-low slave deselected.
     let bus = Arc::new(SpiBus::new());
     let slave = ActiveLowCsSpy::new();
@@ -1125,21 +1180,34 @@ fn test_sifive_spi_active_low_auto_steady_state_deasserted() {
     spi.connect_ssi_bus(Arc::clone(&bus));
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
-                               // CSMODE defaults to 0 (AUTO)
+    // CSDEF=1 is reset default
+    mmio.write(0x18, 4, 2); // HOLD → assert_level=false → selected
+    assert!(slave.selected());
 
-    // Transfer in AUTO: CS toggles assert(false)/deassert(true)
-    mmio.write(0x48, 4, 0x33);
-    let rx = mmio.read(0x4C, 4);
-    assert_eq!(rx, 0x33 ^ 0x5A);
-    assert!(!slave.selected()); // deasserted after transfer
+    // unrealize
+    use machina_core::address::GPA;
+    use machina_hw_core::bus::SysBus;
+    use machina_memory::address_space::AddressSpace;
+    use machina_memory::region::MemoryRegion;
 
-    // Write CSID=0 → triggers update_cs(). In AUTO mode this
-    // must drive default_level (true), not assert_level (false).
-    mmio.write(0x10, 4, 0); // CSID=0 (same value, triggers update_cs)
+    let mut bus_sys = SysBus::new("sysbus");
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let mut aspace = AddressSpace::new(root);
+    let region = MemoryRegion::io(
+        "mmio",
+        0x1000,
+        Arc::new(SiFiveSpiMmio(Arc::clone(&spi))),
+    );
+    spi.attach_to_bus(&mut bus_sys).unwrap();
+    spi.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    spi.realize_onto(&mut bus_sys, &mut aspace).unwrap();
+    spi.unrealize_from(&mut bus_sys, &mut aspace).unwrap();
+
+    // After unrealize: lower_outputs drives default_level = true
+    // Active-low slave: CS=true → deselected
     assert!(
         !slave.selected(),
-        "update_cs() in AUTO must keep CS deasserted (true)"
+        "unrealize must deassert CS for active-low slave"
     );
 }
 
@@ -1216,5 +1284,48 @@ fn test_pl022_active_low_reset_deasserts() {
     assert!(
         slave.cs_calls().len() > cs_calls_before,
         "reset must produce a CS state change"
+    );
+}
+
+#[test]
+fn test_pl022_active_low_unrealize_deasserts() {
+    // PL022 unrealize must leave CS deasserted (true for nSSP
+    // active-low).
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+
+    // Assert CS via the bus to simulate an active transfer
+    bus.set_cs(0, false);
+    assert!(slave.selected());
+
+    // Realize then unrealize: the deassert_cs() call in the
+    // unrealize path must drive true (high).
+    use machina_core::address::GPA;
+    use machina_hw_core::bus::SysBus;
+    use machina_memory::address_space::AddressSpace;
+    use machina_memory::region::MemoryRegion;
+
+    let mut bus_sys = SysBus::new("sysbus");
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let mut aspace = AddressSpace::new(root);
+    let region = MemoryRegion::io(
+        "mmio",
+        0x1000,
+        Arc::new(Pl022Mmio(Arc::clone(&pl022))),
+    );
+    pl022.attach_to_bus(&mut bus_sys).unwrap();
+    pl022.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    pl022.realize_onto(&mut bus_sys, &mut aspace).unwrap();
+    pl022.unrealize_from(&mut bus_sys, &mut aspace).unwrap();
+
+    assert!(
+        !slave.selected(),
+        "unrealize must deassert CS (true) for PL022 active-low nSSP"
     );
 }
