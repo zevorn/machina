@@ -184,13 +184,10 @@ impl SseTimer {
         // Check if auto-increment condition is met
         let mut regs = self.regs.borrow();
         let counter_val = self.counter.counter_value();
-        if regs.is_autoinc()
-            && regs.enabled()
-            && counter_val >= regs.cntp_aival
+        if regs.is_autoinc() && regs.enabled() && counter_val >= regs.cntp_aival
         {
             regs.cntp_aival_ctl |= AIVAL_CTL_CLR;
-            regs.cntp_aival =
-                counter_val + u64::from(regs.cntp_aival_reload);
+            regs.cntp_aival = counter_val + u64::from(regs.cntp_aival_reload);
         }
         // Update ISTATUS
         if regs.timer_status(counter_val) {
@@ -286,10 +283,7 @@ impl MmioOps for SseTimerMmio {
                 let new_ctl = value & (CTL_ENABLE | CTL_IMASK);
                 regs.cntp_ctl = new_ctl;
                 let enabled_changed = (old_ctl ^ new_ctl) & CTL_ENABLE != 0;
-                if enabled_changed
-                    && regs.enabled()
-                    && regs.is_autoinc()
-                {
+                if enabled_changed && regs.enabled() && regs.is_autoinc() {
                     let counter_val = self.0.counter.counter_value();
                     regs.cntp_aival =
                         counter_val + u64::from(regs.cntp_aival_reload);
@@ -309,10 +303,7 @@ impl MmioOps for SseTimerMmio {
                 }
                 let en_changed =
                     (old_ctl ^ regs.cntp_aival_ctl) & AIVAL_CTL_EN != 0;
-                if en_changed
-                    && regs.enabled()
-                    && regs.is_autoinc()
-                {
+                if en_changed && regs.enabled() && regs.is_autoinc() {
                     let counter_val = self.0.counter.counter_value();
                     regs.cntp_aival =
                         counter_val + u64::from(regs.cntp_aival_reload);

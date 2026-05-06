@@ -117,9 +117,7 @@ impl Pl061Regs {
         let changed = (self.old_in_data ^ self.data) & !self.dir;
         for i in 0..N_GPIOS {
             let mask = 1u32 << i;
-            if changed & mask != 0
-                && self.isense & mask == 0
-            {
+            if changed & mask != 0 && self.isense & mask == 0 {
                 // Edge interrupt
                 if self.ibe & mask != 0 {
                     self.istate |= mask;

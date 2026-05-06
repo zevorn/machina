@@ -32,7 +32,6 @@ const CONFIG_CMP1IP: u32 = 1 << 29;
 const CONFIG_CMP2IP: u32 = 1 << 30;
 const CONFIG_CMP3IP: u32 = 1 << 31;
 
-
 fn has_pwm_en_bits(cfg: u32) -> bool {
     (cfg & (CONFIG_ENONESHOT | CONFIG_ENALWAYS)) != 0
 }
