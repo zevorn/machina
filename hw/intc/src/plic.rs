@@ -47,6 +47,10 @@ pub struct Plic {
     // Lock-free source layer.
     priority: Vec<AtomicU32>,
     pending: Vec<AtomicU32>,
+    /// Claimed bitmap — set on claim, cleared on complete.
+    /// Prevents re-claim of the same source between claim
+    /// and complete (QEMU pending & ~claimed semantics).
+    claimed: Vec<AtomicU32>,
     source_level: Vec<AtomicU32>,
     // Locked context layer.
     contexts: DeviceRefCell<PlicContexts>,
@@ -79,6 +83,10 @@ impl Plic {
         for _ in 0..words {
             pending.push(AtomicU32::new(0));
         }
+        let mut claimed = Vec::with_capacity(words);
+        for _ in 0..words {
+            claimed.push(AtomicU32::new(0));
+        }
         let mut source_level = Vec::with_capacity(num_sources as usize);
         for _ in 0..num_sources {
             source_level.push(AtomicU32::new(0));
@@ -93,6 +101,7 @@ impl Plic {
             num_contexts,
             priority,
             pending,
+            claimed,
             source_level,
             contexts: DeviceRefCell::new(PlicContexts {
                 enable: vec![vec![0u32; words]; num_contexts as usize],
@@ -162,6 +171,9 @@ impl Plic {
         for p in &self.pending {
             p.store(0, Ordering::Relaxed);
         }
+        for c in &self.claimed {
+            c.store(0, Ordering::Relaxed);
+        }
         for s in &self.source_level {
             s.store(0, Ordering::Relaxed);
         }
@@ -213,7 +225,8 @@ impl Plic {
                 let word = (irq / 32) as usize;
                 let bit = 1u32 << (irq % 32);
                 let pend = self.pending[word].load(Ordering::Relaxed);
-                let pending = pend & bit != 0;
+                let clam = self.claimed[word].load(Ordering::Relaxed);
+                let pending = (pend & !clam) & bit != 0;
                 let enabled = ctx_guard.enable[ctx][word] & bit != 0;
                 let pri = self.priority[irq as usize].load(Ordering::Relaxed);
                 if pending && enabled && pri > thresh {
@@ -261,7 +274,8 @@ impl Plic {
             let bit = 1u32 << (irq % 32);
 
             let pend = self.pending[word].load(Ordering::Relaxed);
-            let is_pending = pend & bit != 0;
+            let clam = self.claimed[word].load(Ordering::Relaxed);
+            let is_pending = (pend & !clam) & bit != 0;
             let is_enabled = ctx_guard.enable[ctx][word] & bit != 0;
             let pri = self.priority[irq as usize].load(Ordering::Relaxed);
 
@@ -272,10 +286,12 @@ impl Plic {
         }
 
         if let Some(irq) = best_irq {
-            // Atomically clear pending bit.
+            // Clear pending and set claimed to prevent
+            // re-claim before complete (QEMU semantics).
             let word = (irq / 32) as usize;
             let bit = 1u32 << (irq % 32);
             self.pending[word].fetch_and(!bit, Ordering::Relaxed);
+            self.claimed[word].fetch_or(bit, Ordering::Relaxed);
             ctx_guard.claim[ctx] = irq;
         }
 
@@ -283,9 +299,8 @@ impl Plic {
     }
 
     /// Complete (acknowledge) a previously claimed IRQ.
-    /// If the source is still asserted (level-triggered),
-    /// Complete (acknowledge) a previously claimed IRQ.
-    /// Clears the claim record and re-evaluates outputs.
+    /// Clears the claim record and the claimed bitmap,
+    /// then re-evaluates outputs.
     /// Does NOT automatically re-pend based on source wire
     /// level — the device must de-assert and re-assert to
     /// generate a new interrupt.
@@ -298,6 +313,11 @@ impl Plic {
             let mut ctx_guard = self.contexts.borrow();
             if ctx_guard.claim[ctx] == irq {
                 ctx_guard.claim[ctx] = 0;
+                // Clear the claimed bit so the source can be
+                // claimed again (QEMU claimed bitmap semantics).
+                let word = (irq / 32) as usize;
+                let bit = 1u32 << (irq % 32);
+                self.claimed[word].fetch_and(!bit, Ordering::Relaxed);
             }
         }
         self.update_outputs();

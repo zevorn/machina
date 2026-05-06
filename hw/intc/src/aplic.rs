@@ -111,6 +111,8 @@ pub struct RiscvAplic {
     smsicfgaddr: DeviceRefCell<u32>,
     smsicfgaddr_h: DeviceRefCell<u32>,
     genmsi: DeviceRefCell<u32>,
+    /// MSI delivery callback — (address, data).
+    msi_delivery: parking_lot::Mutex<Option<Box<dyn Fn(u64, u32) + Send>>>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
 
@@ -160,6 +162,7 @@ impl RiscvAplic {
             smsicfgaddr: DeviceRefCell::new(0),
             smsicfgaddr_h: DeviceRefCell::new(0),
             genmsi: DeviceRefCell::new(0),
+            msi_delivery: parking_lot::Mutex::new(None),
             outputs: parking_lot::Mutex::new({
                 let mut v = Vec::with_capacity(nh as usize);
                 v.resize_with(nh as usize, || None);
@@ -210,6 +213,10 @@ impl RiscvAplic {
     pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
         let guard = self.state.lock();
         f(&*guard)
+    }
+
+    pub fn set_msi_delivery(&self, cb: Box<dyn Fn(u64, u32) + Send>) {
+        *self.msi_delivery.lock() = Some(cb);
     }
 
     pub fn connect_output(&self, hart_idx: u32, irq: InterruptSource) {
@@ -509,11 +516,27 @@ impl RiscvAplic {
                 & APLIC_TARGET_GUEST_IDX_MASK
         };
         let eiid = target & APLIC_TARGET_EIID_MASK;
-        // Store genmsi for observable MSI generation
+        // Store genmsi for observable MSI generation.
         let mut genmsi = self.genmsi.borrow();
         *genmsi = (hart_idx << APLIC_TARGET_HART_IDX_SHIFT)
             | (guest_idx << APLIC_TARGET_GUEST_IDX_SHIFT)
             | eiid;
+        drop(genmsi);
+
+        // Deliver the MSI write into the IMSIC address space.
+        // QEMU APLIC MSI mode: compute address from MM/SMSICFGADDR
+        // registers, write eiid as data.
+        let (addr_lo, addr_hi) = if self.mmode {
+            (*self.mmsicfgaddr.borrow(), *self.mmsicfgaddr_h.borrow())
+        } else {
+            (*self.smsicfgaddr.borrow(), *self.smsicfgaddr_h.borrow())
+        };
+        let base_addr = (u64::from(addr_hi) << 32) | u64::from(addr_lo);
+        // IMSIC page size is 0x1000 (4 KiB) per the AIA spec.
+        let msi_addr = base_addr + u64::from(hart_idx) * 0x1000;
+        if let Some(ref cb) = *self.msi_delivery.lock() {
+            cb(msi_addr, eiid);
+        }
     }
 
     fn idc_topi(&self, idc: u32) -> u32 {

@@ -192,7 +192,10 @@ impl PchPic {
     fn update_outputs(&self) {
         let regs = self.regs.borrow();
         let mut levels = [false; NUM_OUTPUTS];
-        let active = regs.intisr & !regs.int_mask;
+        // Output is driven by intisr directly — the mask gates
+        // ISR acceptance, not ongoing output (QEMU semantics:
+        // masking does not retroactively drop active IRQs).
+        let active = regs.intisr;
         for irq in 0..self.irq_num {
             if active & (1u64 << irq) == 0 {
                 continue;

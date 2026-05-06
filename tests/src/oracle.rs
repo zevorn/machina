@@ -1576,7 +1576,7 @@ fn test_oracle_batch2_loongarch_ipi() {
         reset_regs: BTreeMap::new(),
         scenarios: vec![OracleScenario {
             name: "send_ipi_to_cpu0".into(),
-            writes: vec![(0x040, (0u64 << 16) | 3, 4)],
+            writes: vec![(0x040, (0u64 << 16) | 3, 8)],
             expected: {
                 let mut m = BTreeMap::new();
                 m.insert("STATUS".into(), 1 << 3);

@@ -150,10 +150,11 @@ impl LoongArchIpi {
         let mut needs_update = false;
         {
             let mut cores = self.cores.borrow();
+            // QEMU exposes these as 8-byte write-only regions.
             if (offset == IOCSR_IPI_SEND
                 || offset == IOCSR_MAIL_SEND
                 || offset == IOCSR_ANY_SEND)
-                && size >= 4
+                && size == 8
             {
                 needs_update |= write_send_register(&mut cores, offset, val);
             } else if let Some(core) = cores.get_mut(cpu_id as usize) {
@@ -235,7 +236,9 @@ fn write_core_byte(core: &mut IpiCore, offset: u64, val: u8) -> bool {
                 (offset - CORE_EN_OFF) as usize,
                 val,
             );
-            true
+            // QEMU: enable writes just store the value
+            // without triggering immediate output recomputation.
+            false
         }
         CORE_SET_OFF..=0x00b => {
             core.status |= u32::from(val) << ((offset - CORE_SET_OFF) * 8);
@@ -334,7 +337,8 @@ fn write_core_word(
         CORE_STATUS_OFF => false,
         CORE_EN_OFF => {
             cores[target].enable = val;
-            true
+            // QEMU: enable writes just store, don't trigger recalc.
+            false
         }
         CORE_SET_OFF => {
             cores[target].status |= val;

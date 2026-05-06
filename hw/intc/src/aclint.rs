@@ -344,15 +344,31 @@ impl Aclint {
         }
     }
 
-    pub fn read(&self, offset: u64, _size: u32) -> u64 {
+    pub fn read(&self, offset: u64, size: u32) -> u64 {
         if offset == MTIME_OFFSET {
-            return self.read_mtime();
+            let mtime = self.read_mtime();
+            return if size == 4 {
+                mtime & 0xFFFF_FFFF
+            } else {
+                mtime
+            };
+        }
+        if offset == MTIME_OFFSET + 4 && size == 4 {
+            return (self.read_mtime() >> 32) & 0xFFFF_FFFF;
         }
         let regs = self.regs.borrow();
         if offset >= MTIMECMP_BASE {
+            let sub = (offset - MTIMECMP_BASE) % 8;
             let hart = ((offset - MTIMECMP_BASE) / 8) as usize;
             if hart < self.num_harts as usize {
-                return regs.mtimecmp[hart];
+                let val = regs.mtimecmp[hart];
+                return if sub == 0 && size == 4 {
+                    val & 0xFFFF_FFFF
+                } else if sub == 4 && size == 4 {
+                    (val >> 32) & 0xFFFF_FFFF
+                } else {
+                    val
+                };
             }
             return 0;
         }
@@ -364,26 +380,44 @@ impl Aclint {
         }
     }
 
-    pub fn write(&self, offset: u64, _size: u32, val: u64) {
-        if offset == MTIME_OFFSET {
+    pub fn write(&self, offset: u64, size: u32, val: u64) {
+        if offset == MTIME_OFFSET || offset == MTIME_OFFSET + 4 {
             self.cancel_timers();
             {
                 let mut regs = self.regs.borrow();
-                regs.mtime_base = val;
+                if offset == MTIME_OFFSET && size == 4 {
+                    regs.mtime_base =
+                        (regs.mtime_base & 0xFFFF_FFFF_0000_0000) | val;
+                } else if offset == MTIME_OFFSET + 4 && size == 4 {
+                    regs.mtime_base =
+                        (regs.mtime_base & 0x0000_0000_FFFF_FFFF) | (val << 32);
+                } else {
+                    regs.mtime_base = val;
+                }
                 regs.epoch = Instant::now();
             }
             self.update_mti();
             return;
         }
         if offset >= MTIMECMP_BASE {
+            let sub = (offset - MTIMECMP_BASE) % 8;
             let hart = ((offset - MTIMECMP_BASE) / 8) as usize;
             if hart < self.num_harts as usize {
                 self.timer_state.cancel_gen[hart]
                     .fetch_add(1, Ordering::SeqCst);
 
+                let old = self.regs.borrow().mtimecmp[hart];
+                let new_val = if sub == 0 && size == 4 {
+                    (old & 0xFFFF_FFFF_0000_0000) | val
+                } else if sub == 4 && size == 4 {
+                    (old & 0x0000_0000_FFFF_FFFF) | (val << 32)
+                } else {
+                    val
+                };
+
                 let pending = {
                     let mut regs = self.regs.borrow();
-                    regs.mtimecmp[hart] = val;
+                    regs.mtimecmp[hart] = new_val;
                     Self::read_mtime_with(&regs) >= regs.mtimecmp[hart]
                 };
                 {

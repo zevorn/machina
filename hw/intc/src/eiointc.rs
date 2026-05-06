@@ -24,17 +24,26 @@ struct EiointcRegs {
     nodemap: [u32; NUM_U32],
     enable: [u32; NUM_U32],
     isr: [u32; NUM_U32],
+    /// Per-CPU core ISR — cleared on CORE_ISR write (ack) without
+    /// affecting global ISR (QEMU semantics).
+    core_isr: Vec<[u32; NUM_U32]>,
     coremap: [u8; NUM_IRQS],
     ipmap: [u8; 8],
     bounce: [u32; NUM_U32],
 }
 
 impl EiointcRegs {
-    fn new() -> Self {
+    fn new(num_cpus: usize) -> Self {
+        let nc = num_cpus.max(1);
+        let mut core_isr = Vec::with_capacity(nc);
+        for _ in 0..nc {
+            core_isr.push([0u32; NUM_U32]);
+        }
         Self {
             nodemap: [0; NUM_U32],
             enable: [0; NUM_U32],
             isr: [0; NUM_U32],
+            core_isr,
             coremap: [0; NUM_IRQS],
             ipmap: [0; 8],
             bounce: [0; NUM_U32],
@@ -56,9 +65,10 @@ impl Eiointc {
 
     #[must_use]
     pub fn new_named(local_id: &str, num_cpus: u32) -> Self {
+        let nc = num_cpus.max(1) as usize;
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(EiointcRegs::new()),
+            regs: DeviceRefCell::new(EiointcRegs::new(nc)),
             hwi_outputs: parking_lot::Mutex::new(empty_hwi_outputs(num_cpus)),
         }
     }
@@ -131,12 +141,24 @@ impl Eiointc {
         }
         {
             let mut regs = self.regs.borrow();
+            let route_cpu_count = self.route_cpu_count_for(0);
             let idx = (irq / 32) as usize;
             let bit = 1u32 << (irq % 32);
             if level {
                 regs.isr[idx] |= bit;
+                // Set per-CPU core_isr for the CPU this IRQ
+                // routes to (QEMU semantics).
+                let cpu =
+                    decoded_cpu_for_irq(&regs, irq as usize, route_cpu_count);
+                if (cpu as usize) < regs.core_isr.len() {
+                    regs.core_isr[cpu as usize][idx] |= bit;
+                }
             } else {
                 regs.isr[idx] &= !bit;
+                // Clear per-CPU core_isr for all CPUs.
+                for core in &mut regs.core_isr {
+                    core[idx] &= !bit;
+                }
             }
         }
         self.update_outputs();
@@ -150,7 +172,11 @@ impl Eiointc {
             let mut regs = self.regs.borrow();
             let idx = (irq / 32) as usize;
             let bit = 1u32 << (irq % 32);
-            regs.isr[idx] &= !bit;
+            // Clear per-CPU core_isr; global ISR tracks source
+            // assertion state (QEMU semantics).
+            for core in &mut regs.core_isr {
+                core[idx] &= !bit;
+            }
         }
         self.update_outputs();
     }
@@ -274,16 +300,17 @@ impl IrqSink for EiointcIrqSink {
 fn hwi_bits_for_cpu(
     regs: &EiointcRegs,
     cpu_id: u32,
-    route_cpu_count: u32,
+    _route_cpu_count: u32,
 ) -> u8 {
+    let cpu = cpu_id as usize;
+    if cpu >= regs.core_isr.len() {
+        return 0;
+    }
     let mut hwi_bits: u8 = 0;
     for irq in 0..NUM_IRQS {
         let idx = irq / 32;
         let bit = 1u32 << (irq % 32);
-        if regs.isr[idx] & regs.enable[idx] & bit == 0 {
-            continue;
-        }
-        if decoded_cpu_for_irq(regs, irq, route_cpu_count) != cpu_id {
+        if regs.core_isr[cpu][idx] & bit == 0 {
             continue;
         }
         let hwi = decoded_hwi_for_irq(regs, irq);
@@ -380,25 +407,14 @@ fn write_u32_byte(word: &mut u32, byte: usize, val: u8) {
 fn core_isr_word_for_cpu(
     regs: &EiointcRegs,
     cpu_id: u32,
-    route_cpu_count: u32,
+    _route_cpu_count: u32,
     word_idx: usize,
 ) -> u32 {
-    if word_idx >= NUM_U32 {
+    let cpu = cpu_id as usize;
+    if word_idx >= NUM_U32 || cpu >= regs.core_isr.len() {
         return 0;
     }
-    let mut word = 0u32;
-    let pending = regs.isr[word_idx] & regs.enable[word_idx];
-    for bit in 0..32 {
-        let mask = 1u32 << bit;
-        if pending & mask == 0 {
-            continue;
-        }
-        let irq = word_idx * 32 + bit;
-        if decoded_cpu_for_irq(regs, irq, route_cpu_count) == cpu_id {
-            word |= mask;
-        }
-    }
-    word
+    regs.core_isr[cpu][word_idx]
 }
 
 fn clear_core_isr_byte(
@@ -409,6 +425,10 @@ fn clear_core_isr_byte(
     val: u8,
 ) {
     let first_irq = ((offset - CORE_ISR_BASE) as usize) * 8;
+    let cpu = cpu_id as usize;
+    if cpu >= regs.core_isr.len() {
+        return;
+    }
     for bit in 0..8 {
         if val & (1 << bit) == 0 {
             continue;
@@ -420,7 +440,9 @@ fn clear_core_isr_byte(
         if decoded_cpu_for_irq(regs, irq, route_cpu_count) != cpu_id {
             continue;
         }
-        regs.isr[irq / 32] &= !(1u32 << (irq % 32));
+        // Clear per-CPU core_isr only — global ISR preserves
+        // source-asserted state (QEMU semantics).
+        regs.core_isr[cpu][irq / 32] &= !(1u32 << (irq % 32));
     }
 }
 
