@@ -779,8 +779,12 @@ fn test_sifive_spi_active_low_cs_auto_mode() {
     spi.connect_ssi_bus(Arc::clone(&bus));
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
 
-    // CSDEF=0 (bit 0 = 0): active-low → CS low means selected
+    // CSDEF=0 (bit 0 = 0): active-low → CS low means selected.
+    // This write now calls update_cs() which drives default_level
+    // (true for CSDEF=0, deasserted idle state in AUTO mode).
     mmio.write(0x14, 4, 0x00); // CSDEF=0
+
+    let cs_calls_before = slave.cs_calls.lock().unwrap().len();
 
     // AUTO mode (default): write TXDATA
     mmio.write(0x48, 4, 0x7F);
@@ -793,9 +797,10 @@ fn test_sifive_spi_active_low_cs_auto_mode() {
     assert_eq!(rx, 0x7F ^ 0x3C);
 
     let calls = slave.cs_calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2);
-    assert!(!calls[0]); // assert low (active-low)
-    assert!(calls[1]); // deassert high
+    let new_calls = &calls[cs_calls_before..];
+    assert_eq!(new_calls.len(), 2);
+    assert!(!new_calls[0]); // assert low (active-low)
+    assert!(new_calls[1]); // deassert high
     assert!(*slave.cs_state.lock().unwrap()); // ended deasserted (high)
 }
 
@@ -853,39 +858,42 @@ fn test_sifive_spi_reset_deasserts_cs() {
 
 #[test]
 fn test_pl022_cs_assertion_during_transfer() {
+    // Pl022 nSSP is active-low: assert=false, deassert=true.
+    // Use active-low slave so the transfer reaches it.
     let bus = Arc::new(SpiBus::new());
-    let slave = CsspySlave::new();
+    let slave = ActiveLowCsSpy::new();
     bus.attach(slave.clone()).unwrap();
 
-    let pl022 = Arc::new(Pl022::new());
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
     pl022.connect_ssi_bus(Arc::clone(&bus));
     let mmio = Pl022Mmio(Arc::clone(&pl022));
 
-    // Enable SSE, set 8-bit data
     mmio.write(0x00, 4, 0x07); // DSS=7 → 8-bit
     mmio.write(0x04, 4, 0x02); // SSE=1
 
-    // Write data → triggers xfer with CS assertion
-    mmio.write(0x08, 4, 0xAB);
+    mmio.write(0x08, 4, 0xAB); // Write data → triggers xfer
 
     let rx = mmio.read(0x08, 4);
-    // Slave returns val ^ 0x5A, not 0xFF (pull-up)
     assert_eq!(rx, (0xAB & 0xFF) ^ 0x5A);
 
-    // Verify CS was asserted then deasserted
+    // CS: assert=false (low), deassert=true (high)
     let calls = slave.cs_calls();
     assert_eq!(calls.len(), 2);
-    assert!(calls[0]); // assert
-    assert!(!calls[1]); // deassert
+    assert!(!calls[0]); // assert low
+    assert!(calls[1]); // deassert high
 }
 
 #[test]
 fn test_pl022_no_cs_when_sse_disabled() {
     let bus = Arc::new(SpiBus::new());
-    let slave = CsspySlave::new();
+    let slave = ActiveLowCsSpy::new();
     bus.attach(slave.clone()).unwrap();
 
-    let pl022 = Arc::new(Pl022::new());
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
     pl022.connect_ssi_bus(Arc::clone(&bus));
     let mmio = Pl022Mmio(Arc::clone(&pl022));
 
@@ -899,27 +907,314 @@ fn test_pl022_no_cs_when_sse_disabled() {
 #[test]
 fn test_pl022_reset_deasserts_cs() {
     let bus = Arc::new(SpiBus::new());
-    let slave = CsspySlave::new();
+    let slave = ActiveLowCsSpy::new();
     bus.attach(slave.clone()).unwrap();
 
-    let pl022 = Arc::new(Pl022::new());
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
     pl022.connect_ssi_bus(Arc::clone(&bus));
     let mmio = Pl022Mmio(Arc::clone(&pl022));
 
-    // Enable SSE and do a transfer — this asserts then deasserts CS
     mmio.write(0x00, 4, 0x07);
     mmio.write(0x04, 4, 0x02);
     mmio.write(0x08, 4, 0x55);
-    // After transfer CS is deasserted
+    // After transfer CS is deasserted (true) → active-low deselected
     assert!(!slave.selected());
 
-    // Re-assert CS manually so we can observe deassert on reset
-    bus.set_cs(0, true);
+    // Re-assert CS to false (low) to simulate lingering assertion
+    bus.set_cs(0, false);
     assert!(slave.selected());
     let calls_before = slave.cs_calls().len();
 
-    // Reset must deassert CS
+    // Reset must deassert: CS false → true
     pl022.reset_runtime();
     assert!(!slave.selected());
     assert!(slave.cs_calls().len() > calls_before);
+}
+
+// -- Regression: active-low slave CSDEF=0 deassert semantics --
+
+/// Active-low mock slave that records CS transitions and logical
+/// selection state. Uses `SpiCsPolarity::Low` — selected when CS=false.
+struct ActiveLowCsSpy {
+    selected: Mutex<bool>,
+    cs_calls: Mutex<Vec<bool>>,
+}
+
+impl ActiveLowCsSpy {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            selected: Mutex::new(false),
+            cs_calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Returns whether the slave is logically selected
+    /// (accounts for active-low polarity).
+    fn selected(&self) -> bool {
+        *self.selected.lock().unwrap()
+    }
+
+    fn cs_calls(&self) -> Vec<bool> {
+        self.cs_calls.lock().unwrap().clone()
+    }
+}
+
+impl SpiSlave for ActiveLowCsSpy {
+    fn transfer(&self, val: u32) -> u32 {
+        val ^ 0x5A
+    }
+
+    fn set_cs(&self, cs: bool) {
+        self.cs_calls.lock().unwrap().push(cs);
+        // Active-low: logically selected when physical CS = false
+        *self.selected.lock().unwrap() = !cs;
+    }
+
+    fn cs_polarity(&self) -> SpiCsPolarity {
+        SpiCsPolarity::Low
+    }
+
+    fn cs_index(&self) -> u8 {
+        0
+    }
+}
+
+#[test]
+fn test_sifive_spi_active_low_off_deasserts() {
+    // CSDEF=0 (active-low), OFF mode: CS must be deasserted (high/true).
+    // With hard-coded false in update_cs() OFF path, an active-low
+    // slave would see CS=false=selected.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
+    mmio.write(0x18, 4, 3); // CSMODE=OFF
+
+    // For CSDEF=0: default_level = true (high) = deasserted
+    // Active-low slave: CS=true → logically deselected
+    assert!(
+        !slave.selected(),
+        "active-low slave must be deselected in OFF mode"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_hold_persists_and_off_deasserts() {
+    // CSDEF=0 (active-low), HOLD mode: selected CS stays asserted (low).
+    // Switch to OFF: CS must deassert (high).
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
+    mmio.write(0x18, 4, 2); // CSMODE=HOLD
+
+    // HOLD mode selected: assert_level = bit(CSDEF,0) = false = low
+    // Active-low slave → CS=false → logically selected
+    assert!(
+        slave.selected(),
+        "active-low slave must be selected (CS=false) in HOLD mode"
+    );
+
+    // Transfer a byte — CS stays asserted, transfer reaches slave
+    mmio.write(0x48, 4, 0x77);
+    let rx = mmio.read(0x4C, 4);
+    assert_eq!(rx, 0x77 ^ 0x5A);
+    assert!(
+        slave.selected(),
+        "CS must stay asserted after transfer in HOLD mode"
+    );
+
+    // Switch to OFF → CS deasserts (high/true for CSDEF=0)
+    mmio.write(0x18, 4, 3); // CSMODE=OFF
+    assert!(
+        !slave.selected(),
+        "CS must deassert after switching to OFF mode"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_reset_deasserts() {
+    // CSDEF=0 (active-low), HOLD mode (CS asserted low).
+    // lower_outputs() runs before regs.reset() and must deassert
+    // using the CURRENT (old) CSDEF=0: default_level=true.
+    // After regs.reset(), CSDEF=1 so update_cs() may re-assert
+    // for the new active-high default_level=false. Verify the
+    // lower_outputs path deasserts correctly.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
+    mmio.write(0x18, 4, 2); // CSMODE=HOLD
+    assert!(slave.selected()); // asserted low = selected
+
+    let cs_calls_before = slave.cs_calls().len();
+
+    spi.reset_runtime();
+    // Sequence: lower_outputs (CSDEF=0 → true) then
+    //           regs.reset (CSDEF→1) then
+    //           update_cs (CSDEF=1 → false).
+    // The deassert call (CS=true) from lower_outputs must be present.
+    let new_calls = &slave.cs_calls()[cs_calls_before..];
+    assert!(
+        new_calls.iter().any(|&c| c),
+        "lower_outputs must drive CS=true (deassert) for CSDEF=0"
+    );
+}
+
+#[test]
+fn test_sifive_spi_csdef_write_propagates_to_bus() {
+    // CSDEF=0, HOLD mode: assert_level = false.
+    // Write CSDEF=1 → assert_level changes to true → CS must transition.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
+    mmio.write(0x18, 4, 2); // CSMODE=HOLD
+    assert!(slave.selected()); // CS=false asserted for active-low
+
+    let cs_calls_before = slave.cs_calls().len();
+
+    // Change CSDEF while in HOLD mode: must propagate to bus
+    mmio.write(0x14, 4, 0x01); // CSDEF=1 (active-high)
+                               // New assert_level for CSDEF=1 = true
+                               // Slave is active-low → needs false to be selected → deselected
+
+    let calls_after = slave.cs_calls();
+    assert!(
+        calls_after.len() > cs_calls_before,
+        "CSDEF write in HOLD mode must update bus CS state"
+    );
+    assert!(
+        !slave.selected(),
+        "active-low slave deselected after CSDEF changes assert level to true"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_auto_steady_state_deasserted() {
+    // After an AUTO-mode transfer, update_cs() (called on CSID write)
+    // must drive default_level (true for CSDEF=0), keeping the
+    // active-low slave deselected.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (active-low)
+                               // CSMODE defaults to 0 (AUTO)
+
+    // Transfer in AUTO: CS toggles assert(false)/deassert(true)
+    mmio.write(0x48, 4, 0x33);
+    let rx = mmio.read(0x4C, 4);
+    assert_eq!(rx, 0x33 ^ 0x5A);
+    assert!(!slave.selected()); // deasserted after transfer
+
+    // Write CSID=0 → triggers update_cs(). In AUTO mode this
+    // must drive default_level (true), not assert_level (false).
+    mmio.write(0x10, 4, 0); // CSID=0 (same value, triggers update_cs)
+    assert!(
+        !slave.selected(),
+        "update_cs() in AUTO must keep CS deasserted (true)"
+    );
+}
+
+// -- Regression: Pl022 with active-low slave (nSSP active-low) --
+
+#[test]
+fn test_pl022_active_low_cs_assertion_during_transfer() {
+    // Pl022 nSSP is active-low: assert = false (low), deassert = true
+    // (high). An active-low slave must be reached by the transfer.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 4, 0x07); // DSS=7 → 8-bit
+    mmio.write(0x04, 4, 0x02); // SSE=1
+
+    mmio.write(0x08, 4, 0xAB); // Write data to DR
+
+    let rx = mmio.read(0x08, 4);
+    assert_eq!(
+        rx,
+        (0xAB & 0xFF) ^ 0x5A,
+        "transfer must reach active-low slave"
+    );
+
+    // After transfer CS is deasserted (true) → active-low deselected
+    assert!(!slave.selected());
+
+    // Verify CS assert=false then deassert=true
+    let calls = slave.cs_calls();
+    assert_eq!(calls.len(), 2);
+    assert!(!calls[0], "assert must be false (low) for PL022 nSSP");
+    assert!(calls[1], "deassert must be true (high) for PL022 nSSP");
+}
+
+#[test]
+fn test_pl022_active_low_reset_deasserts() {
+    // Pl022 reset must drive CS to the deasserted idle level.
+    // nSSP is active-low: idle/deasserted = high (true).
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    // Do a transfer to put CS through assert/deassert cycle
+    mmio.write(0x00, 4, 0x07);
+    mmio.write(0x04, 4, 0x02);
+    mmio.write(0x08, 4, 0x55);
+    let _rx = mmio.read(0x08, 4);
+    assert!(!slave.selected()); // deasserted after transfer
+
+    // Re-assert CS to false to simulate a lingering assertion
+    bus.set_cs(0, false);
+    assert!(slave.selected());
+    let cs_calls_before = slave.cs_calls().len();
+
+    // Reset must drive CS to deasserted level (true)
+    pl022.reset_runtime();
+    assert!(
+        !slave.selected(),
+        "reset must deassert CS (true) for active-low PL022"
+    );
+    assert!(
+        slave.cs_calls().len() > cs_calls_before,
+        "reset must produce a CS state change"
+    );
 }

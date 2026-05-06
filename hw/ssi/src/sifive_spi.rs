@@ -242,10 +242,16 @@ impl SiFiveSpi {
         for l in self.cs_lines.lock().iter().flatten() {
             l.lower();
         }
-        // Deassert all CS lines on the bus
+        // Deassert all CS lines: drive each line to its default
+        // (idle) level per CSDEF. CSDEF bit = 1 means active-high,
+        // so idle = low = false; CSDEF bit = 0 means active-low,
+        // so idle = high = true.
         if let Some(ref bus) = *self.ssi_bus.lock() {
+            let regs = self.regs.borrow();
             for i in 0..self.num_cs {
-                bus.set_cs(i as u8, false);
+                let csdef_bit = (regs.regs[R_CSDEF] >> i) & 1;
+                let default_level = csdef_bit == 0;
+                bus.set_cs(i as u8, default_level);
             }
         }
     }
@@ -256,16 +262,18 @@ impl SiFiveSpi {
         let ssi = self.ssi_bus.lock();
         for i in 0..self.num_cs as usize {
             let csdef_bit = (regs.regs[R_CSDEF] >> i) & 1;
+            // CSDEF=1 → active-high → assert=true,  idle=false
+            // CSDEF=0 → active-low  → assert=false, idle=true
             let level = match regs.regs[R_CSMODE] {
-                0 /* AUTO */ => csdef_bit != 0,
+                0 /* AUTO */ => csdef_bit == 0, // idle = deasserted
                 2 /* HOLD */ => {
                     if i == regs.regs[R_CSID] as usize {
-                        csdef_bit != 0
+                        csdef_bit != 0 // selected = asserted
                     } else {
-                        false
+                        csdef_bit == 0 // idle = deasserted
                     }
                 }
-                _ => false, /* OFF or invalid mode */
+                _ => csdef_bit == 0, /* OFF or invalid: idle */
             };
             if i < cs_lines.len() {
                 if let Some(ref line) = cs_lines[i] {
@@ -398,6 +406,7 @@ impl MmioOps for SiFiveSpiMmio {
                 }
                 regs.regs[R_CSDEF] = value;
                 drop(regs);
+                self.0.update_cs();
             }
             R_CSMODE => {
                 let mut regs = self.0.regs.borrow();

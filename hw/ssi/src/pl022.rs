@@ -186,7 +186,9 @@ impl Pl022 {
 
     fn deassert_cs(&self) {
         if let Some(ref bus) = *self.ssi_bus.lock() {
-            bus.set_cs(self.cs_index, false);
+            // PL022 nSSP frame signal is active-low:
+            // idle/deasserted = high (true)
+            bus.set_cs(self.cs_index, true);
         }
     }
 
@@ -217,10 +219,11 @@ impl Pl022 {
         let cs = self.cs_index;
 
         // Assert CS if there is data to transfer
+        // PL022 nSSP is active-low: assert = low (false)
         let has_data = regs.tx_fifo_len > 0;
         if has_data {
             if let Some(ref bus) = *ssi {
-                bus.set_cs(cs, true);
+                bus.set_cs(cs, false);
             }
         }
 
@@ -248,9 +251,10 @@ impl Pl022 {
         drop(regs);
 
         // Deassert CS after transfer
+        // PL022 nSSP is active-low: deassert = high (true)
         if has_data {
             if let Some(ref bus) = *ssi {
-                bus.set_cs(cs, false);
+                bus.set_cs(cs, true);
             }
         }
         // Drop ssi bus lock before setting IRQ
