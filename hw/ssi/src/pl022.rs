@@ -104,6 +104,8 @@ pub struct Pl022 {
     regs: DeviceRefCell<Pl022Regs>,
     irq: parking_lot::Mutex<Option<InterruptSource>>,
     ssi_bus: parking_lot::Mutex<Option<Arc<SpiBus>>>,
+    /// Chip-select index on the SPI bus.
+    cs_index: u8,
 }
 
 impl Pl022 {
@@ -114,7 +116,13 @@ impl Pl022 {
             regs: DeviceRefCell::new(Pl022Regs::new()),
             irq: parking_lot::Mutex::new(None),
             ssi_bus: parking_lot::Mutex::new(None),
+            cs_index: 0,
         }
+    }
+
+    /// Set the chip-select index driven on the attached SPI bus.
+    pub fn set_cs_index(&mut self, cs_index: u8) {
+        self.cs_index = cs_index;
     }
 
     pub fn connect_ssi_bus(&self, bus: Arc<SpiBus>) {
@@ -176,13 +184,23 @@ impl Pl022 {
         self.lower_irq();
     }
 
+    fn deassert_cs(&self) {
+        if let Some(ref bus) = *self.ssi_bus.lock() {
+            bus.set_cs(self.cs_index, false);
+        }
+    }
+
     fn lower_irq(&self) {
         if let Some(ref line) = *self.irq.lock() {
             line.lower();
         }
+        self.deassert_cs();
     }
 
     /// Run the transfer engine and update IRQ output.
+    /// Run the transfer engine and update IRQ output.
+    /// Asserts the frame-select (CS) line on the attached SPI bus for
+    /// the duration of the TX FIFO drain when SSE is enabled.
     fn xfer_and_update_irq(&self) {
         let mut regs = self.regs.borrow();
         if regs.cr1 & PL022_CR1_SSE == 0 {
@@ -196,6 +214,16 @@ impl Pl022 {
         }
 
         let ssi = self.ssi_bus.lock();
+        let cs = self.cs_index;
+
+        // Assert CS if there is data to transfer
+        let has_data = regs.tx_fifo_len > 0;
+        if has_data {
+            if let Some(ref bus) = *ssi {
+                bus.set_cs(cs, true);
+            }
+        }
+
         let mut i = (regs.tx_fifo_head - regs.tx_fifo_len) & 7;
         let mut o = regs.rx_fifo_head;
 
@@ -218,6 +246,13 @@ impl Pl022 {
         regs.update();
         let irq = (regs.is & regs.im) != 0;
         drop(regs);
+
+        // Deassert CS after transfer
+        if has_data {
+            if let Some(ref bus) = *ssi {
+                bus.set_cs(cs, false);
+            }
+        }
         // Drop ssi bus lock before setting IRQ
         drop(ssi);
         if let Some(ref line) = *self.irq.lock() {

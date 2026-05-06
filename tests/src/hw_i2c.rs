@@ -314,3 +314,67 @@ fn test_i2c_repeated_start_with_nack_fails() {
     bus.end_transfer();
     assert!(!bus.busy());
 }
+
+// -- Regression: repeated START changes address --
+
+#[test]
+fn test_i2c_repeated_start_changes_address() {
+    // Repeated START must finish the old device (A) and route new
+    // events/bytes to the new device (B).
+    let bus = I2cBus::new();
+    let dev_a = MockI2cSlave::new(0x30);
+    let dev_b = MockI2cSlave::new(0x40);
+    bus.attach(dev_a.clone()).unwrap();
+    bus.attach(dev_b.clone()).unwrap();
+
+    // First transfer to A
+    bus.start_transfer(0x30, false).unwrap();
+    assert_eq!(dev_a.events().len(), 1);
+    assert_eq!(dev_a.events()[0], I2cEvent::StartSend);
+    assert_eq!(dev_b.events().len(), 0);
+
+    // Send a byte to A
+    bus.send(0xAA).unwrap();
+    assert_eq!(dev_a.sent(), vec![0xAA]);
+
+    // Repeated START to B (recv) — A must receive Finish,
+    // B must receive StartRecv
+    bus.start_transfer(0x40, true).unwrap();
+    assert_eq!(dev_a.events().len(), 2);
+    assert_eq!(dev_a.events()[1], I2cEvent::Finish);
+    assert_eq!(dev_b.events().len(), 1);
+    assert_eq!(dev_b.events()[0], I2cEvent::StartRecv);
+
+    // Subsequent bytes go to B, not A
+    assert_eq!(bus.recv(), 0x42);
+    assert_eq!(bus.recv(), 0x43);
+
+    bus.end_transfer();
+    assert_eq!(dev_b.events().len(), 2);
+    assert_eq!(dev_b.events()[1], I2cEvent::Finish);
+}
+
+#[test]
+fn test_i2c_repeated_start_same_address_no_duplicate_finish() {
+    // Repeated START to the same address should not duplicate Finish
+    // for a device that was never selected.
+    let bus = I2cBus::new();
+    let dev = MockI2cSlave::new(0x50);
+    bus.attach(dev.clone()).unwrap();
+
+    bus.start_transfer(0x50, false).unwrap();
+    assert_eq!(dev.events().len(), 1);
+    assert_eq!(dev.events()[0], I2cEvent::StartSend);
+
+    bus.send(0x11).unwrap();
+
+    // Repeated START to same address — device should get a new
+    // StartSend but the old transfer should be finished first
+    bus.start_transfer(0x50, false).unwrap();
+    // Events: StartSend, Finish, StartSend
+    assert_eq!(dev.events().len(), 3);
+    assert_eq!(dev.events()[1], I2cEvent::Finish);
+    assert_eq!(dev.events()[2], I2cEvent::StartSend);
+
+    bus.end_transfer();
+}

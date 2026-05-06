@@ -230,8 +230,9 @@ impl SiFiveSpi {
     }
 
     pub fn reset_runtime(&self) {
-        self.regs.borrow().reset(self.num_cs);
         self.lower_outputs();
+        self.regs.borrow().reset(self.num_cs);
+        self.update_cs();
     }
 
     fn lower_outputs(&self) {
@@ -241,20 +242,38 @@ impl SiFiveSpi {
         for l in self.cs_lines.lock().iter().flatten() {
             l.lower();
         }
+        // Deassert all CS lines on the bus
+        if let Some(ref bus) = *self.ssi_bus.lock() {
+            for i in 0..self.num_cs {
+                bus.set_cs(i as u8, false);
+            }
+        }
     }
 
     fn update_cs(&self) {
         let regs = self.regs.borrow();
         let cs_lines = self.cs_lines.lock();
+        let ssi = self.ssi_bus.lock();
         for i in 0..self.num_cs as usize {
-            if i >= cs_lines.len() {
-                break;
-            }
-            if let Some(ref line) = cs_lines[i] {
-                let csdef_set = regs.regs[R_CSDEF] & (1u32 << i as u32) != 0;
-                if csdef_set {
-                    line.set(regs.regs[R_CSMODE] == 0);
+            let csdef_bit = (regs.regs[R_CSDEF] >> i) & 1;
+            let level = match regs.regs[R_CSMODE] {
+                0 /* AUTO */ => csdef_bit != 0,
+                2 /* HOLD */ => {
+                    if i == regs.regs[R_CSID] as usize {
+                        csdef_bit != 0
+                    } else {
+                        false
+                    }
                 }
+                _ => false, /* OFF or invalid mode */
+            };
+            if i < cs_lines.len() {
+                if let Some(ref line) = cs_lines[i] {
+                    line.set(level);
+                }
+            }
+            if let Some(ref bus) = *ssi {
+                bus.set_cs(i as u8, level);
             }
         }
     }
@@ -281,13 +300,30 @@ impl SiFiveSpi {
 
     fn flush_txfifo(&self, ssi: Option<&SpiBus>) {
         let mut regs = self.regs.borrow();
+        let auto_mode = regs.regs[R_CSMODE] == 0;
+        let cs_id = regs.regs[R_CSID] as u8;
+        let csdef_assert = if auto_mode {
+            (regs.regs[R_CSDEF] >> cs_id) & 1 != 0
+        } else {
+            false
+        };
         while !regs.tx_fifo.is_empty() {
             let tx = regs.tx_fifo.pop();
+            if auto_mode {
+                if let Some(bus) = ssi {
+                    bus.set_cs(cs_id, csdef_assert);
+                }
+            }
             let rx = if let Some(bus) = ssi {
                 bus.transfer(u32::from(tx))
             } else {
                 0xFF
             };
+            if auto_mode {
+                if let Some(bus) = ssi {
+                    bus.set_cs(cs_id, !csdef_assert);
+                }
+            }
             if !regs.rx_fifo.is_full() && regs.regs[R_FMT] & FMT_DIR == 0 {
                 regs.rx_fifo.push(rx as u8);
             }

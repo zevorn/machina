@@ -286,6 +286,39 @@ fn test_sd_data_ready_no_card() {
     assert!(!bus.data_ready());
 }
 
+// -- Regression: host readonly sync --
+
+#[test]
+fn test_sd_insert_readonly_card_notifies_host() {
+    let bus = SdBus::new();
+    let host = MockHost::new();
+    bus.set_host(host.clone());
+
+    // Insert a readonly card
+    let card = MockSdCard::new(true);
+    *card.readonly.lock().unwrap() = true;
+    bus.insert_card(card);
+
+    assert_eq!(host.last_inserted(), Some(true));
+    assert_eq!(host._last_readonly(), Some(true));
+}
+
+#[test]
+fn test_sd_set_host_syncs_existing_card_state() {
+    let bus = SdBus::new();
+
+    // Insert a card before setting host
+    let card = MockSdCard::new(true);
+    bus.insert_card(card);
+
+    // Now set the host — it should sync both inserted and readonly
+    let host = MockHost::new();
+    bus.set_host(host.clone());
+
+    assert_eq!(host.last_inserted(), Some(true));
+    assert_eq!(host._last_readonly(), Some(false)); // card is not readonly
+}
+
 #[test]
 fn test_sd_reparent_card() {
     let bus1 = SdBus::new();

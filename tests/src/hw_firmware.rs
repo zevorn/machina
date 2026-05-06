@@ -724,3 +724,102 @@ fn test_fw_cfg_dma_write_denied_advances_offset() {
     assert_eq!(fw.read_data_byte(), 0xCC);
     assert_eq!(fw.read_data_byte(), 0xDD);
 }
+
+// -- Regression: FwCfgDataGenerator invocation and caching --
+
+struct OneShotGen {
+    data: Mutex<Option<Vec<u8>>>,
+    call_count: Mutex<usize>,
+}
+
+impl OneShotGen {
+    fn new(data: Vec<u8>) -> Self {
+        Self {
+            data: Mutex::new(Some(data)),
+            call_count: Mutex::new(0),
+        }
+    }
+}
+
+impl FwCfgDataGenerator for OneShotGen {
+    fn get_data(&self) -> Result<Option<Vec<u8>>, String> {
+        *self.call_count.lock().unwrap() += 1;
+        Ok(self.data.lock().unwrap().take())
+    }
+}
+
+#[test]
+fn test_fw_cfg_add_generator_invoked_on_first_selection() {
+    let fw = FwCfg::new();
+    let gen = OneShotGen::new(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    fw.add_generator(0xDEAD, Box::new(gen));
+
+    // Before selection, the entry doesn't exist
+    assert!(!fw.has_entry(0xDEAD));
+
+    // First selection triggers generator
+    fw.set_selector(0xDEAD);
+    assert!(fw.has_entry(0xDEAD));
+    assert_eq!(fw.read_data_byte(), 0xDE);
+    assert_eq!(fw.read_data_byte(), 0xAD);
+
+    // Second selection uses cached data, generator not re-invoked
+    fw.set_selector(0xDEAD);
+    assert_eq!(fw.read_data_byte(), 0xDE); // cached
+}
+
+// -- Regression: FILE_DIR reflects files added after earlier selection --
+
+#[test]
+fn test_fw_cfg_file_dir_refresh() {
+    let fw = FwCfg::new();
+
+    // Add a file, then select FILE_DIR
+    fw.add_file(0x8000, "etc/first", vec![0x01]);
+    fw.set_selector(keys::FILE_DIR);
+    // Read file count (first 4 bytes big-endian)
+    let count = fw.read_data_dword();
+    assert_eq!(count, 1);
+
+    // Add another file after FILE_DIR was already selected
+    fw.add_file(0x8001, "etc/second", vec![0x02]);
+    fw.set_selector(keys::FILE_DIR);
+
+    // Now file count should be 2
+    let count = fw.read_data_dword();
+    assert_eq!(count, 2);
+}
+
+// -- Regression: DMA disabled is a no-op --
+
+#[test]
+fn test_fw_cfg_dma_disabled_noop() {
+    let fw = FwCfg::new();
+    fw.add_bytes(0x0003, vec![0x01, 0x02, 0x03]);
+    fw.set_selector(0x0003);
+    // DMA is disabled by default
+
+    let access = MockDmaAccess::new();
+    let desc = FwCfgDmaDescriptor {
+        control: 0x0003_0002, // SELECT | READ, selector=0x0003
+        length: 3,
+        address: 0x100,
+    };
+    access.write_mem(0x100, &desc.encode());
+
+    let addr_before = access.read_mem(0x100, 16);
+    let result = fw.do_dma(0x100, &access);
+
+    // do_dma returns Ok(()) even when disabled (no-op)
+    assert!(result.is_ok());
+
+    // Descriptor memory is unchanged
+    let addr_after = access.read_mem(0x100, 16);
+    assert_eq!(addr_before, addr_after);
+
+    // Selector is unchanged
+    assert_eq!(fw.selector(), 0x0003);
+
+    // Offset is unchanged
+    assert_eq!(fw.read_data_byte(), 0x01);
+}
