@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+libc = { workspace = true }
 machina-core = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }

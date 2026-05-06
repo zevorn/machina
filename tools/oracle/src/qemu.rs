@@ -13,6 +13,9 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A running QEMU instance controlled via qtest protocol.
 ///
@@ -37,8 +40,12 @@ impl QemuProbe {
         machine: &str,
         extra_args: &[String],
     ) -> Result<Self, String> {
-        let stdout_path = std::env::temp_dir()
-            .join(format!("machina-qemu-stdout-{}", std::process::id()));
+        let unique_id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let stdout_path = std::env::temp_dir().join(format!(
+            "machina-qemu-stdout-{}-{}",
+            std::process::id(),
+            unique_id
+        ));
         let stdout_file = fs::File::create(&stdout_path).map_err(|e| {
             format!("create stdout file {}: {e}", stdout_path.display())
         })?;
@@ -57,7 +64,10 @@ impl QemuProbe {
             .stdout(stdout_file)
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("cannot spawn QEMU '{qemu_bin}': {e}"))?;
+            .map_err(|e| {
+                let _ = fs::remove_file(&stdout_path);
+                format!("cannot spawn QEMU '{qemu_bin}': {e}")
+            })?;
 
         let stdin = child.stdin.take().ok_or("no QEMU stdin")?;
 
@@ -108,12 +118,13 @@ impl QemuProbe {
 
         // QEMU does not exit on stdin EOF alone — send SIGTERM.
         if let Some(ref child) = self.child {
-            let pid = child.id();
-            Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status()
-                .map_err(|e| format!("send SIGTERM to {pid}: {e}"))?;
+            let pid = child.id() as libc::pid_t;
+            // SAFETY: kill(2) is async-signal-safe, pid is valid.
+            let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                return Err(format!("send SIGTERM to {pid}: {err}"));
+            }
         }
 
         // Wait for QEMU to exit (SIGTERM triggers graceful shutdown /
@@ -128,6 +139,11 @@ impl QemuProbe {
 
         // Clean up temp file.
         let _ = fs::remove_file(&self.stdout_path);
+
+        // Check for qtest FAIL lines before parsing values.
+        if content.lines().any(|l| l.trim().starts_with("FAIL")) {
+            return Err("qtest command failed".to_string());
+        }
 
         let values: Vec<u64> = content
             .lines()
@@ -146,12 +162,9 @@ impl Drop for QemuProbe {
     fn drop(&mut self) {
         self.stdin.take();
         if let Some(mut child) = self.child.take() {
-            // Best-effort kill on drop.
-            let pid = child.id();
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status();
+            let pid = child.id() as libc::pid_t;
+            // SAFETY: kill(2) is async-signal-safe, pid is valid.
+            let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
             let _ = child.wait();
         }
         let _ = fs::remove_file(&self.stdout_path);
@@ -254,10 +267,18 @@ pub fn probe_reset(
         .finish()
         .map_err(|e| format!("qemu collect responses: {e}"))?;
 
+    if values.len() != descriptor.registers.len() {
+        return Err(format!(
+            "qtest response count mismatch: expected {}, got {}",
+            descriptor.registers.len(),
+            values.len()
+        ));
+    }
+
     let mut regs = RegSnapshot::new();
     for (i, &(name, _offset, _size)) in descriptor.registers.iter().enumerate()
     {
-        let val = values.get(i).copied().unwrap_or(0);
+        let val = values[i];
         regs.insert(name.to_string(), val);
     }
 
@@ -314,10 +335,18 @@ pub fn probe_scenario(
 
     // `values` contains only read results — write "OK" ACKs are
     // filtered out by the parser.
+    if values.len() != descriptor.registers.len() {
+        return Err(format!(
+            "qtest response count mismatch: expected {}, got {}",
+            descriptor.registers.len(),
+            values.len()
+        ));
+    }
+
     let mut regs = RegSnapshot::new();
     for (i, &(name, _offset, _size)) in descriptor.registers.iter().enumerate()
     {
-        let val = values.get(i).copied().unwrap_or(0);
+        let val = values[i];
         regs.insert(name.to_string(), val);
     }
 
