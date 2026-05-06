@@ -25,6 +25,9 @@
 //! {"registers": {"REG_NAME": value, ...}, "irqs": {"IRQ_NUM": true, ...}}
 //! ```
 
+pub mod descriptors;
+pub mod qemu;
+
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -253,6 +256,9 @@ impl RuntimeOracle {
             if let Some(mut s) = child.stderr.take() {
                 let _ = s.read_to_string(&mut stderr);
             }
+            if status.code() == Some(77) {
+                return Err(format!("SKIP_PROBE:{stderr}"));
+            }
             return Err(format!(
                 "probe exited {}: {stderr}",
                 status.code().unwrap_or(-1)
@@ -278,7 +284,7 @@ impl RuntimeOracle {
         let probe = match self.run_probe("reset", None) {
             Ok(p) => p,
             Err(e) => {
-                if e.starts_with("NOT_FOUND:") {
+                if e.starts_with("NOT_FOUND:") || e.starts_with("SKIP_PROBE:") {
                     return OracleCheckResult::Skip(e);
                 }
                 return OracleCheckResult::Error(e);
@@ -316,7 +322,9 @@ impl RuntimeOracle {
                     match self.run_probe("scenario", Some(&scenario.name)) {
                         Ok(p) => p,
                         Err(e) => {
-                            if e.starts_with("NOT_FOUND:") {
+                            if e.starts_with("NOT_FOUND:")
+                                || e.starts_with("SKIP_PROBE:")
+                            {
                                 return OracleCheckResult::Skip(e);
                             }
                             return OracleCheckResult::Error(e);

@@ -5,17 +5,130 @@
 //!   <device> --probe scenario <name>
 //!
 //! Prints `{"registers": {...}, "irqs": {...}}` to stdout and exits 0
-//! on success.  Exits non-zero on unknown device or scenario.
+//! on success.
 //!
-//! Currently serves Batch 1/2 fixture data directly.  Future: spawn
-//! QEMU to dynamically probe device behavior for devices not in the
-//! embedded set.
+//! For devices with a QEMU qtest descriptor, the probe spawns QEMU and
+//! reads guest-visible register/IRQ state at runtime.  When QEMU is
+//! unavailable, it exits 77 with `SKIP: <reason>` on stderr.
+//!
+//! For devices without a descriptor (not yet wired), it falls back to
+//! embedded fixture data.  These fixtures will be removed as each device
+//! receives a QEMU descriptor.
 
-use std::collections::BTreeMap;
 use std::process;
 
-type RegSnapshot = BTreeMap<String, u64>;
-type IrqSnapshot = BTreeMap<u32, bool>;
+use machina_oracle::descriptors;
+use machina_oracle::qemu::{self, IrqSnapshot, RegSnapshot};
+
+// -- Probe output helpers --
+
+fn emit_json(regs: &RegSnapshot, irqs: &IrqSnapshot) {
+    let regs_val = serde_json::to_value(regs).unwrap();
+    let irqs_val = serde_json::to_value(irqs).unwrap();
+    println!(
+        "{}",
+        serde_json::json!({"registers": regs_val, "irqs": irqs_val})
+    );
+}
+
+// -- Entry point --
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 3 {
+        eprintln!("usage: {} <device> --probe reset|scenario [name]", args[0]);
+        process::exit(2);
+    }
+
+    let device = &args[1];
+    let mode = parse_mode(&args);
+
+    match mode {
+        ProbeMode::Reset => {
+            probe_reset(device);
+        }
+        ProbeMode::Scenario(name) => {
+            probe_scenario(device, &name);
+        }
+    }
+}
+
+enum ProbeMode {
+    Reset,
+    Scenario(String),
+}
+
+fn parse_mode(args: &[String]) -> ProbeMode {
+    if args.len() < 3 || args[2] != "--probe" {
+        eprintln!("expected --probe, got: {}", args.get(2).map_or("", |s| s));
+        process::exit(2);
+    }
+    let sub = args.get(3).map_or("", |s| s);
+    match sub {
+        "reset" => ProbeMode::Reset,
+        "scenario" => {
+            let name = args.get(4).cloned().unwrap_or_default();
+            if name.is_empty() {
+                eprintln!("missing scenario name");
+                process::exit(2);
+            }
+            ProbeMode::Scenario(name)
+        }
+        other => {
+            eprintln!("unknown probe mode: {other}");
+            process::exit(2);
+        }
+    }
+}
+
+// -- QEMU-backed probe path (devices with descriptors) --
+
+fn probe_reset(device: &str) {
+    let desc = match descriptors::get_descriptor(device) {
+        Some(d) => d,
+        None => {
+            // No QEMU descriptor — fall back to embedded fixture data.
+            fixture_reset(device);
+            return;
+        }
+    };
+
+    match qemu::probe_reset(desc) {
+        Ok((regs, irqs)) => emit_json(&regs, &irqs),
+        Err(e) if e.starts_with("SKIP:") => {
+            eprintln!("{e}");
+            process::exit(77);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    }
+}
+
+fn probe_scenario(device: &str, name: &str) {
+    let desc = match descriptors::get_descriptor(device) {
+        Some(d) => d,
+        None => {
+            fixture_scenario(device, name);
+            return;
+        }
+    };
+
+    match qemu::probe_scenario(desc, name) {
+        Ok((regs, irqs)) => emit_json(&regs, &irqs),
+        Err(e) if e.starts_with("SKIP:") => {
+            eprintln!("{e}");
+            process::exit(77);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
+    }
+}
+
+// -- Embedded fixture fallback (devices without descriptors) ----------
 
 struct DeviceData {
     reset_regs: RegSnapshot,
@@ -28,111 +141,65 @@ struct ScenarioData {
     irqs: IrqSnapshot,
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: {} <device> --probe reset|scenario [name]", args[0]);
-        process::exit(2);
-    }
-
-    let device = &args[1];
-    let mode = &args[2];
-    let scenario_name = if args.len() > 3 {
-        Some(args[3].as_str())
-    } else {
-        None
-    };
-
-    let data = match get_device(device) {
-        Some(d) => d,
-        None => {
-            eprintln!("unknown device: {device}");
-            process::exit(1);
-        }
-    };
-
-    let output = match mode.as_str() {
-        "--probe" => {
-            // Formats: --probe reset  OR  --probe scenario <name>
-            let sub = scenario_name.unwrap_or("");
-            match sub {
-                "reset" => emit_reset(&data),
-                "scenario" => {
-                    let name = if args.len() > 4 {
-                        args[4].as_str()
-                    } else {
-                        eprintln!("missing scenario name");
-                        process::exit(2);
-                    };
-                    emit_scenario(&data, name)
-                }
-                other => {
-                    eprintln!("unknown probe mode: {other}");
-                    process::exit(2);
-                }
-            }
-        }
-        other => {
-            eprintln!("expected --probe, got: {other}");
-            process::exit(2);
-        }
-    };
-
-    println!("{output}");
-}
-
-fn emit_reset(data: &DeviceData) -> String {
+fn fixture_reset(device: &str) {
+    let data = get_device(device);
     let regs = serde_json::to_value(&data.reset_regs).unwrap();
     let irqs = serde_json::json!({});
-    serde_json::json!({"registers": regs, "irqs": irqs}).to_string()
+    println!("{}", serde_json::json!({"registers": regs, "irqs": irqs}));
 }
 
-fn emit_scenario(data: &DeviceData, name: &str) -> String {
+fn fixture_scenario(device: &str, name: &str) {
+    let data = get_device(device);
     for s in &data.scenarios {
         if s.name == name {
             let regs = serde_json::to_value(&s.regs).unwrap();
             let irqs = serde_json::to_value(&s.irqs).unwrap();
-            return serde_json::json!({"registers": regs, "irqs": irqs})
-                .to_string();
+            println!(
+                "{}",
+                serde_json::json!({"registers": regs, "irqs": irqs})
+            );
+            return;
         }
     }
     eprintln!("unknown scenario '{name}' for device");
     process::exit(1);
 }
 
-fn get_device(name: &str) -> Option<DeviceData> {
+fn get_device(name: &str) -> DeviceData {
     match name {
-        "sifive_e_prci" => Some(sifive_e_prci()),
-        "sifive_u_prci" => Some(sifive_u_prci()),
-        "pvpanic" => Some(pvpanic()),
-        "pvpanic-mmio" => Some(pvpanic_mmio()),
-        "unimp" => Some(unimp()),
-        "virt_ctrl" => Some(virt_ctrl()),
-        "led" => Some(led()),
-        "gpio_key" => Some(gpio_key()),
-        "gpio_pwr" => Some(gpio_pwr()),
-        "pch_msi" => Some(pch_msi()),
-        "dintc" => Some(dintc()),
-        "liointc" => Some(liointc()),
-        "cmgcr" => Some(cmgcr()),
-        "cpc" => Some(cpc()),
-        "loongarch_ipi" => Some(loongarch_ipi()),
-        "riscv_aplic" => Some(riscv_aplic()),
-        "riscv_imsic" => Some(riscv_imsic()),
-        _ => None,
+        "sifive_e_prci" => sifive_e_prci(),
+        "sifive_u_prci" => sifive_u_prci(),
+        "pvpanic" => pvpanic(),
+        "pvpanic-mmio" => pvpanic_mmio(),
+        "unimp" => unimp(),
+        "virt_ctrl" => virt_ctrl(),
+        "led" => led(),
+        "gpio_key" => gpio_key(),
+        "gpio_pwr" => gpio_pwr(),
+        "pch_msi" => pch_msi(),
+        "dintc" => dintc(),
+        "liointc" => liointc(),
+        "cmgcr" => cmgcr(),
+        "cpc" => cpc(),
+        "loongarch_ipi" => loongarch_ipi(),
+        "riscv_aplic" => riscv_aplic(),
+        "riscv_imsic" => riscv_imsic(),
+        _ => {
+            eprintln!("unknown device: {name}");
+            process::exit(1);
+        }
     }
 }
 
 // -- Batch 1 fixture data --
 
 fn sifive_e_prci() -> DeviceData {
-    let pllcfg_default: u64 = 0x8006_0000;
     DeviceData {
         reset_regs: {
             let mut m = RegSnapshot::new();
             m.insert("HFROSCCFG".into(), 0xC000_0000);
             m.insert("HFXOSCCFG".into(), 0xC000_0000);
-            m.insert("PLLCFG".into(), pllcfg_default);
+            m.insert("PLLCFG".into(), 0x8006_0000);
             m.insert("PLLOUTDIV".into(), 0x0000_0100);
             m
         },
