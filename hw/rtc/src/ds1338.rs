@@ -62,7 +62,7 @@ impl Ds1338 {
         let hour = (total_hours % 24) as u8;
         let total_days = total_hours / 24;
         let wday = ((total_days + 4) % 7) as u8 + 1; // Thursday 1970-01-01
-        let (year, mon, mday) = days_to_date(total_days as i64);
+        let (year, mon, mday) = days_to_date(total_days);
 
         let mut nvram = self.nvram.lock().unwrap();
         nvram[0] = to_bcd(sec);

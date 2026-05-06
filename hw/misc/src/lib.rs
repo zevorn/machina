@@ -16,9 +16,7 @@ pub use led::Led;
 pub use led::LedColor;
 pub use pl050::{Pl050, Pl050Mmio};
 pub use pvpanic::{Pvpanic, PvpanicEvent, PvpanicMmio};
-pub use sifive_e_aon::{
-    SiFiveEAon, SiFiveEAonMmio, SIFIVE_E_AON_WDOGFEED,
-};
+pub use sifive_e_aon::{SiFiveEAon, SiFiveEAonMmio, SIFIVE_E_AON_WDOGFEED};
 pub use sifive_e_prci::{SifiveEPRCI, SifiveEPRCIMmio};
 pub use sifive_u_otp::{SiFiveUOtp, SiFiveUOtpMmio};
 pub use sifive_u_prci::{SifiveUPRCI, SifiveUPRCIMmio};

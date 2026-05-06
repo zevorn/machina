@@ -24,26 +24,14 @@ const PWMCOUNT_MASK: u32 = 0x7FFF_FFFF;
 
 // Config register fields
 const CONFIG_SCALE: u32 = 0x0F;
-const CONFIG_STICKY: u32 = 1 << 8;
 const CONFIG_ZEROCMP: u32 = 1 << 9;
-const CONFIG_DEGLITCH: u32 = 1 << 10;
 const CONFIG_ENALWAYS: u32 = 1 << 12;
 const CONFIG_ENONESHOT: u32 = 1 << 13;
-const CONFIG_CMP0CENTER: u32 = 1 << 16;
-const CONFIG_CMP1CENTER: u32 = 1 << 17;
-const CONFIG_CMP2CENTER: u32 = 1 << 18;
-const CONFIG_CMP3CENTER: u32 = 1 << 19;
-const CONFIG_CMP0GANG: u32 = 1 << 24;
-const CONFIG_CMP1GANG: u32 = 1 << 25;
-const CONFIG_CMP2GANG: u32 = 1 << 26;
-const CONFIG_CMP3GANG: u32 = 1 << 27;
 const CONFIG_CMP0IP: u32 = 1 << 28;
 const CONFIG_CMP1IP: u32 = 1 << 29;
 const CONFIG_CMP2IP: u32 = 1 << 30;
 const CONFIG_CMP3IP: u32 = 1 << 31;
 
-const IP_MASK: u32 =
-    CONFIG_CMP0IP | CONFIG_CMP1IP | CONFIG_CMP2IP | CONFIG_CMP3IP;
 
 fn has_pwm_en_bits(cfg: u32) -> bool {
     (cfg & (CONFIG_ENONESHOT | CONFIG_ENALWAYS)) != 0
@@ -106,9 +94,8 @@ impl SiFivePwmRegs {
     fn check_irqs(&self, now_ns: u64) -> [bool; PWM_CHANS] {
         let pwms = self.pwms(now_ns);
         let mut state = [false; PWM_CHANS];
-        for i in 0..PWM_CHANS {
-            let pwmcmp = self.pwmcmp[i] & PWMCMP_MASK;
-            state[i] = pwms >= pwmcmp;
+        for (cmp, s) in self.pwmcmp.iter().zip(state.iter_mut()) {
+            *s = pwms >= (*cmp & PWMCMP_MASK);
         }
         state
     }
@@ -193,10 +180,8 @@ impl SiFivePwm {
     }
 
     fn lower_outputs(&self) {
-        for line in self.outputs.lock().iter() {
-            if let Some(ref l) = line {
-                l.lower();
-            }
+        for l in self.outputs.lock().iter().flatten() {
+            l.lower();
         }
     }
 
@@ -297,7 +282,7 @@ impl MmioOps for SiFivePwmMmio {
             R_PWMS => {
                 let count = regs.tick_offset & PWMCOUNT_MASK as u64;
                 let s = regs.scale();
-                u64::from((count >> s) & PWMCMP_MASK as u64)
+                (count >> s) & PWMCMP_MASK as u64
             }
             R_PWMCMP0 => u64::from(regs.pwmcmp[0] & PWMCMP_MASK),
             R_PWMCMP1 => u64::from(regs.pwmcmp[1] & PWMCMP_MASK),

@@ -97,11 +97,11 @@ impl Pl061Regs {
     }
 
     fn pullups_mask(&self) -> u8 {
-        (self.pullups & !self.dir as u8) as u8
+        self.pullups & !self.dir as u8
     }
 
     fn floating_mask(&self) -> u8 {
-        (!(self.pullups | self.pulldowns) & !self.dir as u8) as u8
+        !(self.pullups | self.pulldowns) & !self.dir as u8
     }
 
     fn update(&mut self) {
@@ -117,14 +117,14 @@ impl Pl061Regs {
         let changed = (self.old_in_data ^ self.data) & !self.dir;
         for i in 0..N_GPIOS {
             let mask = 1u32 << i;
-            if changed & mask != 0 {
-                if self.isense & mask == 0 {
-                    // Edge interrupt
-                    if self.ibe & mask != 0 {
-                        self.istate |= mask;
-                    } else {
-                        self.istate |= !(self.data ^ self.iev) & mask;
-                    }
+            if changed & mask != 0
+                && self.isense & mask == 0
+            {
+                // Edge interrupt
+                if self.ibe & mask != 0 {
+                    self.istate |= mask;
+                } else {
+                    self.istate |= !(self.data ^ self.iev) & mask;
                 }
             }
         }
@@ -229,10 +229,8 @@ impl Pl061 {
         if let Some(ref line) = *self.output.lock() {
             line.lower();
         }
-        for out in self.gpio_outputs.lock().iter() {
-            if let Some(ref line) = out {
-                line.lower();
-            }
+        for line in self.gpio_outputs.lock().iter().flatten() {
+            line.lower();
         }
     }
 
@@ -354,7 +352,7 @@ impl MmioOps for Pl061Mmio {
             0x514 => regs.pdr = value & 0xFF,
             0x518 => regs.slr = value & 0xFF,
             0x51C => regs.den = value & 0xFF,
-            0x520 => regs.locked = value != 0xACCE_551,
+            0x520 => regs.locked = value != 0x0ACC_E551,
             0x524 => {
                 if !regs.locked {
                     regs.cr = value & 0xFF;

@@ -79,16 +79,12 @@ impl SiFiveUOtpRegs {
         regs
     }
 
+    #[expect(dead_code)]
     fn get_fusearray_bit(&self, idx: usize, offset: u32) -> u32 {
         (self.fuse[idx] >> offset) & 0x1
     }
 
-    fn set_fusearray_bit(
-        &mut self,
-        idx: usize,
-        offset: u32,
-        bit: u32,
-    ) {
+    fn set_fusearray_bit(&mut self, idx: usize, offset: u32, bit: u32) {
         if bit != 0 {
             self.fuse[idx] |= 1u32 << offset;
         } else {

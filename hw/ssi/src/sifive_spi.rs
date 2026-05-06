@@ -12,8 +12,7 @@ use machina_memory::region::{MemoryRegion, MmioOps};
 use crate::SpiBus;
 
 // Register indices (offset >> 2)
-const R_SCKDIV: usize = 0x00 / 4;
-const R_SCKMODE: usize = 0x04 / 4;
+const R_SCKDIV: usize = 0;
 const R_CSID: usize = 0x10 / 4;
 const R_CSDEF: usize = 0x14 / 4;
 const R_CSMODE: usize = 0x18 / 4;
@@ -34,8 +33,6 @@ const SIFIVE_SPI_REG_NUM: usize = 0x78 / 4;
 const TXDATA_FULL: u32 = 1 << 31;
 const RXDATA_EMPTY: u32 = 1 << 31;
 
-const IE_TXWM: u32 = 1 << 0;
-const IE_RXWM: u32 = 1 << 1;
 const IP_TXWM: u32 = 1 << 0;
 const IP_RXWM: u32 = 1 << 1;
 
@@ -241,10 +238,8 @@ impl SiFiveSpi {
         if let Some(ref line) = *self.irq.lock() {
             line.lower();
         }
-        for line in self.cs_lines.lock().iter() {
-            if let Some(ref l) = line {
-                l.lower();
-            }
+        for l in self.cs_lines.lock().iter().flatten() {
+            l.lower();
         }
     }
 

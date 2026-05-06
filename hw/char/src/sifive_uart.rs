@@ -188,7 +188,7 @@ impl SiFiveUart {
         bus: &mut SysBus,
         address_space: &mut AddressSpace,
     ) -> Result<(), SysBusError> {
-        if self.chardev.borrow().take().is_some() {}
+        self.chardev.borrow().take();
         self.lower_outputs();
         self.state.lock().unrealize_from(bus, address_space)?;
         Ok(())

@@ -848,10 +848,7 @@ fn test_pl050_cr_enables_irq() {
     let pl050 = Arc::new(Pl050::new());
     let mmio = Pl050Mmio(Arc::clone(&pl050));
     let sink = Arc::new(Sink::new());
-    let irq = InterruptSource::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        0,
-    );
+    let irq = InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
     pl050.connect_irq(irq);
 
     assert!(!sink.level());
@@ -871,10 +868,7 @@ fn test_pl050_ps2_irq_input() {
     let pl050 = Arc::new(Pl050::new());
     let mmio = Pl050Mmio(Arc::clone(&pl050));
     let sink = Arc::new(Sink::new());
-    let irq = InterruptSource::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        0,
-    );
+    let irq = InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
     pl050.connect_irq(irq);
 
     // Enable RX interrupt (CR bit 4)
@@ -985,10 +979,7 @@ fn test_sifive_e_aon_cmp_ip_trigger() {
     let aon = Arc::new(SiFiveEAon::default());
     let mmio = SiFiveEAonMmio(Arc::clone(&aon));
     let sink = Arc::new(Sink::new());
-    let irq = InterruptSource::new(
-        Arc::clone(&sink) as Arc<dyn IrqSink>,
-        0,
-    );
+    let irq = InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
     aon.connect_irq(irq);
 
     // Set EN_ALWAYS, set low compare

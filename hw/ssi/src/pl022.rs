@@ -15,8 +15,6 @@ const PL022_ID: [u8; 8] = [0x22, 0x10, 0x04, 0x00, 0x0d, 0xf0, 0x05, 0xb1];
 
 const PL022_CR1_LBM: u32 = 1 << 0;
 const PL022_CR1_SSE: u32 = 1 << 1;
-const PL022_CR1_MS: u32 = 1 << 2;
-const PL022_CR1_SDO: u32 = 1 << 3;
 
 const PL022_SR_TFE: u32 = 1 << 0;
 const PL022_SR_TNF: u32 = 1 << 1;
@@ -238,7 +236,7 @@ pub struct Pl022Mmio(pub Arc<Pl022>);
 
 impl MmioOps for Pl022Mmio {
     fn read(&self, offset: u64, _size: u32) -> u64 {
-        if offset >= 0xFE0 && offset < 0x1000 {
+        if (0xFE0..0x1000).contains(&offset) {
             let idx = ((offset - 0xFE0) >> 2) as usize;
             if idx < PL022_ID.len() {
                 return u64::from(PL022_ID[idx]);

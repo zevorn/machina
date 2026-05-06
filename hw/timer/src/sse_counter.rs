@@ -32,7 +32,6 @@ const CNTCR_HDBG: u32 = 1 << 1;
 const CNTCR_SCEN: u32 = 1 << 2;
 const CNTCR_INTRMASK: u32 = 1 << 3;
 const CNTCR_PSLVERRDIS: u32 = 1 << 4;
-const CNTCR_INTRCLR: u32 = 1 << 5;
 
 const CNTCR_VALID_MASK: u32 =
     CNTCR_EN | CNTCR_HDBG | CNTCR_SCEN | CNTCR_INTRMASK | CNTCR_PSLVERRDIS;
@@ -261,14 +260,7 @@ impl MmioOps for SseCounterControlMmio {
         match offset {
             A_CNTCR => {
                 let mut regs = self.0.regs.borrow();
-                let old_en = regs.enabled();
-                let new_val = value & CNTCR_VALID_MASK;
-                let new_en = (new_val & CNTCR_EN) != 0;
-                if old_en != new_en {
-                    regs.cntcr = new_val;
-                } else {
-                    regs.cntcr = new_val;
-                }
+                regs.cntcr = value & CNTCR_VALID_MASK;
             }
             A_CNTCV_LO => {
                 let mut regs = self.0.regs.borrow();

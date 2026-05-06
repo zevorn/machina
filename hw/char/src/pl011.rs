@@ -397,7 +397,7 @@ pub struct Pl011Mmio(pub Arc<Pl011>);
 impl MmioOps for Pl011Mmio {
     fn read(&self, offset: u64, _size: u32) -> u64 {
         let mut regs = self.0.regs.borrow();
-        let r = match offset >> 2 {
+        match offset >> 2 {
             0 => {
                 // DR: read RX FIFO
                 let c = regs.rx_fifo_get();
@@ -405,7 +405,7 @@ impl MmioOps for Pl011Mmio {
                 regs.rsr = rsr;
                 drop(regs);
                 self.0.update_irqs();
-                return u64::from(c);
+                u64::from(c)
             }
             1 => u64::from(regs.rsr),
             6 => u64::from(regs.flags),
@@ -424,8 +424,7 @@ impl MmioOps for Pl011Mmio {
                 u64::from(PL011_ID[off])
             }
             _ => 0,
-        };
-        r
+        }
     }
 
     fn write(&self, offset: u64, _size: u32, val: u64) {

@@ -21,8 +21,8 @@ const AON_WDT_WDOGCMP0: u64 = 0x20;
 const SIFIVE_E_AON_RTC: u64 = 0x40;
 const SIFIVE_E_AON_MAX: u64 = 0x150;
 
-pub const SIFIVE_E_AON_WDOGKEY: u32 = 0x51F1_5E;
-pub const SIFIVE_E_AON_WDOGFEED: u32 = 0xD09F_00D;
+pub const SIFIVE_E_AON_WDOGKEY: u32 = 0x0051_F15E;
+pub const SIFIVE_E_AON_WDOGFEED: u32 = 0x0D09_F00D;
 pub const SIFIVE_E_LFCLK_DEFAULT_FREQ: u64 = 32768;
 
 // WDOGCFG field positions
@@ -78,17 +78,12 @@ impl SiFiveEAon {
     }
 
     #[must_use]
-    pub fn with_freq(
-        clock: Arc<VirtualClock>,
-        wdogclk_freq: u64,
-    ) -> Self {
+    pub fn with_freq(clock: Arc<VirtualClock>, wdogclk_freq: u64) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(
                 "sifive_e_aon",
             )),
-            regs: DeviceRefCell::new(SiFiveEAonRegs::new(
-                wdogclk_freq,
-            )),
+            regs: DeviceRefCell::new(SiFiveEAonRegs::new(wdogclk_freq)),
             irq: parking_lot::Mutex::new(None),
             clock,
         }
@@ -182,10 +177,8 @@ fn field_set(val: u32, pos: u8, bit: u32) -> u32 {
 }
 
 fn update_wdogcount(regs: &mut SiFiveEAonRegs, now: i64) {
-    let en_always =
-        field_get(regs.wdogcfg, WDOGCFG_EN_ALWAYS);
-    let en_core_awake =
-        field_get(regs.wdogcfg, WDOGCFG_EN_CORE_AWAKE);
+    let en_always = field_get(regs.wdogcfg, WDOGCFG_EN_ALWAYS);
+    let en_core_awake = field_get(regs.wdogcfg, WDOGCFG_EN_CORE_AWAKE);
     if en_always == 0 && en_core_awake == 0 {
         return;
     }
@@ -207,8 +200,7 @@ fn update_state(regs: &mut SiFiveEAonRegs, now: i64) {
         if field_get(regs.wdogcfg, WDOGCFG_ZEROCMP) == 1 {
             regs.wdogcount = 0;
         }
-        regs.wdogcfg =
-            field_set(regs.wdogcfg, WDOGCFG_IP0, 1);
+        regs.wdogcfg = field_set(regs.wdogcfg, WDOGCFG_IP0, 1);
     }
 }
 
@@ -231,11 +223,8 @@ impl MmioOps for SiFiveEAonMmio {
                 }
                 AON_WDT_WDOGS => {
                     update_wdogcount(&mut regs, now);
-                    let scale =
-                        field_get(regs.wdogcfg, WDOGCFG_SCALE);
-                    u64::from(
-                        (regs.wdogcount >> scale) as u32,
-                    )
+                    let scale = field_get(regs.wdogcfg, WDOGCFG_SCALE);
+                    u64::from(regs.wdogcount >> scale)
                 }
                 AON_WDT_WDOGFEED => 0,
                 AON_WDT_WDOGKEY => u64::from(regs.wdogunlock),
@@ -266,18 +255,10 @@ impl MmioOps for SiFiveEAonMmio {
                 if regs.wdogunlock == 0 {
                     return;
                 }
-                let old_en = field_get(
-                    regs.wdogcfg,
-                    WDOGCFG_EN_ALWAYS,
-                ) | field_get(
-                    regs.wdogcfg,
-                    WDOGCFG_EN_CORE_AWAKE,
-                );
+                let old_en = field_get(regs.wdogcfg, WDOGCFG_EN_ALWAYS)
+                    | field_get(regs.wdogcfg, WDOGCFG_EN_CORE_AWAKE);
                 let new_en = field_get(value, WDOGCFG_EN_ALWAYS)
-                    | field_get(
-                        value,
-                        WDOGCFG_EN_CORE_AWAKE,
-                    );
+                    | field_get(value, WDOGCFG_EN_CORE_AWAKE);
                 if old_en == 1 && new_en == 0 {
                     update_wdogcount(&mut regs, now);
                 } else if old_en == 0 && new_en == 1 {
@@ -290,8 +271,7 @@ impl MmioOps for SiFiveEAonMmio {
                 if regs.wdogunlock == 0 {
                     return;
                 }
-                regs.wdogcount =
-                    value & WDOGCOUNT_VALUE_MASK;
+                regs.wdogcount = value & WDOGCOUNT_VALUE_MASK;
                 regs.restart_time = now;
                 regs.wdogunlock = 0;
             }

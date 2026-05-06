@@ -239,10 +239,8 @@ impl SiFiveGpio {
     }
 
     fn lower_outputs(&self) {
-        for line in self.outputs.lock().iter() {
-            if let Some(ref l) = line {
-                l.lower();
-            }
+        for l in self.outputs.lock().iter().flatten() {
+            l.lower();
         }
     }
 

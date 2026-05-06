@@ -109,7 +109,7 @@ impl Htif {
         bus: &mut SysBus,
         address_space: &mut AddressSpace,
     ) -> Result<(), SysBusError> {
-        if self.chardev.borrow().take().is_some() {}
+        self.chardev.borrow().take();
         self.state.lock().unrealize_from(bus, address_space)?;
         Ok(())
     }
@@ -161,15 +161,15 @@ impl Htif {
         let mut resp: u64 = 0;
 
         if device == HTIF_DEV_SYSTEM {
-            if cmd == HTIF_SYSTEM_CMD_SYSCALL {
-                if payload & 0x1 != 0 {
-                    // Exit code
-                    let exit_code = (payload >> 1) as i32;
-                    if let Some(ref cb) = *self.exit_cb.lock() {
-                        cb(exit_code);
-                    }
-                    return;
+            if cmd == HTIF_SYSTEM_CMD_SYSCALL && payload & 0x1 != 0 {
+                // Exit code
+                let exit_code = (payload >> 1) as i32;
+                if let Some(ref cb) = *self.exit_cb.lock() {
+                    cb(exit_code);
                 }
+                return;
+            }
+            if cmd == HTIF_SYSTEM_CMD_SYSCALL {
                 // Syscall: PK_SYS_WRITE to console is supported.
                 // We don't do DMA; just ignore unsupported syscalls.
             }
