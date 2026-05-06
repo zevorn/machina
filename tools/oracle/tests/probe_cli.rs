@@ -96,10 +96,10 @@ fn test_probe_qemu_reset_sifive_e_prci() {
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("valid JSON");
     let regs = &parsed["registers"];
-    assert_eq!(regs["HFROSCCFG"].as_u64().unwrap(), 0xC0);
-    assert_eq!(regs["HFXOSCCFG"].as_u64().unwrap(), 0xC0);
-    assert_eq!(regs["PLLCFG"].as_u64().unwrap(), 0x680);
-    assert_eq!(regs["PLLOUTDIV"].as_u64().unwrap(), 0x10000);
+    assert_eq!(regs["HFROSCCFG"].as_u64().unwrap(), 0xC000_0000);
+    assert_eq!(regs["HFXOSCCFG"].as_u64().unwrap(), 0xC000_0000);
+    assert_eq!(regs["PLLCFG"].as_u64().unwrap(), 0x8006_0000);
+    assert_eq!(regs["PLLOUTDIV"].as_u64().unwrap(), 0x100);
 }
 
 #[test]
@@ -133,9 +133,8 @@ fn test_probe_qemu_scenario_write_pllcfg() {
     assert!(status.success());
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("valid JSON");
-    // QEMU returns 0x9234_56F8 — some PLLCFG bits are read-only
-    // in the hardware model, so the written value is masked.
-    assert_eq!(parsed["registers"]["PLLCFG"].as_u64().unwrap(), 0x9234_56F8);
+    // Typed readl returns the guest-visible 32-bit value.
+    assert_eq!(parsed["registers"]["PLLCFG"].as_u64().unwrap(), 0x9234_5678);
 }
 
 #[test]

@@ -39,11 +39,11 @@ const SIFIVE_U_PRCI_REGS: &[(&str, u64, u8)] = &[
     ("COREPLLCFG0", 0x04, 4),
     ("DDRPLLCFG0", 0x0C, 4),
     ("DDRPLLCFG1", 0x10, 4),
-    ("GEMGXLPLLCFG0", 0x14, 4),
-    ("GEMGXLPLLCFG1", 0x18, 4),
-    ("CORECLKSEL", 0x1C, 4),
-    ("DEVICESRESET", 0x20, 4),
-    ("CLKMUXSTATUS", 0x24, 4),
+    ("GEMGXLPLLCFG0", 0x1C, 4),
+    ("GEMGXLPLLCFG1", 0x20, 4),
+    ("CORECLKSEL", 0x24, 4),
+    ("DEVICESRESET", 0x28, 4),
+    ("CLKMUXSTATUS", 0x2C, 4),
 ];
 
 const SIFIVE_U_PRCI_SCENARIOS: &[ScenarioDescriptor] = &[ScenarioDescriptor {

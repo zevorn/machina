@@ -79,16 +79,30 @@ impl QemuProbe {
         })
     }
 
-    /// Queue a qtest MMIO read: `read <addr> <size>`.
+    /// Queue a typed qtest MMIO read.
+    ///
+    /// Uses typed accessors (`readb`/`readw`/`readl`/`readq`) that
+    /// handle target-endian decoding, so the returned value matches
+    /// the guest-visible register value.  Raw `read <addr> <size>`
+    /// transmits hex byte streams without endian conversion.
     pub fn send_read(&mut self, addr: u64, size: u8) -> Result<(), String> {
         let stdin = self.stdin.as_mut().ok_or("probe already closed")?;
-        writeln!(stdin, "read {addr:#x} {size}")
+        let cmd = match size {
+            1 => format!("readb {addr:#x}"),
+            2 => format!("readw {addr:#x}"),
+            4 => format!("readl {addr:#x}"),
+            8 => format!("readq {addr:#x}"),
+            other => {
+                return Err(format!("unsupported qtest read size {other}"))
+            }
+        };
+        writeln!(stdin, "{cmd}")
             .map_err(|e| format!("qemu send read: {e}"))?;
         self.cmd_count += 1;
         Ok(())
     }
 
-    /// Queue a qtest MMIO write: `write <addr> <size> <value>`.
+    /// Queue a typed qtest MMIO write.
     pub fn send_write(
         &mut self,
         addr: u64,
@@ -96,7 +110,16 @@ impl QemuProbe {
         value: u64,
     ) -> Result<(), String> {
         let stdin = self.stdin.as_mut().ok_or("probe already closed")?;
-        writeln!(stdin, "write {addr:#x} {size} {value:#x}")
+        let cmd = match size {
+            1 => format!("writeb {addr:#x} {value:#x}"),
+            2 => format!("writew {addr:#x} {value:#x}"),
+            4 => format!("writel {addr:#x} {value:#x}"),
+            8 => format!("writeq {addr:#x} {value:#x}"),
+            other => {
+                return Err(format!("unsupported qtest write size {other}"))
+            }
+        };
+        writeln!(stdin, "{cmd}")
             .map_err(|e| format!("qemu send write: {e}"))?;
         self.cmd_count += 1;
         Ok(())
