@@ -14,7 +14,7 @@ use machina_accel::x86_64::emitter::SoftMmuConfig;
 use machina_accel::X86_64CodeGen;
 #[cfg(unix)]
 use machina_core::machine::NetdevOpts;
-use machina_core::machine::{Machine, MachineOpts};
+use machina_core::machine::{LoaderSpec, Machine, MachineOpts};
 use machina_guest_loongarch::loongarch::cpu::{
     GUEST_BASE_CPU_OFFSET, NEG_ALIGN_CPU_OFFSET,
 };
@@ -46,6 +46,7 @@ fn usage() {
          with host-side SBI"
     );
     eprintln!("  -kernel path  Kernel binary");
+    eprintln!("  -dtb path     Device tree blob");
     eprintln!("  -nographic    Disable graphical output");
     eprintln!("  -append args  Kernel command line arguments");
     #[cfg(unix)]
@@ -69,6 +70,10 @@ fn usage() {
         "  -device virtio-net-device,netdev=<id>\
          [,mac=XX:XX:XX:XX:XX:XX]"
     );
+    eprintln!(
+        "  -device loader,file=<path>,addr=<addr>\
+         [,force-raw=on]"
+    );
     eprintln!("  --trace file  Trace output file");
     eprintln!("  -h, --help    Show this help");
 }
@@ -79,6 +84,7 @@ struct CliArgs {
     bios: Option<PathBuf>,
     bios_builtin: bool,
     kernel: Option<PathBuf>,
+    dtb: Option<PathBuf>,
     append: Option<String>,
     nographic: bool,
     #[cfg(unix)]
@@ -88,6 +94,7 @@ struct CliArgs {
     gdb: Option<String>,
     start_paused: bool,
     initrd: Option<PathBuf>,
+    loaders: Vec<LoaderSpec>,
     #[cfg(unix)]
     netdev_raw: Option<String>,
     #[cfg(unix)]
@@ -103,6 +110,7 @@ impl Default for CliArgs {
             bios: None,
             bios_builtin: false,
             kernel: None,
+            dtb: None,
             append: None,
             nographic: false,
             #[cfg(unix)]
@@ -112,6 +120,7 @@ impl Default for CliArgs {
             gdb: None,
             start_paused: false,
             initrd: None,
+            loaders: Vec::new(),
             #[cfg(unix)]
             netdev_raw: None,
             #[cfg(unix)]
@@ -181,6 +190,11 @@ fn parse_args() -> Result<CliArgs, String> {
                 }
                 cli.kernel = Some(path);
             }
+            "-dtb" => {
+                i += 1;
+                let s = args.get(i).ok_or("-dtb requires argument")?;
+                cli.dtb = Some(PathBuf::from(s));
+            }
             "-nographic" => {
                 cli.nographic = true;
             }
@@ -220,14 +234,23 @@ fn parse_args() -> Result<CliArgs, String> {
             "-device" => {
                 i += 1;
                 let val = args.get(i).ok_or("-device requires argument")?;
+                if val.starts_with("loader,") {
+                    cli.loaders.push(LoaderSpec::parse(val)?);
+                    i += 1;
+                    continue;
+                }
                 // virtio-net-device is Unix-only (TAP backend).
                 #[cfg(unix)]
                 if val.starts_with("virtio-net-device,") {
                     cli.device_net_raw = Some(val.clone());
+                    i += 1;
+                    continue;
                 }
-                // virtio-blk-device and other devices are
-                // handled via -drive; accept without error.
-                let _ = val;
+                if val.starts_with("virtio-blk-device") {
+                    i += 1;
+                    continue;
+                }
+                return Err(format!("-device: unsupported device: {val}"));
             }
             "--trace" => {
                 i += 1;
@@ -701,12 +724,14 @@ fn main() {
         ram_size,
         cpu_count: 1,
         kernel: cli.kernel.clone(),
+        dtb: cli.dtb.clone(),
         bios: cli.bios.clone(),
         bios_builtin: cli.bios_builtin,
         append: cli.append.clone(),
         nographic: cli.nographic,
         drive: cli.drive.clone(),
         initrd: cli.initrd.clone(),
+        loaders: cli.loaders.clone(),
         netdev,
     };
 
