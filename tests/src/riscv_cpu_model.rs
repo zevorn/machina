@@ -29,6 +29,24 @@ fn generic_profile_remains_default() {
 }
 
 #[test]
+fn generic_satp_warl_rejects_reserved_and_unsupported_modes() {
+    let mut cpu = RiscvCpu::new();
+    let sv39 = (8 << 60) | 0x1234;
+    cpu.csr.write(CSR_SATP, sv39, PrivLevel::Machine).unwrap();
+    assert_eq!(cpu.csr.satp, sv39);
+
+    cpu.csr
+        .write(CSR_SATP, 1 << 60, PrivLevel::Machine)
+        .unwrap();
+    assert_eq!(cpu.csr.satp, sv39);
+
+    cpu.csr
+        .write(CSR_SATP, 9 << 60, PrivLevel::Machine)
+        .unwrap();
+    assert_eq!(cpu.csr.satp, sv39);
+}
+
+#[test]
 fn c908_profile_initializes_machine_id_csrs_and_sv48_satp_gate() {
     let mut cpu = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
     assert_eq!(cpu.csr_read(CSR_MVENDORID), THEAD_VENDOR_ID);

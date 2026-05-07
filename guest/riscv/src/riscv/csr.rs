@@ -566,7 +566,7 @@ impl CsrFile {
                     return Err(CAUSE_ILLEGAL_INSN);
                 }
                 let mode = (val >> 60) & 0xF;
-                if mode == 0 || mode <= self.max_satp_mode {
+                if mode == 0 || (mode >= 8 && mode <= self.max_satp_mode) {
                     self.satp = val;
                 }
                 Ok(())
