@@ -132,7 +132,12 @@ impl Eiointc {
             outputs.push(empty_hwi_output_row());
         }
         outputs[cpu_id as usize][hwi as usize] = Some(irq);
+        let route_cpu_count = outputs.len().max(1) as u32;
         drop(outputs);
+        {
+            let mut regs = self.regs.borrow();
+            rebuild_core_isr(&mut regs, route_cpu_count);
+        }
         self.update_outputs();
     }
 
@@ -290,6 +295,7 @@ impl IrqSink for EiointcIrqSink {
 }
 
 fn rebuild_core_isr(regs: &mut EiointcRegs, route_cpu_count: u32) {
+    resize_core_isr(regs, route_cpu_count);
     for word in regs.core_isr.iter_mut().flatten() {
         *word = 0;
     }
@@ -308,6 +314,11 @@ fn rebuild_core_isr(regs: &mut EiointcRegs, route_cpu_count: u32) {
             regs.core_isr[cpu][idx] |= bit;
         }
     }
+}
+
+fn resize_core_isr(regs: &mut EiointcRegs, route_cpu_count: u32) {
+    regs.core_isr
+        .resize(route_cpu_count.max(1) as usize, [0u32; NUM_U32]);
 }
 
 fn hwi_bits_for_cpu(

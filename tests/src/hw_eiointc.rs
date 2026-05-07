@@ -115,6 +115,28 @@ fn coremap_routes_to_specific_cpu() {
 }
 
 #[test]
+fn connect_hwi_output_rebuilds_routes_for_extended_cpu() {
+    let e = Arc::new(Eiointc::new_named("eiointc0", 1));
+    let cpu0 = cpu_with_enabled_hwi(HWI1);
+    let cpu1 = cpu_with_enabled_hwi(HWI1);
+
+    e.connect_hwi_output(0, 1, hwi_output(&cpu0, 1));
+    e.mmio_write_sized(0, 0x0c0, 4, 0x02);
+    e.mmio_write_sized(0, 0x800, 1, 0x02);
+    e.mmio_write_sized(0, 0x200, 4, 1);
+    e.set_irq(0, true);
+
+    assert_eq!(cpu0.lock().unwrap().pending_interrupt_line(), Some(3));
+
+    e.connect_hwi_output(1, 1, hwi_output(&cpu1, 1));
+
+    assert_eq!(e.pending_for_cpu(0), 0);
+    assert_ne!(e.pending_for_cpu(1) & (1 << 1), 0);
+    assert_eq!(cpu0.lock().unwrap().pending_interrupt_line(), None);
+    assert_eq!(cpu1.lock().unwrap().pending_interrupt_line(), Some(3));
+}
+
+#[test]
 fn test_eiointc_lifecycle_and_mom_identity() {
     let e = Arc::new(Eiointc::new_named("eiointc0", 2));
     let mut bus = SysBus::new("sysbus0");
