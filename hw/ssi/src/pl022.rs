@@ -29,6 +29,15 @@ const PL022_INT_TX: u32 = 1 << 3;
 
 const FIFO_SIZE: usize = 8;
 
+fn access_mask(size: u32) -> u64 {
+    match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
+
 struct Pl022Regs {
     cr0: u32,
     cr1: u32,
@@ -274,11 +283,21 @@ impl Default for Pl022 {
 pub struct Pl022Mmio(pub Arc<Pl022>);
 
 impl MmioOps for Pl022Mmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if let Some(value) = read_unaligned(self, offset, size) {
+            return value;
+        }
+
+        if size == 8 {
+            let lo = self.read(offset, 4);
+            let hi = self.read(offset.wrapping_add(4), 4);
+            return lo | (hi << 32);
+        }
+
         if (0xFE0..0x1000).contains(&offset) {
             let idx = ((offset - 0xFE0) >> 2) as usize;
             if idx < PL022_ID.len() {
-                return u64::from(PL022_ID[idx]);
+                return u64::from(PL022_ID[idx]) & access_mask(size);
             }
             return 0;
         }
@@ -291,13 +310,13 @@ impl MmioOps for Pl022Mmio {
                 regs.rx_fifo_len -= 1;
                 drop(regs);
                 self.0.xfer_and_update_irq();
-                return u64::from(val);
+                return u64::from(val) & access_mask(size);
             }
             return 0;
         }
 
         let regs = self.0.regs.borrow();
-        match offset {
+        let value = match offset {
             0x00 => u64::from(regs.cr0),
             0x04 => u64::from(regs.cr1),
             0x0C => u64::from(regs.sr),
@@ -307,11 +326,18 @@ impl MmioOps for Pl022Mmio {
             0x1C => u64::from(regs.im & regs.is),
             0x24 => 0,
             _ => 0,
-        }
+        };
+        value & access_mask(size)
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
-        let value = val as u32;
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size == 8 {
+            self.write(offset, 4, val);
+            self.write(offset.wrapping_add(4), 4, val >> 32);
+            return;
+        }
+
+        let value = (val & access_mask(size)) as u32;
         let mut regs = self.0.regs.borrow();
 
         match offset {
@@ -364,4 +390,33 @@ impl MmioOps for Pl022Mmio {
             line.set(irq);
         }
     }
+}
+
+fn read_unaligned(mmio: &Pl022Mmio, offset: u64, size: u32) -> Option<u64> {
+    if !needs_unaligned_split(offset, size) {
+        return None;
+    }
+
+    let mut value = 0u64;
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        value |= (mmio.read(cur, chunk) & access_mask(chunk)) << (done * 8);
+        done += chunk;
+    }
+    Some(value)
+}
+
+fn needs_unaligned_split(offset: u64, size: u32) -> bool {
+    matches!(size, 2 | 4 | 8) && !offset.is_multiple_of(u64::from(size))
+}
+
+fn aligned_chunk_size(offset: u64, remaining: u32) -> u32 {
+    for size in [8u32, 4, 2, 1] {
+        if remaining >= size && offset.is_multiple_of(u64::from(size)) {
+            return size;
+        }
+    }
+    1
 }

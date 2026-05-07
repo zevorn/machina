@@ -1,6 +1,9 @@
 use std::sync::{Arc, Mutex};
 
+use machina_hw_i2c::eeprom_at24c::{At24cEeprom, At24cEepromConfig};
+use machina_hw_i2c::smbus_eeprom::SmbusEeprom;
 use machina_hw_i2c::{I2cBus, I2cError, I2cEvent, I2cSlave, I2C_BROADCAST};
+use machina_hw_storage::MemBackend;
 
 /// Mock I2C slave with configurable address and recorded events.
 struct MockI2cSlave {
@@ -24,10 +27,6 @@ impl MockI2cSlave {
             nack_on: Mutex::new(None),
             nack_all: Mutex::new(false),
         })
-    }
-
-    fn set_nack_on(&self, byte: u8) {
-        *self.nack_on.lock().unwrap() = Some(byte);
     }
 
     fn set_nack_all(&self, nack: bool) {
@@ -78,6 +77,261 @@ impl I2cSlave for MockI2cSlave {
 }
 
 // -- Positive Tests --
+
+#[test]
+fn test_at24c_lifecycle_and_mom_identity() {
+    let eeprom = Arc::new(
+        At24cEeprom::new(
+            MemBackend::new(vec![0xff; 256], false),
+            At24cEepromConfig::default(),
+        )
+        .unwrap(),
+    );
+    assert!(!eeprom.realized());
+    eeprom.with_mdevice(|device| assert_eq!(device.local_id(), "at24c"));
+    assert_eq!(eeprom.object_info().local_id, "at24c");
+
+    eeprom.realize().unwrap();
+    assert!(eeprom.realized());
+    let err = eeprom.realize().unwrap_err();
+    assert!(
+        err.to_string().contains("already realized"),
+        "unexpected second-realize error: {err}"
+    );
+
+    eeprom.unrealize().unwrap();
+    assert!(!eeprom.realized());
+    let err = eeprom.unrealize().unwrap_err();
+    assert!(
+        err.to_string().contains("not realized"),
+        "unexpected second-unrealize error: {err}"
+    );
+}
+
+#[test]
+fn test_at24c_sets_pointer_and_reads_sequential_bytes() {
+    let bus = I2cBus::new();
+    let eeprom = Arc::new(
+        At24cEeprom::new(
+            MemBackend::new((0..=0xff).collect(), false),
+            At24cEepromConfig::default(),
+        )
+        .unwrap(),
+    );
+    bus.attach(eeprom).unwrap();
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x10).unwrap();
+    bus.start_transfer(0x50, true).unwrap();
+
+    assert_eq!(bus.recv(), 0x10);
+    assert_eq!(bus.recv(), 0x11);
+    assert_eq!(bus.recv(), 0x12);
+
+    bus.end_transfer();
+}
+
+#[test]
+fn test_at24c_writes_bytes_after_pointer() {
+    let bus = I2cBus::new();
+    let eeprom = Arc::new(
+        At24cEeprom::new(
+            MemBackend::new(vec![0xff; 256], false),
+            At24cEepromConfig::default(),
+        )
+        .unwrap(),
+    );
+    bus.attach(eeprom).unwrap();
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x20).unwrap();
+    bus.send(0xaa).unwrap();
+    bus.send(0xbb).unwrap();
+    bus.send(0xcc).unwrap();
+    bus.end_transfer();
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x20).unwrap();
+    bus.start_transfer(0x50, true).unwrap();
+
+    assert_eq!(bus.recv(), 0xaa);
+    assert_eq!(bus.recv(), 0xbb);
+    assert_eq!(bus.recv(), 0xcc);
+    assert_eq!(bus.recv(), 0xff);
+
+    bus.end_transfer();
+}
+
+#[test]
+fn test_at24c_write_pointer_wraps_at_eeprom_size() {
+    let bus = I2cBus::new();
+    let eeprom = Arc::new(
+        At24cEeprom::new(
+            MemBackend::new(vec![0xff; 8], false),
+            At24cEepromConfig {
+                size: 8,
+                page_size: 4,
+                ..At24cEepromConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    bus.attach(eeprom).unwrap();
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x06).unwrap();
+    bus.send(0xaa).unwrap();
+    bus.send(0xbb).unwrap();
+    bus.send(0xcc).unwrap();
+    bus.end_transfer();
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x06).unwrap();
+    bus.start_transfer(0x50, true).unwrap();
+
+    assert_eq!(bus.recv(), 0xaa);
+    assert_eq!(bus.recv(), 0xbb);
+    assert_eq!(bus.recv(), 0xcc);
+    assert_eq!(bus.recv(), 0xff);
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x00).unwrap();
+    bus.start_transfer(0x50, true).unwrap();
+
+    assert_eq!(bus.recv(), 0xcc);
+    assert_eq!(bus.recv(), 0xff);
+
+    bus.end_transfer();
+}
+
+#[test]
+fn test_at24c_writes_increment_across_page_boundary() {
+    let bus = I2cBus::new();
+    let eeprom = Arc::new(
+        At24cEeprom::new(
+            MemBackend::new(vec![0xff; 256], false),
+            At24cEepromConfig {
+                page_size: 4,
+                ..At24cEepromConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    bus.attach(eeprom).unwrap();
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x06).unwrap();
+    bus.send(0xaa).unwrap();
+    bus.send(0xbb).unwrap();
+    bus.send(0xcc).unwrap();
+    bus.end_transfer();
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x06).unwrap();
+    bus.start_transfer(0x50, true).unwrap();
+
+    assert_eq!(bus.recv(), 0xaa);
+    assert_eq!(bus.recv(), 0xbb);
+    assert_eq!(bus.recv(), 0xcc);
+    assert_eq!(bus.recv(), 0xff);
+
+    bus.end_transfer();
+}
+
+#[test]
+fn test_at24c_readonly_nacks_data_write() {
+    let bus = I2cBus::new();
+    let eeprom = Arc::new(
+        At24cEeprom::new(
+            MemBackend::new(vec![0x55; 256], true),
+            At24cEepromConfig::default(),
+        )
+        .unwrap(),
+    );
+    bus.attach(eeprom).unwrap();
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x20).unwrap();
+    assert_eq!(bus.send(0xaa).unwrap_err(), I2cError::Nack);
+    bus.end_transfer();
+
+    bus.start_transfer(0x50, false).unwrap();
+    bus.send(0x20).unwrap();
+    bus.start_transfer(0x50, true).unwrap();
+
+    assert_eq!(bus.recv(), 0x55);
+
+    bus.end_transfer();
+}
+
+#[test]
+fn test_smbus_eeprom_reads_byte_selected_by_command() {
+    let bus = I2cBus::new();
+    let eeprom = Arc::new(
+        SmbusEeprom::new(0x54, MemBackend::new((0..=0xff).collect(), false))
+            .unwrap(),
+    );
+    bus.attach(eeprom).unwrap();
+
+    bus.start_transfer(0x54, false).unwrap();
+    bus.send(0x33).unwrap();
+    bus.start_transfer(0x54, true).unwrap();
+
+    assert_eq!(bus.recv(), 0x33);
+    assert_eq!(bus.recv(), 0x34);
+
+    bus.end_transfer();
+}
+
+#[test]
+fn test_smbus_eeprom_lifecycle_and_mom_identity() {
+    let eeprom = Arc::new(
+        SmbusEeprom::new(0x54, MemBackend::new(vec![0xff; 256], false))
+            .unwrap(),
+    );
+    assert!(!eeprom.realized());
+    eeprom.with_mdevice(|device| assert_eq!(device.local_id(), "smbus-eeprom"));
+    assert_eq!(eeprom.object_info().local_id, "smbus-eeprom");
+
+    eeprom.realize().unwrap();
+    assert!(eeprom.realized());
+    let err = eeprom.realize().unwrap_err();
+    assert!(
+        err.to_string().contains("already realized"),
+        "unexpected second-realize error: {err}"
+    );
+
+    eeprom.unrealize().unwrap();
+    assert!(!eeprom.realized());
+    let err = eeprom.unrealize().unwrap_err();
+    assert!(
+        err.to_string().contains("not realized"),
+        "unexpected second-unrealize error: {err}"
+    );
+}
+
+#[test]
+fn test_smbus_eeprom_writes_byte_after_command() {
+    let bus = I2cBus::new();
+    let eeprom = Arc::new(
+        SmbusEeprom::new(0x54, MemBackend::new(vec![0xff; 256], false))
+            .unwrap(),
+    );
+    bus.attach(eeprom).unwrap();
+
+    bus.start_transfer(0x54, false).unwrap();
+    bus.send(0x44).unwrap();
+    bus.send(0x5a).unwrap();
+    bus.end_transfer();
+
+    bus.start_transfer(0x54, false).unwrap();
+    bus.send(0x44).unwrap();
+    bus.start_transfer(0x54, true).unwrap();
+
+    assert_eq!(bus.recv(), 0x5a);
+
+    bus.end_transfer();
+}
 
 #[test]
 fn test_i2c_bus_new() {

@@ -349,7 +349,14 @@ impl Default for SiFiveSpi {
 pub struct SiFiveSpiMmio(pub Arc<SiFiveSpi>);
 
 impl MmioOps for SiFiveSpiMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
+        }
+        if !offset.is_multiple_of(4) {
+            return 0;
+        }
+
         if is_bad_reg(offset, true) {
             return 0;
         }
@@ -380,7 +387,14 @@ impl MmioOps for SiFiveSpiMmio {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size != 4 {
+            return;
+        }
+        if !offset.is_multiple_of(4) {
+            return;
+        }
+
         if is_bad_reg(offset, false) {
             return;
         }

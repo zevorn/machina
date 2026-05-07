@@ -29,6 +29,8 @@ mod hw_chardev;
 #[cfg(test)]
 mod hw_clock;
 #[cfg(test)]
+mod hw_dma;
+#[cfg(test)]
 mod hw_eiointc;
 #[cfg(test)]
 mod hw_fdt;
@@ -53,6 +55,8 @@ mod hw_misc;
 #[cfg(test)]
 mod hw_pch_pic;
 #[cfg(test)]
+mod hw_pflash;
+#[cfg(test)]
 mod hw_plic;
 #[cfg(test)]
 mod hw_qdev;
@@ -63,6 +67,8 @@ mod hw_rtc;
 #[cfg(test)]
 mod hw_sd;
 #[cfg(test)]
+mod hw_sensor;
+#[cfg(test)]
 mod hw_ssi;
 #[cfg(test)]
 mod hw_storage;
@@ -72,6 +78,8 @@ mod hw_sysbus;
 mod hw_timer;
 #[cfg(test)]
 mod hw_uart;
+#[cfg(test)]
+mod hw_watchdog;
 #[cfg(test)]
 mod integration;
 #[cfg(test)]
@@ -134,6 +142,8 @@ mod softfloat;
 mod softmmu;
 #[cfg(test)]
 mod softmmu_exec;
+#[cfg(test)]
+mod source_cleanliness;
 #[cfg(test)]
 mod system_cpu_manager;
 #[cfg(test)]

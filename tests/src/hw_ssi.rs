@@ -1,10 +1,15 @@
 use std::sync::{Arc, Mutex};
 
+use machina_core::address::GPA;
+use machina_hw_core::bus::SysBus;
 use machina_hw_core::irq::{InterruptSource, IrqSink};
+use machina_hw_ssi::m25p80::M25p80;
 use machina_hw_ssi::pl022::{Pl022, Pl022Mmio};
 use machina_hw_ssi::sifive_spi::{SiFiveSpi, SiFiveSpiMmio};
 use machina_hw_ssi::{SpiBus, SpiCsPolarity, SpiSlave};
-use machina_memory::region::MmioOps;
+use machina_hw_storage::{FlashMedia, MemBackend};
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
 
 /// Mock SPI slave that echoes back shifted data.
 struct EchoSlave {
@@ -39,6 +44,13 @@ impl SpiSlave for EchoSlave {
     fn cs_index(&self) -> u8 {
         0
     }
+}
+
+fn make_test_aspace() -> (AddressSpace, SysBus) {
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let aspace = AddressSpace::new(root);
+    let bus = SysBus::new("sysbus");
+    (aspace, bus)
 }
 
 // -- Positive Tests --
@@ -283,6 +295,1045 @@ fn test_spi_cs_transition_calls_set_cs_once() {
     assert_eq!(*slave.cs_calls.lock().unwrap(), 2);
 }
 
+// ---- M25P80 SPI flash tests ----
+
+fn make_m25p80(data: Vec<u8>) -> Arc<M25p80<MemBackend>> {
+    make_m25p80_with_id(data, [0x20, 0xba, 0x18])
+}
+
+fn make_m25p80_with_id(
+    data: Vec<u8>,
+    jedec_id: [u8; 3],
+) -> Arc<M25p80<MemBackend>> {
+    let flash = FlashMedia::new(MemBackend::new(data, false), 4096).unwrap();
+    Arc::new(M25p80::new(0, flash, jedec_id))
+}
+
+fn m25p80_transaction(flash: &M25p80<MemBackend>, bytes: &[u8]) -> Vec<u8> {
+    flash.set_cs(false);
+    let out = bytes
+        .iter()
+        .map(|byte| flash.transfer(u32::from(*byte)) as u8)
+        .collect();
+    flash.set_cs(true);
+    out
+}
+
+#[test]
+fn test_m25p80_lifecycle_and_mom_identity() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+    assert!(!flash.realized());
+    flash.with_mdevice(|device| assert_eq!(device.local_id(), "m25p80"));
+    assert_eq!(flash.object_info().local_id, "m25p80");
+
+    flash.realize().unwrap();
+    assert!(flash.realized());
+    let err = flash.realize().unwrap_err();
+    assert!(
+        err.to_string().contains("already realized"),
+        "unexpected second-realize error: {err}"
+    );
+
+    flash.unrealize().unwrap();
+    assert!(!flash.realized());
+    let err = flash.unrealize().unwrap_err();
+    assert!(
+        err.to_string().contains("not realized"),
+        "unexpected second-unrealize error: {err}"
+    );
+}
+
+#[test]
+fn test_m25p80_defaults_status_and_jedec_id() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(flash.cs_polarity(), SpiCsPolarity::Low);
+    assert_eq!(flash.cs_index(), 0);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0x00, 0x00]), [0, 0, 0]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x9f, 0x00, 0x00, 0x00, 0x00]),
+        [0, 0x20, 0xba, 0x18, 0]
+    );
+}
+
+#[test]
+fn test_m25p80_jedec_id_returns_six_bytes_then_decodes_next_command() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x9f, 0, 0, 0, 0, 0, 0, 0x05, 0]),
+        [0, 0x20, 0xba, 0x18, 0, 0, 0, 0, 0x02]
+    );
+}
+
+#[test]
+fn test_m25p80_sst_read_id_commands_loop_manufacturer_and_device() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xbf, 0x25, 0x41]);
+    let non_sst = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x90, 0x00, 0x00, 0x00, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0xbf, 0x41, 0xbf, 0x41]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0xab, 0x00, 0x00, 0x01, 0, 0]),
+        [0, 0, 0, 0, 0x41, 0xbf]
+    );
+
+    m25p80_transaction(&flash, &[0xb7]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x90, 0x00, 0x00, 0x00, 0x01, 0, 0]),
+        [0, 0, 0, 0, 0, 0x41, 0xbf]
+    );
+    assert_eq!(
+        m25p80_transaction(&non_sst, &[0x90, 0x00, 0x00, 0x00, 0, 0]),
+        [0, 0, 0, 0, 0, 0]
+    );
+}
+
+#[test]
+fn test_m25p80_sst_aai_word_program_continues_until_write_disable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xbf, 0x25, 0x41]);
+
+    m25p80_transaction(&flash, &[0xad, 0x00, 0x00, 0x11, 0xaa, 0xbb]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]
+    );
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xad, 0x00, 0x00, 0x11, 0xaa, 0xbb]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x42]);
+
+    m25p80_transaction(&flash, &[0xad, 0xcc, 0xdd]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x42]);
+
+    m25p80_transaction(&flash, &[0x04]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0xad, 0xee, 0x99]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd, 0xff, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_sst_aai_word_program_is_sst_only() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xad, 0x00, 0x00, 0x10, 0xaa, 0xbb]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0]),
+        [0, 0, 0, 0, 0xff, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_read_nonvolatile_config_returns_default_bytes() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0xb5, 0, 0, 0]),
+        [0, 0xff, 0x8f, 0]
+    );
+}
+
+#[test]
+fn test_m25p80_write_nonvolatile_config_requires_wel_and_numonyx() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+    let sst = make_m25p80_with_id(vec![0xff; 8192], [0xbf, 0x25, 0x41]);
+
+    m25p80_transaction(&flash, &[0xb1, 0x34, 0x12]);
+    assert_eq!(m25p80_transaction(&flash, &[0xb5, 0, 0]), [0, 0xff, 0x8f]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xb1, 0x34, 0x12]);
+    assert_eq!(m25p80_transaction(&flash, &[0xb5, 0, 0]), [0, 0x34, 0x12]);
+
+    m25p80_transaction(&sst, &[0x06]);
+    m25p80_transaction(&sst, &[0xb1, 0x78, 0x56]);
+    assert_eq!(m25p80_transaction(&sst, &[0xb5, 0, 0]), [0, 0xff, 0x8f]);
+}
+
+#[test]
+fn test_m25p80_volatile_config_read_write_requires_wel_and_updates_rdcr() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0, 0]), [0, 0x8b, 0]);
+
+    m25p80_transaction(&flash, &[0x81, 0x4a]);
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x8b]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x81, 0x4a]);
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0, 0]), [0, 0x4a, 0]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x4a]);
+
+    m25p80_transaction(&flash, &[0xb7]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x6a]);
+}
+
+#[test]
+fn test_m25p80_enhanced_volatile_config_read_write_requires_wel() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0, 0]), [0, 0xdf, 0]);
+
+    m25p80_transaction(&flash, &[0x61, 0x2c]);
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0]), [0, 0xdf]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x2c]);
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0, 0]), [0, 0x2c, 0]);
+}
+
+#[test]
+fn test_m25p80_numonyx_qio_blocks_standard_read() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xa5;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x5f]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0]
+    );
+}
+
+#[test]
+fn test_m25p80_numonyx_qio_rejected_read_keeps_parser_ready() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x5f]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x03, 0x05, 0]), [0, 0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_numonyx_qio_blocks_jedec_read() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x5f]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x9f, 0, 0, 0]), [0, 0, 0, 0]);
+}
+
+#[test]
+fn test_m25p80_numonyx_qio_blocks_dual_page_program() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x5f]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xa2, 0x00, 0x00, 0x20, 0xa2]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0xdf]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_numonyx_dio_blocks_quad_page_program() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x9f]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x32, 0x00, 0x00, 0x20, 0x32]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0xdf]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_nop_leaves_parser_ready_for_next_command() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+
+    flash.set_cs(false);
+    assert_eq!(flash.transfer(0x00), 0);
+    assert_eq!(flash.transfer(0x05), 0);
+    assert_eq!(flash.transfer(0x00), 0x02);
+    flash.set_cs(true);
+}
+
+#[test]
+fn test_m25p80_flag_status_reports_ready_and_4byte_mode() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x70, 0]), [0, 0x80]);
+
+    m25p80_transaction(&flash, &[0xb7]);
+    assert_eq!(m25p80_transaction(&flash, &[0x70, 0]), [0, 0x81]);
+}
+
+#[test]
+fn test_m25p80_read_config_reports_4byte_mode() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x8b]);
+
+    m25p80_transaction(&flash, &[0xb7]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0xab]);
+
+    m25p80_transaction(&flash, &[0xe9]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x8b]);
+}
+
+#[test]
+fn test_m25p80_numonyx_reset_recomputes_volatile_config() {
+    let flash = make_m25p80(vec![0xff; 32 * 1024 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x81, 0x4a]);
+    m25p80_transaction(&flash, &[0x61, 0x2c]);
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x4a]);
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0]), [0, 0x2c]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xb1, 0xfe, 0x8f]);
+    m25p80_transaction(&flash, &[0x66]);
+    m25p80_transaction(&flash, &[0x99]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x8b]);
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0]), [0, 0xdf]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0xab]);
+    assert_eq!(m25p80_transaction(&flash, &[0x70, 0]), [0, 0x81]);
+}
+
+#[test]
+fn test_m25p80_macronix_reset_sets_volatile_config_default() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xc2, 0x20, 0x19]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x07]);
+}
+
+#[test]
+fn test_m25p80_winbond_status2_controls_quad_enable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xef, 0x40, 0x18]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0x31, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x31, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_winbond_write_status_consumes_second_byte_for_quad_enable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xef, 0x40, 0x18]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x00, 0x02]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_spansion_write_status_second_byte_sets_quad_enable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0x01, 0x02, 0x19]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x00, 0x02]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_macronix_rdcr_eqio_sets_and_rstqio_clears_quad_enable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xc2, 0x20, 0x19]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0x35]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x40]);
+
+    m25p80_transaction(&flash, &[0xf5]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_macronix_write_status_consumes_second_byte_for_volatile_config()
+{
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xc2, 0x20, 0x19]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x40, 0x20]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x40]);
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x20]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x20]);
+    assert_eq!(m25p80_transaction(&flash, &[0x70, 0]), [0, 0x81]);
+}
+
+#[test]
+fn test_m25p80_read_24bit_address_streams_data() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x14].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+    let flash = make_m25p80(data);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44]
+    );
+}
+
+#[test]
+fn test_m25p80_fast_read_consumes_config_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x13].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
+    let flash = make_m25p80(data);
+
+    let mut input = vec![0x0b, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 8]);
+    input.extend_from_slice(&[0, 0, 0]);
+    let mut expected = vec![0; 12];
+    expected.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_spansion_fast_read_consumes_cr2_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xa1;
+    let flash = make_m25p80_with_id(data, [0x01, 0x02, 0x19]);
+
+    let mut input = vec![0x0b, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 8]);
+    input.push(0);
+    let mut expected = vec![0; 12];
+    expected.push(0xa1);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_spansion_io_read_consumes_mode_and_cr2_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xb1;
+    let flash = make_m25p80_with_id(data, [0x01, 0x02, 0x19]);
+
+    let mut input = vec![0xbb, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 9]);
+    input.push(0);
+    let mut expected = vec![0; 13];
+    expected.push(0xb1);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_winbond_dual_io_read_consumes_continuous_mode_byte() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xc1;
+    let flash = make_m25p80_with_id(data, [0xef, 0x40, 0x18]);
+
+    let input = [0xbb, 0x00, 0x00, 0x10, 0, 0];
+
+    assert_eq!(m25p80_transaction(&flash, &input), [0, 0, 0, 0, 0, 0xc1]);
+}
+
+#[test]
+fn test_m25p80_winbond_quad_io_read_consumes_mode_and_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xc2;
+    let flash = make_m25p80_with_id(data, [0xef, 0x40, 0x18]);
+
+    let mut input = vec![0xeb, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 5]);
+    input.push(0);
+    let mut expected = vec![0; 9];
+    expected.push(0xc2);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_read4_consumes_four_address_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x12].copy_from_slice(&[0x4a, 0x4b]);
+    let flash = make_m25p80(data);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x13, 0x00, 0x00, 0x00, 0x10, 0, 0]),
+        [0, 0, 0, 0, 0, 0x4a, 0x4b]
+    );
+}
+
+#[test]
+fn test_m25p80_enter_4byte_mode_makes_read_use_four_address_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0x5a;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0xb7]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0, 0x5a]
+    );
+}
+
+#[test]
+fn test_m25p80_exit_4byte_mode_restores_three_address_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0] = 0x6a;
+    data[0x10] = 0x6b;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0xb7]);
+    m25p80_transaction(&flash, &[0xe9]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x6a, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_extended_address_register_offsets_24bit_read() {
+    let high_base = 1usize << 24;
+    let mut data = vec![0xff; high_base + 0x20];
+    data[0x10] = 0x7a;
+    data[high_base + 0x10] = 0x7b;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xc5, 0x01]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0xc8, 0]), [0, 0x01]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x7b]
+    );
+}
+
+#[test]
+fn test_m25p80_bank_register_alias_offsets_24bit_read() {
+    let high_base = 2usize << 24;
+    let mut data = vec![0xff; high_base + 0x20];
+    data[0x10] = 0x7c;
+    data[high_base + 0x10] = 0x7d;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x17, 0x02]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x16, 0]), [0, 0x02]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x7d]
+    );
+}
+
+#[test]
+fn test_m25p80_fast_read4_consumes_four_address_bytes_and_config_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x12].copy_from_slice(&[0x4c, 0x4d]);
+    let flash = make_m25p80(data);
+
+    let mut input = vec![0x0c, 0x00, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 8]);
+    input.extend_from_slice(&[0, 0]);
+    let mut expected = vec![0; 13];
+    expected.extend_from_slice(&[0x4c, 0x4d]);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_output_read_aliases_use_fast_read_framing() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x12].copy_from_slice(&[0xd0, 0xd1]);
+    data[0x20..0x22].copy_from_slice(&[0xd2, 0xd3]);
+    data[0x30..0x32].copy_from_slice(&[0xd4, 0xd5]);
+    data[0x40..0x42].copy_from_slice(&[0xd6, 0xd7]);
+    let flash = make_m25p80(data);
+
+    let mut cases = vec![
+        (vec![0x3b, 0x00, 0x00, 0x10], 12, [0xd0, 0xd1]),
+        (vec![0x6b, 0x00, 0x00, 0x20], 12, [0xd2, 0xd3]),
+        (vec![0x3c, 0x00, 0x00, 0x00, 0x30], 13, [0xd4, 0xd5]),
+        (vec![0x6c, 0x00, 0x00, 0x00, 0x40], 13, [0xd6, 0xd7]),
+    ];
+    for (input, _, _) in &mut cases {
+        input.extend_from_slice(&[0; 8]);
+        input.extend_from_slice(&[0, 0]);
+    }
+
+    let observed = cases
+        .iter()
+        .map(|(input, _, _)| m25p80_transaction(&flash, input))
+        .collect::<Vec<_>>();
+    let expected = cases
+        .iter()
+        .map(|(_, zeroes, data)| {
+            let mut output = vec![0; *zeroes];
+            output.extend_from_slice(data);
+            output
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(observed, expected);
+}
+
+#[test]
+fn test_m25p80_io_read_aliases_use_config_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x12].copy_from_slice(&[0xe0, 0xe1]);
+    data[0x20..0x22].copy_from_slice(&[0xe2, 0xe3]);
+    data[0x30..0x32].copy_from_slice(&[0xe4, 0xe5]);
+    data[0x40..0x42].copy_from_slice(&[0xe6, 0xe7]);
+    let flash = make_m25p80(data);
+
+    let mut cases = vec![
+        (vec![0xbb, 0x00, 0x00, 0x10], 12, [0xe0, 0xe1]),
+        (vec![0xeb, 0x00, 0x00, 0x20], 12, [0xe2, 0xe3]),
+        (vec![0xbc, 0x00, 0x00, 0x00, 0x30], 13, [0xe4, 0xe5]),
+        (vec![0xec, 0x00, 0x00, 0x00, 0x40], 13, [0xe6, 0xe7]),
+    ];
+    for (input, _, _) in &mut cases {
+        input.extend_from_slice(&[0; 8]);
+        input.extend_from_slice(&[0, 0]);
+    }
+
+    let observed = cases
+        .iter()
+        .map(|(input, _, _)| m25p80_transaction(&flash, input))
+        .collect::<Vec<_>>();
+    let expected = cases
+        .iter()
+        .map(|(_, zeroes, data)| {
+            let mut output = vec![0; *zeroes];
+            output.extend_from_slice(data);
+            output
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(observed, expected);
+}
+
+#[test]
+fn test_m25p80_read_wraps_at_flash_size() {
+    let mut data = vec![0xff; 8192];
+    data[0] = 0x11;
+    data[0x1fff] = 0x22;
+    let flash = make_m25p80(data);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x1f, 0xff, 0, 0]),
+        [0, 0, 0, 0, 0x22, 0x11]
+    );
+}
+
+#[test]
+fn test_m25p80_page_program_requires_write_enable() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x10, 0x0f]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+
+    m25p80_transaction(&flash, &[0x06]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x10, 0x0f, 0xf0]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0]),
+        [0, 0, 0, 0, 0x0f, 0xf0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_write_disable_clears_write_enable() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+
+    m25p80_transaction(&flash, &[0x04]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x30, 0x33]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x30, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_write_status_requires_write_enable_and_clears_latch() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x01, 0x9c]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x9c]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x9c]);
+}
+
+#[test]
+fn test_m25p80_block_protect_status_prevents_top_sector_program() {
+    let flash = make_m25p80(vec![0xff; 128 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x04]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x04]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x10, 0x11]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x01, 0x00, 0x10, 0x22]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x11]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_numonyx_top_bottom_status_protects_bottom_sector() {
+    let flash = make_m25p80_with_id(vec![0xff; 128 * 1024], [0x20, 0xba, 0x19]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x24]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x24]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x10, 0x11]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x01, 0x00, 0x10, 0x22]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x22]
+    );
+}
+
+#[test]
+fn test_m25p80_page_program_wraps_at_flash_size() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x1f, 0xff, 0x12, 0x34]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x1f, 0xff, 0, 0]),
+        [0, 0, 0, 0, 0x12, 0x34]
+    );
+}
+
+#[test]
+fn test_m25p80_page_program4_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x12, 0x00, 0x00, 0x00, 0x20, 0x4e]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0x4e]
+    );
+}
+
+#[test]
+fn test_m25p80_page_program4_alias_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x3e, 0x00, 0x00, 0x00, 0x20, 0x5e]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0x5e]
+    );
+}
+
+#[test]
+fn test_m25p80_input_page_program_aliases_use_page_program_framing() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xa2, 0x00, 0x00, 0x50, 0xa2]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x32, 0x00, 0x00, 0x60, 0x32]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x34, 0x00, 0x00, 0x00, 0x70, 0x34]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x50, 0]),
+        [0, 0, 0, 0, 0xa2]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x60, 0]),
+        [0, 0, 0, 0, 0x32]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x70, 0]),
+        [0, 0, 0, 0, 0x34]
+    );
+}
+
+#[test]
+fn test_m25p80_program_only_clears_bits() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x20, 0x0f]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x20, 0xff]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0x0f]
+    );
+}
+
+#[test]
+fn test_m25p80_erase_4k_requires_write_enable() {
+    let flash = make_m25p80(vec![0x00; 8192]);
+
+    m25p80_transaction(&flash, &[0x20, 0x00, 0x00, 0x10]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0]
+    );
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x20, 0x00, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x10, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_erase4_4k_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0x00; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x21, 0x00, 0x00, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_erase_32k_clears_only_32k() {
+    let flash = make_m25p80(vec![0x00; 96 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x52, 0x00, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x7f, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x80, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_erase4_32k_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0x00; 128 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x5c, 0x00, 0x00, 0x80, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x7f, 0xff, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x80, 0x00, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_sector_erase_clears_only_64k() {
+    let flash = make_m25p80(vec![0x00; 128 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xd8, 0x00, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_bulk_erase_preserves_write_enable_latch() {
+    let flash = make_m25p80(vec![0x00; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xc7]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_numonyx_stacked_die_erase_clears_selected_die_only() {
+    let flash = make_m25p80_with_id(vec![0x00; 256 * 1024], [0x20, 0xba, 0x21]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xc4, 0x01, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0x00]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x02, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0x00]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_erase4_sector_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0x00; 192 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xdc, 0x00, 0x01, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x02, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_cs_deassert_resets_partial_command() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    flash.set_cs(false);
+    assert_eq!(flash.transfer(0x03), 0);
+    assert_eq!(flash.transfer(0x00), 0);
+    flash.set_cs(true);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_reset_runtime_clears_write_enable_and_parser() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    flash.set_cs(false);
+    assert_eq!(flash.transfer(0x03), 0);
+    flash.reset_runtime();
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_reset_memory_requires_reset_enable() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x99]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+
+    m25p80_transaction(&flash, &[0x66]);
+    m25p80_transaction(&flash, &[0x99]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
 // ---- PL022 tests ----
 
 struct TestSink {
@@ -305,6 +1356,32 @@ impl IrqSink for TestSink {
     fn set_irq(&self, _irq: u32, level: bool) {
         *self.level.lock().unwrap() = level;
     }
+}
+
+#[test]
+fn test_pl022_lifecycle_and_mom_identity() {
+    let pl022 = Arc::new(Pl022::new());
+    assert!(!pl022.realized());
+    pl022.with_mdevice(|device| assert_eq!(device.local_id(), "pl022"));
+    assert_eq!(pl022.object_info().local_id, "pl022");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x1000);
+    let region = MemoryRegion::io(
+        "pl022",
+        0x1000,
+        Arc::new(Pl022Mmio(Arc::clone(&pl022))),
+    );
+
+    pl022.attach_to_bus(&mut bus).unwrap();
+    pl022.register_mmio(region, base).unwrap();
+    pl022.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(pl022.realized());
+    assert_eq!(aspace.read(GPA(base.0 + 0xfe0), 4), 0x22);
+
+    let err = pl022.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
 }
 
 #[test]
@@ -348,6 +1425,55 @@ fn test_pl022_cr0_bitmask() {
     // DSS=7 → bitmask = (1 << 8) - 1 = 0xFF
     mmio.write(0x00, 4, 0x07);
     assert_eq!(mmio.read(0x00, 4), 0x07);
+}
+
+#[test]
+fn test_pl022_wide_mmio_read_splits_into_32bit_callbacks() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 4, 0x07);
+    mmio.write(0x04, 4, 0x02);
+
+    assert_eq!(mmio.read(0x00, 8), 0x0000_0002_0000_0007);
+}
+
+#[test]
+fn test_pl022_unaligned_id_reads_split_like_qemu() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    assert_eq!(mmio.read(0xfe1, 4), 0x1000_2222);
+    assert_eq!(mmio.read(0xfe2, 4), 0x0010_0022);
+    assert_eq!(mmio.read(0xfe3, 4), 0x1000_1022);
+}
+
+#[test]
+fn test_pl022_wide_mmio_write_splits_into_32bit_callbacks() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 8, 0x0000_0002_0000_0007);
+
+    assert_eq!(mmio.read(0x00, 4), 0x07);
+    assert_eq!(mmio.read(0x04, 4), 0x02);
+}
+
+#[test]
+fn test_pl022_narrow_accesses_use_access_width_bits() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 4, 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 1), 0x78);
+    assert_eq!(mmio.read(0x00, 2), 0x5678);
+    assert_eq!(mmio.read(0x01, 1), 0);
+    assert_eq!(mmio.read(0x02, 2), 0);
+
+    mmio.write(0x00, 1, 0x1234);
+    assert_eq!(mmio.read(0x00, 4), 0x34);
+    mmio.write(0x10, 2, 0x1234_5678);
+    assert_eq!(mmio.read(0x10, 4), 0x78);
 }
 
 #[test]
@@ -460,6 +1586,34 @@ fn test_pl022_reset_runtime() {
 // -- SiFive SPI tests --
 
 #[test]
+fn test_sifive_spi_lifecycle_and_mom_identity() {
+    let spi = Arc::new(SiFiveSpi::new());
+    assert!(!spi.realized());
+    spi.with_mdevice(|device| assert_eq!(device.local_id(), "sifive_spi"));
+    assert_eq!(spi.object_info().local_id, "sifive_spi");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x2000);
+    let region = MemoryRegion::io(
+        "sifive_spi",
+        0x1000,
+        Arc::new(SiFiveSpiMmio(Arc::clone(&spi))),
+    );
+
+    spi.attach_to_bus(&mut bus).unwrap();
+    spi.register_mmio(region, base).unwrap();
+    spi.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(spi.realized());
+    assert_eq!(aspace.read(base, 4), 0x03);
+    aspace.write(GPA(base.0 + 0x14), 4, 0x00);
+    assert_eq!(aspace.read(GPA(base.0 + 0x14), 4), 0x00);
+
+    let err = spi.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
 fn test_sifive_spi_defaults() {
     let spi = Arc::new(SiFiveSpi::new());
     let mmio = SiFiveSpiMmio(Arc::clone(&spi));
@@ -472,6 +1626,38 @@ fn test_sifive_spi_defaults() {
     assert_eq!(mmio.read(0x2C, 4), 0x01); // DELAY1
     assert_eq!(mmio.read(0x70, 4), 0x00); // IE
     assert_eq!(mmio.read(0x74, 4), 0x00); // IP
+}
+
+#[test]
+fn test_sifive_spi_rejects_non_4byte_mmio_accesses() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    assert_eq!(mmio.read(0x4C, 1), 0);
+    assert_eq!(mmio.read(0x4C, 2), 0);
+    assert_eq!(mmio.read(0x4C, 8), 0);
+
+    mmio.write(0x00, 1, 0x12);
+    mmio.write(0x00, 2, 0x3456);
+    mmio.write(0x00, 8, 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 4), 0x03);
+}
+
+#[test]
+fn test_sifive_spi_rejects_unaligned_mmio_accesses() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    assert_eq!(mmio.read(0x01, 4), 0);
+
+    mmio.write(0x01, 4, 7);
+    assert_eq!(mmio.read(0x00, 4), 0x03);
+
+    mmio.write(0x14, 4, 0);
+    assert_eq!(mmio.read(0x14, 4), 0);
+
+    mmio.write(0x15, 4, 1);
+    assert_eq!(mmio.read(0x14, 4), 0);
 }
 
 #[test]
