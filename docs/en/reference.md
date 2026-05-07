@@ -1030,7 +1030,7 @@ helpers.
 - Reset remains a runtime-state operation; it does not rebuild sysbus
   topology or object-tree membership
 
-#### 2.7 Ergonomic Macros
+#### 2.7 Ergonomic Macros and Derives
 
 The current macro layer follows the same intent as Rust-in-QEMU's
 attribute-heavy QOM work: device authors should not have to repeat
@@ -1049,10 +1049,18 @@ trait forwarding and standard accessor glue.
 - `machina_property_specs!` declares typed property schema entries
   with `default`, `required`, and `dynamic` semantics without hiding
   the underlying `MPropertySpec`
+- `#[derive(SysBusDevice)]` with `#[mom(...)]` wraps the sysbus accessor
+  macros for the common locked-state device pattern
+- `#[derive(MDevice)]` with `#[mom(...)]` wraps the mdevice accessor
+  macros for non-sysbus device objects
+- `#[derive(MProperties)]` with field-level `#[property(...)]` builds
+  typed property schema vectors from device/config fields
+- `#[derive(Resettable)]` with `#[reset(hold = reset_runtime)]`
+  connects reset phases to device-local reset methods
 
-These are declarative macros for the first vertical slice. A later
-proc-macro or `#[derive]` layer can build on the same API once the
-object/type/reset boundaries are stable.
+The derive layer is intentionally thin: it expands to the same
+declarative helper macros and typed schema builders, so existing devices
+can migrate incrementally without changing the underlying MOM semantics.
 
 ### 3. Device Lifecycle
 
@@ -1109,8 +1117,8 @@ assembly.
 
 - SiFive Test uses the standard mutex sysbus accessor macro while
   keeping shutdown/reset behavior local to the device
-- TMP105 uses the parking-lot mdevice accessor macro while keeping I2C
-  register behavior local to the device
+- TMP105 uses the mdevice derive wrapper while keeping I2C register
+  behavior local to the device
 - Both devices exercise MOM identity and lifecycle without requiring
   each device file to hand-write the same forwarding methods
 
@@ -1897,7 +1905,7 @@ for smoke/integration tests against the machina binary.
 | hw_aclint | 13 | ACLINT timer MMIO, IPI, mtime/mtimecmp |
 | hw_plic | 9 | PLIC priority, pending, enable, claim/complete |
 | hw_qdev | 8 | QDev object lifecycle, property, realize |
-| hw_mom | 11 | MOM type registry, reset phases, property/schema and ergonomic macros |
+| hw_mom | 14 | MOM type registry, reset phases, property/schema and ergonomic macros/derives |
 | hw_sysbus | 11 | SysBus MMIO mapping, device attachment, declare/map/connect |
 | hw_irq | 7 | IRQ line raise/lower, sink/source wiring |
 | hw_chardev | 7 | Character device backend interface |

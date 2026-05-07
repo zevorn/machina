@@ -10,6 +10,13 @@ use machina_hw_core::bus::{SysBusDeviceState, SysBusError};
 use machina_hw_core::mdev::MDeviceError;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(
+    state = state,
+    lock = "parking_lot",
+    before_register_mmio = validate_mmio_region,
+    before_realize = validate_realize
+)]
 pub struct Unimp {
     state: parking_lot::Mutex<SysBusDeviceState>,
     name: String,
@@ -32,12 +39,6 @@ impl Unimp {
     pub fn size(&self) -> u64 {
         self.size
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_register_mmio = validate_mmio_region,
-        before_realize = validate_realize
-    );
 
     fn validate_mmio_region(
         &self,

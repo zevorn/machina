@@ -996,7 +996,7 @@ qdev bridge 外，不再提供额外兼容层或迁移层。
   `reset_hold`，最后运行 `reset_exit`
 - reset 仍是运行时状态操作，不重建 sysbus 拓扑或对象树成员关系
 
-#### 2.7 易用性宏
+#### 2.7 易用性宏和 derive
 
 当前宏层的目标和 Rust-in-QEMU 里大量使用 attribute 封装 QOM
 的方向一致：设备作者不应该重复编写 trait forwarding 和标准
@@ -1015,9 +1015,17 @@ accessor 胶水代码。
 - `machina_property_specs!` 声明 typed property schema，覆盖
   `default`、`required` 和 `dynamic` 语义，但不隐藏底层
   `MPropertySpec`
+- `#[derive(SysBusDevice)]` 配合 `#[mom(...)]`，封装常见的
+  locked-state sysbus 设备 accessor 模式
+- `#[derive(MDevice)]` 配合 `#[mom(...)]`，封装非 sysbus 设备对象的
+  mdevice accessor 模式
+- `#[derive(MProperties)]` 配合字段级 `#[property(...)]`，从设备或
+  config 字段生成 typed property schema
+- `#[derive(Resettable)]` 配合 `#[reset(hold = reset_runtime)]`，
+  把 reset phase 接到设备本地 reset 方法
 
-这些宏是第一条竖切片里的 declarative macro。后续可以在 API
-边界稳定后，把同一套语义继续包装成 proc-macro 或 `#[derive]`。
+derive 层保持很薄：它展开到同一套 declarative helper macro 和 typed
+schema builder，所以现有设备可以逐步迁移，而不改变底层 MOM 语义。
 
 ### 3. 设备生命周期
 
@@ -1069,8 +1077,8 @@ accessor 胶水代码。
 
 - SiFive Test 使用标准 mutex sysbus accessor 宏，同时把
   shutdown/reset 行为保留在设备本地
-- TMP105 使用 parking-lot mdevice accessor 宏，同时把 I2C
-  register 行为保留在设备本地
+- TMP105 使用 mdevice derive wrapper，同时把 I2C register 行为保留在
+  设备本地
 - 两个设备都覆盖 MOM identity 和 lifecycle，而不要求每个设备文件
   手写同样的 forwarding 方法
 
@@ -1806,7 +1814,7 @@ x3 不能作为测试寄存器，因为 QEMU 侧的 `la gp, save_area`
 | hw_aclint | 13 | ACLINT 定时器 MMIO、IPI、mtime/mtimecmp |
 | hw_plic | 9 | PLIC 优先级、pending、enable、claim/complete |
 | hw_qdev | 8 | QDev 对象生命周期、属性、realize |
-| hw_mom | 11 | MOM type registry、reset phase、property/schema 和易用性宏 |
+| hw_mom | 14 | MOM type registry、reset phase、property/schema 和易用性宏/derive |
 | hw_sysbus | 11 | SysBus MMIO 映射、设备挂载、declare/map/connect |
 | hw_irq | 7 | IRQ 线 raise/lower、sink/source 接线 |
 | hw_chardev | 7 | 字符设备后端接口 |

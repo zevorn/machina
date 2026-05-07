@@ -7,7 +7,9 @@ use machina_core::mobject::{MObject, MObjectState};
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::bus::{SysBus, SysBusError};
 use machina_hw_core::mdev::{MDevice, MDeviceError, MDeviceState};
-use machina_hw_core::property::{MPropertySpec, MPropertyType, MPropertyValue};
+use machina_hw_core::property::{
+    MPropertyMutability, MPropertySpec, MPropertyType, MPropertyValue,
+};
 use machina_hw_core::reset::{
     MResetController, ResetPhase, ResetType, Resettable,
 };
@@ -278,6 +280,27 @@ impl RecoveringLockedSysBusFixture {
     );
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "std", lock_fn = recover_lock)]
+struct DerivedRecoveringSysBusFixture {
+    state: Mutex<SysBusDeviceState>,
+}
+
+impl DerivedRecoveringSysBusFixture {
+    fn new(local_id: &str) -> Self {
+        Self {
+            state: Mutex::new(SysBusDeviceState::new(local_id)),
+        }
+    }
+
+    fn poison_state(&self) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = self.state.lock().unwrap();
+            panic!("poison derived fixture state");
+        }));
+    }
+}
+
 fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -297,6 +320,59 @@ impl LockedMDeviceFixture {
     }
 
     machina_hw_core::machina_parking_lot_mdevice_accessors!(mdevice);
+}
+
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "std")]
+struct DerivedSysBusFixture {
+    state: Mutex<SysBusDeviceState>,
+}
+
+impl DerivedSysBusFixture {
+    fn new(local_id: &str) -> Self {
+        Self {
+            state: Mutex::new(SysBusDeviceState::new(local_id)),
+        }
+    }
+}
+
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = mdevice, lock = "parking_lot")]
+struct DerivedMDeviceFixture {
+    mdevice: parking_lot::Mutex<MDeviceState>,
+}
+
+impl DerivedMDeviceFixture {
+    fn new(local_id: &str) -> Self {
+        Self {
+            mdevice: parking_lot::Mutex::new(MDeviceState::new(local_id)),
+        }
+    }
+}
+
+#[derive(Default, machina_hw_core::MProperties)]
+#[allow(dead_code)]
+struct DerivedPropertyFixture {
+    #[property(default = true)]
+    enabled: bool,
+    #[property(rename = "window-size", required)]
+    window_size: u64,
+    #[property(dynamic)]
+    throttle: u32,
+    #[property(kind = "link", rename = "backend")]
+    backend_path: String,
+}
+
+#[derive(Default, machina_hw_core::Resettable)]
+#[reset(hold = reset_runtime)]
+struct DerivedResetFixture {
+    resets: Mutex<u32>,
+}
+
+impl DerivedResetFixture {
+    fn reset_runtime(&self) {
+        *self.resets.lock().unwrap() += 1;
+    }
 }
 
 #[test]
@@ -322,6 +398,59 @@ fn test_locked_state_accessor_macros_cover_common_device_wrappers() {
 }
 
 #[test]
+fn test_derive_macros_cover_common_device_wrappers() {
+    let sysbus = DerivedSysBusFixture::new("uart0");
+    let slot = sysbus
+        .declare_mmio(MemoryRegion::io("uart0-mmio", 0x100, Arc::new(NoopMmio)))
+        .expect("declare MMIO");
+    sysbus
+        .map_mmio(slot, GPA::new(0x1000_0000))
+        .expect("map MMIO");
+    sysbus.with_mdevice(|dev| assert_eq!(dev.local_id(), "uart0"));
+    assert_eq!(sysbus.object_info().local_id, "uart0");
+
+    let dev = DerivedMDeviceFixture::new("tmp105");
+    assert!(!dev.realized());
+    dev.realize().expect("realize mdevice");
+    assert!(dev.realized());
+    dev.unrealize().expect("unrealize mdevice");
+    assert!(!dev.realized());
+    assert_eq!(dev.object_info().local_id, "tmp105");
+}
+
+#[test]
+fn test_property_derive_builds_typed_property_schema() {
+    let specs = DerivedPropertyFixture::property_specs();
+
+    assert_eq!(specs.len(), 4);
+    assert_eq!(specs[0].name, "enabled");
+    assert_eq!(specs[0].property_type, MPropertyType::Bool);
+    assert_eq!(specs[0].default_value, Some(MPropertyValue::Bool(true)));
+
+    assert_eq!(specs[1].name, "window-size");
+    assert_eq!(specs[1].property_type, MPropertyType::U64);
+    assert!(specs[1].required);
+
+    assert_eq!(specs[2].name, "throttle");
+    assert_eq!(specs[2].property_type, MPropertyType::U32);
+    assert_eq!(specs[2].mutability, MPropertyMutability::Dynamic);
+
+    assert_eq!(specs[3].name, "backend");
+    assert_eq!(specs[3].property_type, MPropertyType::Link);
+}
+
+#[test]
+fn test_resettable_derive_delegates_hold_phase() {
+    let device = DerivedResetFixture::default();
+
+    MResetController::default()
+        .reset([&device as &dyn Resettable], ResetType::Warm)
+        .expect("reset derived device");
+
+    assert_eq!(*device.resets.lock().unwrap(), 1);
+}
+
+#[test]
 fn test_std_mutex_sysbus_accessor_can_use_custom_poison_recovering_lock() {
     let sysbus = RecoveringLockedSysBusFixture::new("uart0");
     sysbus.poison_state();
@@ -334,6 +463,18 @@ fn test_std_mutex_sysbus_accessor_can_use_custom_poison_recovering_lock() {
     sysbus
         .map_mmio(slot, GPA::new(0x1000_0000))
         .expect("map MMIO after poison");
+
+    let derived = DerivedRecoveringSysBusFixture::new("uart1");
+    derived.poison_state();
+
+    assert_eq!(derived.object_info().local_id, "uart1");
+    assert!(!derived.realized());
+    let slot = derived
+        .declare_mmio(MemoryRegion::io("uart1-mmio", 0x100, Arc::new(NoopMmio)))
+        .expect("declare derived MMIO after poison");
+    derived
+        .map_mmio(slot, GPA::new(0x1000_1000))
+        .expect("map derived MMIO after poison");
 }
 
 struct RecordingReset {

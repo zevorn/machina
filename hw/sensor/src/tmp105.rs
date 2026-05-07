@@ -63,6 +63,8 @@ impl Default for Tmp105State {
     }
 }
 
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = mdevice, lock = "parking_lot")]
 pub struct Tmp105 {
     mdevice: parking_lot::Mutex<MDeviceState>,
     address: u8,
@@ -83,8 +85,6 @@ impl Tmp105 {
             alert: parking_lot::Mutex::new(None),
         })
     }
-
-    machina_hw_core::machina_parking_lot_mdevice_accessors!(mdevice);
 
     pub fn connect_alert(&self, irq: InterruptSource) {
         *self.alert.lock() = Some(irq);
