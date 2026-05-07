@@ -14,6 +14,9 @@ machina-core = { workspace = true }
 machina-hw-core = { workspace = true }
 machina-hw-intc = { workspace = true }
 machina-hw-char = { workspace = true }
+machina-hw-firmware = { workspace = true }
+machina-hw-rtc = { workspace = true }
+machina-hw-storage = { workspace = true }
 machina-memory = { workspace = true }
 machina-guest-loongarch = { workspace = true }
 machina-hw-virtio = { workspace = true }

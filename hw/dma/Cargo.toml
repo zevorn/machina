@@ -1,0 +1,19 @@
+[package]
+name = "machina-hw-dma"
+version.workspace = true
+edition.workspace = true
+description = "DMA controller devices for Machina"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["emulator", "dma"]
+categories = ["emulators", "hardware-support"]
+
+[dependencies]
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }
+machina-memory = { workspace = true }
+parking_lot = { workspace = true }
+
+[lints]
+workspace = true

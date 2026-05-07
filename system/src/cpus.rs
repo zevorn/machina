@@ -5,7 +5,7 @@
 // AtomicU64, which the exec loop polls via
 // pending_interrupt().
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use machina_core::wfi::WfiWaker;
@@ -333,6 +333,17 @@ impl FullSystemCpu {
     /// timer interrupt exit-request signalling.
     pub fn neg_align_ptr(&self) -> u64 {
         &self.cpu.neg_align as *const std::sync::atomic::AtomicI32 as u64
+    }
+
+    /// Return a shareable callback that requests an exec-loop exit.
+    pub fn exit_request_handle(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let ptr = self.neg_align_ptr();
+        Arc::new(move || {
+            // SAFETY: `ptr` points to this CPU's inline neg_align field.
+            // Board setup cancels ACLINT timers before CPU teardown.
+            let neg_align = unsafe { &*(ptr as *const AtomicI32) };
+            neg_align.store(-1, Ordering::Release);
+        })
     }
 
     pub fn shared_mip(&self) -> SharedMip {

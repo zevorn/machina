@@ -199,10 +199,6 @@ pub struct Uart16550 {
     resolved_chardev_path: parking_lot::Mutex<Option<String>>,
 }
 
-// SAFETY: All mutable state is behind DeviceRefCell or
-// parking_lot::Mutex.
-unsafe impl Sync for Uart16550 {}
-
 impl Uart16550 {
     pub fn new() -> Self {
         Self::new_named("uart")
@@ -528,11 +524,17 @@ impl Default for Uart16550 {
 pub struct Uart16550Mmio(pub Arc<Uart16550>);
 
 impl MmioOps for Uart16550Mmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size > 8 || offset >= 8 {
+            return 0;
+        }
         self.0.read(offset) as u64
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size > 8 || offset >= 8 {
+            return;
+        }
         self.0.write(offset, val as u8);
     }
 }

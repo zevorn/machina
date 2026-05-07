@@ -1,0 +1,14 @@
+[package]
+name = "machina-hw-storage"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }
+machina-memory = { workspace = true }
+libc = { workspace = true }
+
+[lints]
+workspace = true

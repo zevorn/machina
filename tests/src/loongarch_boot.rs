@@ -5,11 +5,15 @@ use machina_core::machine::{Machine, MachineOpts};
 use machina_guest_loongarch::loongarch::csr::{
     CRMD_DA, CRMD_IE, CRMD_PG, CSR_CRMD,
 };
+use machina_hw_firmware::keys;
 use machina_hw_loongarch::boot::KERNEL_ENTRY_DEFAULT;
 use machina_hw_loongarch::virt_machine::{
-    LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE, VIRT_IPI_BASE,
-    VIRT_IPI_SIZE, VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE, VIRT_RAM_BASE,
-    VIRT_UART_BASE, VIRT_UART_SIZE, VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE,
+    LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE,
+    VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE, VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE,
+    VIRT_FWCFG_BASE, VIRT_FWCFG_SIZE, VIRT_IPI_BASE, VIRT_IPI_SIZE,
+    VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE, VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE,
+    VIRT_RAM_BASE, VIRT_RTC_BASE, VIRT_RTC_SIZE, VIRT_UART_BASE,
+    VIRT_UART_SIZE, VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE,
 };
 
 const EFI_SYSTEM_TABLE_SIGNATURE: u64 = 0x5453_5953_2049_4249;
@@ -123,6 +127,24 @@ fn read_guest_u64(machine: &LoongArchVirtMachine, addr: u64) -> u64 {
     u64::from_le_bytes(read_bytes(machine, addr, 8).try_into().unwrap())
 }
 
+fn read_fw_cfg_bytes(
+    machine: &LoongArchVirtMachine,
+    selector: u16,
+    len: usize,
+) -> Vec<u8> {
+    let as_ = machine.address_space();
+    as_.write(GPA::new(VIRT_FWCFG_BASE + 0x08), 2, u64::from(selector));
+    (0..len)
+        .map(|_| as_.read(GPA::new(VIRT_FWCFG_BASE), 1) as u8)
+        .collect()
+}
+
+fn read_fw_cfg_u32(machine: &LoongArchVirtMachine, selector: u16) -> u32 {
+    u32::from_le_bytes(
+        read_fw_cfg_bytes(machine, selector, 4).try_into().unwrap(),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EfiMemDesc {
     ty: u32,
@@ -143,6 +165,10 @@ fn expected_low_ram_reserved_ranges(ram_size: u64) -> Vec<(u64, u64)> {
         (VIRT_IPI_BASE, VIRT_IPI_SIZE),
         (VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE),
         (VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE),
+        (VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE),
+        (VIRT_RTC_BASE, VIRT_RTC_SIZE),
+        (VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE),
+        (VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE),
         (VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE),
         (VIRT_UART_BASE, VIRT_UART_SIZE),
     ]
@@ -464,6 +490,13 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
         fdt_prop(&props, "/memory@0", "reg"),
         cells_for_pairs(&expected_memory).as_slice()
     );
+    let fw_cfg_node = format!("/fw_cfg@{VIRT_FWCFG_BASE:x}");
+    assert_fdt_string(&props, &fw_cfg_node, "compatible", "qemu,fw-cfg-mmio");
+    assert_eq!(
+        fdt_prop(&props, &fw_cfg_node, "reg"),
+        cells_for_pairs(&[(VIRT_FWCFG_BASE, VIRT_FWCFG_SIZE)]).as_slice()
+    );
+    assert!(fdt_prop(&props, &fw_cfg_node, "dma-coherent").is_empty());
     assert_eq!(
         fdt_prop(&props, "/cpus", "#address-cells"),
         1u32.to_be_bytes().as_slice()
@@ -526,6 +559,62 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
             "interrupt-parent"
         ),
         2u32.to_be_bytes().as_slice()
+    );
+    assert_eq!(
+        fdt_prop(&props, &format!("/msi@{VIRT_PCH_MSI_BASE:x}"), "reg"),
+        cells_for_pairs(&[(VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE)]).as_slice()
+    );
+    assert_eq!(
+        fdt_prop(
+            &props,
+            &format!("/msi@{VIRT_PCH_MSI_BASE:x}"),
+            "interrupt-parent"
+        ),
+        2u32.to_be_bytes().as_slice()
+    );
+    assert_fdt_string(
+        &props,
+        &format!("/rtc@{VIRT_RTC_BASE:x}"),
+        "compatible",
+        "loongson,ls7a-rtc",
+    );
+    assert_eq!(
+        fdt_prop(&props, &format!("/rtc@{VIRT_RTC_BASE:x}"), "reg"),
+        cells_for_pairs(&[(VIRT_RTC_BASE, VIRT_RTC_SIZE)]).as_slice()
+    );
+    assert_eq!(
+        fdt_prop(&props, &format!("/rtc@{VIRT_RTC_BASE:x}"), "interrupts"),
+        [6u32.to_be_bytes(), 4u32.to_be_bytes()].concat()
+    );
+    assert_eq!(
+        fdt_prop(
+            &props,
+            &format!("/rtc@{VIRT_RTC_BASE:x}"),
+            "interrupt-parent"
+        ),
+        3u32.to_be_bytes().as_slice()
+    );
+    assert_fdt_string(
+        &props,
+        &format!("/flash@{VIRT_FLASH0_BASE:x}"),
+        "compatible",
+        "cfi-flash",
+    );
+    assert_eq!(
+        fdt_prop(&props, &format!("/flash@{VIRT_FLASH0_BASE:x}"), "reg"),
+        cells_for_pairs(&[
+            (VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE),
+            (VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE),
+        ])
+        .as_slice()
+    );
+    assert_eq!(
+        fdt_prop(
+            &props,
+            &format!("/flash@{VIRT_FLASH0_BASE:x}"),
+            "bank-width"
+        ),
+        4u32.to_be_bytes().as_slice()
     );
     assert_eq!(
         fdt_prop(&props, &format!("/serial@{VIRT_UART_BASE:x}"), "reg"),
@@ -674,6 +763,58 @@ fn task44_direct_boot_adds_initrd_and_optional_virtio_to_fdt() {
     assert_eq!(
         fdt_prop(&props, &format!("/virtio_mmio@{VIRT_VIRTIO_BASE:x}"), "reg"),
         cells_for_pairs(&[(VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE)]).as_slice()
+    );
+}
+
+#[test]
+fn task45_direct_boot_populates_fw_cfg_kernel_initrd_and_cmdline() {
+    let entry = VIRT_RAM_BASE + 0x20_0000;
+    let segment_addr = VIRT_RAM_BASE + 0x30_0000;
+    let kernel_image =
+        build_minimal_elf(entry, segment_addr, &[0x10, 0x20, 0x30]);
+    let mut kernel = tempfile::NamedTempFile::new().unwrap();
+    kernel.write_all(&kernel_image).unwrap();
+
+    let initrd_bytes = [0xaa, 0xbb, 0xcc, 0xdd];
+    let mut initrd = tempfile::NamedTempFile::new().unwrap();
+    initrd.write_all(&initrd_bytes).unwrap();
+
+    let mut opts = default_opts();
+    opts.kernel = Some(kernel.path().to_path_buf());
+    opts.initrd = Some(initrd.path().to_path_buf());
+    opts.append = Some("console=ttyS0 rdinit=/init".to_string());
+
+    let mut machine = LoongArchVirtMachine::new();
+    machine.init(&opts).expect("init loongarch ref");
+    machine.boot().expect("boot direct ELF");
+
+    assert_eq!(
+        read_fw_cfg_u32(&machine, keys::KERNEL_SIZE),
+        kernel_image.len() as u32
+    );
+    assert_eq!(
+        read_fw_cfg_bytes(&machine, keys::KERNEL_DATA, kernel_image.len()),
+        kernel_image
+    );
+
+    assert_eq!(
+        read_fw_cfg_u32(&machine, keys::INITRD_SIZE),
+        initrd_bytes.len() as u32
+    );
+    assert_eq!(
+        read_fw_cfg_bytes(&machine, keys::INITRD_DATA, initrd_bytes.len()),
+        initrd_bytes
+    );
+
+    let mut cmdline = opts.append.as_ref().unwrap().as_bytes().to_vec();
+    cmdline.push(0);
+    assert_eq!(
+        read_fw_cfg_u32(&machine, keys::CMDLINE_SIZE),
+        cmdline.len() as u32
+    );
+    assert_eq!(
+        read_fw_cfg_bytes(&machine, keys::CMDLINE_DATA, cmdline.len()),
+        cmdline
     );
 }
 

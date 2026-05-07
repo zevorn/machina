@@ -131,7 +131,7 @@ impl PchPic {
         {
             let mut regs = self.regs.borrow();
             set_input_level(&mut regs, irq as usize, level);
-            refresh_isr_from_pending(&mut regs, self.irq_num);
+            pch_pic_update_irq(&mut regs, 1u64 << irq, level, self.irq_num);
         }
         self.update_outputs();
     }
@@ -147,7 +147,9 @@ impl PchPic {
 
     #[must_use]
     pub fn mmio_read_sized(&self, offset: u64, size: u32) -> u64 {
-        let size = normalize_mmio_size(size);
+        if !valid_mmio_size(size) {
+            return 0;
+        }
         let regs = self.regs.borrow();
         let mut val = 0u64;
         for byte in 0..size {
@@ -161,10 +163,13 @@ impl PchPic {
     }
 
     pub fn mmio_write_sized(&self, offset: u64, size: u32, val: u64) {
-        let size = normalize_mmio_size(size);
+        if !valid_mmio_size(size) {
+            return;
+        }
         let mut needs_update = false;
         {
             let mut regs = self.regs.borrow();
+            let old_mask = regs.int_mask;
             for byte in 0..size {
                 needs_update |= write_reg_byte(
                     &mut regs,
@@ -173,8 +178,21 @@ impl PchPic {
                     ((val >> (byte * 8)) & 0xff) as u8,
                 );
             }
-            if needs_update {
-                refresh_isr_from_pending(&mut regs, self.irq_num);
+            let new_mask = regs.int_mask;
+            if new_mask != old_mask {
+                pch_pic_update_irq(
+                    &mut regs,
+                    old_mask & !new_mask,
+                    true,
+                    self.irq_num,
+                );
+                pch_pic_update_irq(
+                    &mut regs,
+                    !old_mask & new_mask,
+                    false,
+                    self.irq_num,
+                );
+                needs_update = true;
             }
         }
         if needs_update {
@@ -192,7 +210,10 @@ impl PchPic {
     fn update_outputs(&self) {
         let regs = self.regs.borrow();
         let mut levels = [false; NUM_OUTPUTS];
-        let active = regs.intisr & !regs.int_mask;
+        // Output is driven by intisr directly; the mask gates
+        // ISR acceptance, not ongoing output. Masking does not
+        // retroactively drop active IRQs.
+        let active = regs.intisr;
         for irq in 0..self.irq_num {
             if active & (1u64 << irq) == 0 {
                 continue;
@@ -255,15 +276,33 @@ fn set_input_level(regs: &mut PchPicRegs, irq: usize, level: bool) {
     } else {
         regs.intirr &= !bit;
         regs.last_intirr &= !bit;
-        regs.intisr &= !bit;
     }
 }
 
-fn refresh_isr_from_pending(regs: &mut PchPicRegs, irq_num: usize) {
+fn pch_pic_update_irq(
+    regs: &mut PchPicRegs,
+    mask: u64,
+    level: bool,
+    irq_num: usize,
+) {
     let valid_mask = valid_irq_mask(irq_num);
     regs.intirr &= valid_mask;
     regs.intisr &= valid_mask;
-    regs.intisr |= regs.intirr & !regs.int_mask & valid_mask;
+    let mask = mask & valid_mask;
+    let val = if level {
+        mask & regs.intirr & !regs.int_mask
+    } else {
+        mask & regs.intisr & !regs.intirr
+    };
+    if val == 0 {
+        return;
+    }
+
+    if level {
+        regs.intisr |= val;
+    } else {
+        regs.intisr &= !val;
+    }
 }
 
 fn read_reg_byte(regs: &PchPicRegs, irq_num: usize, offset: u64) -> u8 {
@@ -310,7 +349,7 @@ fn write_reg_byte(
                 (offset - INT_MASK_BASE) as usize,
                 val,
             );
-            true
+            false
         }
         HTMSI_EN_BASE..=0x047 => {
             write_u64_byte(
@@ -398,11 +437,8 @@ fn valid_irq_mask(irq_num: usize) -> u64 {
     }
 }
 
-fn normalize_mmio_size(size: u32) -> u32 {
-    match size {
-        1 | 2 | 4 | 8 => size,
-        _ => 4,
-    }
+fn valid_mmio_size(size: u32) -> bool {
+    matches!(size, 1 | 2 | 4 | 8)
 }
 
 fn empty_outputs() -> Vec<Option<InterruptSource>> {

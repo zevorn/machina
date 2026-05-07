@@ -1,0 +1,20 @@
+[package]
+name = "machina-hw-watchdog"
+version.workspace = true
+edition.workspace = true
+description = "Watchdog devices for Machina"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["emulator", "watchdog"]
+categories = ["emulators", "hardware-support"]
+
+[dependencies]
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }
+machina-hw-timer = { workspace = true }
+machina-memory = { workspace = true }
+parking_lot = { workspace = true }
+
+[lints]
+workspace = true

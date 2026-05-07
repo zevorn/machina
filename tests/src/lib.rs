@@ -29,9 +29,21 @@ mod hw_chardev;
 #[cfg(test)]
 mod hw_clock;
 #[cfg(test)]
+mod hw_dma;
+#[cfg(test)]
 mod hw_eiointc;
 #[cfg(test)]
 mod hw_fdt;
+#[cfg(test)]
+mod hw_firmware;
+#[cfg(test)]
+mod hw_gpio;
+#[cfg(test)]
+mod hw_i2c;
+#[cfg(test)]
+mod hw_intc_loongarch;
+#[cfg(test)]
+mod hw_intc_riscv;
 #[cfg(test)]
 mod hw_ipi;
 #[cfg(test)]
@@ -39,7 +51,11 @@ mod hw_irq;
 #[cfg(test)]
 mod hw_loader;
 #[cfg(test)]
+mod hw_misc;
+#[cfg(test)]
 mod hw_pch_pic;
+#[cfg(test)]
+mod hw_pflash;
 #[cfg(test)]
 mod hw_plic;
 #[cfg(test)]
@@ -47,9 +63,23 @@ mod hw_qdev;
 #[cfg(test)]
 mod hw_ref_machine;
 #[cfg(test)]
+mod hw_rtc;
+#[cfg(test)]
+mod hw_sd;
+#[cfg(test)]
+mod hw_sensor;
+#[cfg(test)]
+mod hw_ssi;
+#[cfg(test)]
+mod hw_storage;
+#[cfg(test)]
 mod hw_sysbus;
 #[cfg(test)]
+mod hw_timer;
+#[cfg(test)]
 mod hw_uart;
+#[cfg(test)]
+mod hw_watchdog;
 #[cfg(test)]
 mod integration;
 #[cfg(test)]
@@ -95,6 +125,8 @@ mod memory_region;
 #[cfg(test)]
 mod monitor;
 #[cfg(test)]
+mod oracle;
+#[cfg(test)]
 mod riscv_csr;
 #[cfg(test)]
 mod riscv_exception;
@@ -110,6 +142,8 @@ mod softfloat;
 mod softmmu;
 #[cfg(test)]
 mod softmmu_exec;
+#[cfg(test)]
+mod source_cleanliness;
 #[cfg(test)]
 mod system_cpu_manager;
 #[cfg(test)]

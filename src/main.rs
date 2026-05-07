@@ -459,13 +459,13 @@ fn run_machine_cycle(
         gs.set_mem_access(ram_ptr, ram_size, ram_base, as_ptr as u64);
     }
     cpu_mgr.add_cpu(fs_cpu);
-    // Connect neg_align pointer to ACLINT so timer
-    // interrupts can break goto_tb chains. Must be
-    // AFTER add_cpu because the move changes the
-    // address of the RiscvCpu/neg_align field.
+    // Connect ACLINT timer exit request after add_cpu,
+    // because the move changes the RiscvCpu field address
+    // used by the exec-loop break handle.
     {
         let ptr = cpu_mgr.cpu(0).neg_align_ptr();
-        machine.aclint().connect_neg_align(0, ptr);
+        let exit_request = cpu_mgr.cpu(0).exit_request_handle();
+        machine.aclint().connect_exit_request(0, exit_request);
         // Also give the pointer to MonitorState so
         // request_quit can break goto_tb chains.
         if let Some(ref ms) = monitor_state {

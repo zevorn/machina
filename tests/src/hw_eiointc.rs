@@ -115,11 +115,36 @@ fn coremap_routes_to_specific_cpu() {
 }
 
 #[test]
-fn task36_eiointc_realizes_as_sysbus_mmio_device() {
+fn connect_hwi_output_rebuilds_routes_for_extended_cpu() {
+    let e = Arc::new(Eiointc::new_named("eiointc0", 1));
+    let cpu0 = cpu_with_enabled_hwi(HWI1);
+    let cpu1 = cpu_with_enabled_hwi(HWI1);
+
+    e.connect_hwi_output(0, 1, hwi_output(&cpu0, 1));
+    e.mmio_write_sized(0, 0x0c0, 4, 0x02);
+    e.mmio_write_sized(0, 0x800, 1, 0x02);
+    e.mmio_write_sized(0, 0x200, 4, 1);
+    e.set_irq(0, true);
+
+    assert_eq!(cpu0.lock().unwrap().pending_interrupt_line(), Some(3));
+
+    e.connect_hwi_output(1, 1, hwi_output(&cpu1, 1));
+
+    assert_eq!(e.pending_for_cpu(0), 0);
+    assert_ne!(e.pending_for_cpu(1) & (1 << 1), 0);
+    assert_eq!(cpu0.lock().unwrap().pending_interrupt_line(), None);
+    assert_eq!(cpu1.lock().unwrap().pending_interrupt_line(), Some(3));
+}
+
+#[test]
+fn test_eiointc_lifecycle_and_mom_identity() {
     let e = Arc::new(Eiointc::new_named("eiointc0", 2));
     let mut bus = SysBus::new("sysbus0");
     let mut address_space = make_address_space();
     let base = GPA::new(0x1fe0_0000);
+    assert!(!e.realized());
+    e.with_mdevice(|device| assert_eq!(device.local_id(), "eiointc0"));
+    assert_eq!(e.object_info().local_id, "eiointc0");
 
     e.register_mmio(
         MemoryRegion::io(
@@ -149,6 +174,15 @@ fn task36_eiointc_realizes_as_sysbus_mmio_device() {
     assert_eq!(bus.mappings()[0].owner, "eiointc0");
     assert_eq!(bus.mappings()[0].name, "eiointc0-mmio");
     assert_eq!(bus.mappings()[0].base, base);
+
+    let err = e.realize_onto(&mut bus, &mut address_space).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+
+    e.unrealize_from(&mut bus, &mut address_space).unwrap();
+    assert!(!e.realized());
+
+    let err = e.unrealize_from(&mut bus, &mut address_space).unwrap_err();
+    assert!(err.to_string().contains("not realized"));
 }
 
 #[test]
@@ -170,7 +204,8 @@ fn task36_eiointc_routes_enabled_source_to_cpu_hwi_line() {
     e.mmio_write(0x400, 1 << 3);
 
     assert_eq!(cpu.lock().unwrap().pending_interrupt_line(), None);
-    assert_eq!(e.mmio_read(0x300) & (1 << 3), 0);
+    // ISR preserves source assertion state after ack (QEMU).
+    assert_ne!(e.mmio_read(0x300) & (1 << 3), 0);
     assert_eq!(e.mmio_read(0x400) & (1 << 3), 0);
 }
 
@@ -240,6 +275,18 @@ fn task36_eiointc_decodes_linux_one_hot_ipmap_words_independently() {
 }
 
 #[test]
+fn test_eiointc_ipmap_bits_above_hwi3_decode_to_hwi0() {
+    let e = Eiointc::new_named("eiointc0", 1);
+    e.mmio_write_sized(0, 0x0c0, 4, 0x80);
+    e.mmio_write_sized(0, 0x200, 4, 1);
+
+    e.set_irq(0, true);
+
+    assert_eq!(e.pending_for_cpu(0), 1);
+    assert_eq!(e.mmio_read_sized(0, 0x0c0, 4), 0x80);
+}
+
+#[test]
 fn task36_eiointc_decodes_linux_one_hot_coremap_words_independently() {
     let e = Eiointc::new_named("eiointc0", 2);
     e.mmio_write_sized(0, 0x0c0, 4, 0x0202_0202);
@@ -279,7 +326,8 @@ fn task36_eiointc_core_isr_is_cpu_specific_for_read_and_ack() {
 
     e.mmio_write_sized(1, 0x400, 4, 1 << 4);
     assert_eq!(e.mmio_read_sized(1, 0x400, 4), 0);
-    assert_eq!(e.mmio_read_sized(0, 0x300, 4) & (1 << 4), 0);
+    // ISR preserves source assertion state (QEMU).
+    assert_ne!(e.mmio_read_sized(0, 0x300, 4) & (1 << 4), 0);
 }
 
 #[test]
@@ -300,5 +348,6 @@ fn task36_eiointc_core_isr_supports_64_bit_dispatch() {
     e.mmio_write_sized(0, 0x400, 8, (1_u64 << 32) | 1);
 
     assert_eq!(e.mmio_read_sized(0, 0x400, 8), 0);
-    assert_eq!(e.mmio_read_sized(0, 0x300, 8), 0);
+    // ISR preserves source assertion state (QEMU).
+    assert_ne!(e.mmio_read_sized(0, 0x300, 8), 0);
 }

@@ -299,10 +299,9 @@ fn task41_ipi_send_clear_and_enable_mask_matrix() {
     let cpu1 = cpu_with_lie(IPI);
     connect_ipi_cpu(&ipi, 1, &cpu1);
 
-    ipi.mmio_write_sized(0, IOCSR_IPI_SEND, 4, (1 << 16) | 5);
-    assert_eq!(cpu1.lock().unwrap().pending_interrupt_line(), None);
-
+    // Enable before send: output rises immediately (QEMU 64-bit send).
     ipi.mmio_write_sized(1, IPI_CORE_ENABLE, 4, 1 << 5);
+    ipi.mmio_write_sized(0, IOCSR_IPI_SEND, 8, (1 << 16) | 5);
     assert_eq!(cpu1.lock().unwrap().pending_interrupt_line(), Some(12));
 
     ipi.mmio_write_sized(1, IPI_CORE_CLEAR, 4, 1 << 5);

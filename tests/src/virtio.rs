@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use machina_core::address::GPA;
+use machina_core::mobject::MObject;
 use machina_hw_core::bus::SysBus;
 use machina_hw_core::irq::{IrqLine, IrqSink};
 use machina_hw_virtio::block::VirtioBlk;
@@ -16,6 +17,10 @@ use machina_memory::address_space::AddressSpace;
 use machina_memory::region::MemoryRegion;
 use machina_memory::region::MmioOps;
 
+const VIRTIO_BLK_F_SEG_MAX: u64 = 1 << 2;
+const VIRTIO_BLK_F_BLK_SIZE: u64 = 1 << 6;
+const VIRTIO_BLK_F_TOPOLOGY: u64 = 1 << 10;
+
 struct DummySink {
     level: AtomicBool,
 }
@@ -27,6 +32,10 @@ impl IrqSink for DummySink {
 }
 
 fn make_test_device() -> (VirtioMmio, Arc<DummySink>) {
+    make_named_test_device("virtio-mmio")
+}
+
+fn make_named_test_device(local_id: &str) -> (VirtioMmio, Arc<DummySink>) {
     let mut f = tempfile::NamedTempFile::new().unwrap();
     f.write_all(&[0u8; 512]).unwrap();
     let path = f.into_temp_path();
@@ -35,7 +44,8 @@ fn make_test_device() -> (VirtioMmio, Arc<DummySink>) {
         level: AtomicBool::new(false),
     });
     let irq = IrqLine::new(sink.clone() as Arc<dyn IrqSink>, 1);
-    let mmio = VirtioMmio::new(
+    let mmio = VirtioMmio::new_named(
+        local_id,
         Box::new(blk),
         irq,
         std::ptr::null_mut(),
@@ -70,14 +80,48 @@ fn test_virtio_status_reset() {
 }
 
 #[test]
+fn test_virtio_mmio_registers_require_32_bit_accesses() {
+    let (dev, _) = make_test_device();
+
+    assert_eq!(dev.read(0x000, 1), 0);
+    assert_eq!(dev.read(0x000, 2), 0);
+    assert_eq!(dev.read(0x070, 8), 0);
+
+    dev.write(0x070, 1, 1);
+    assert_eq!(dev.read(0x070, 4), 0);
+
+    dev.write(0x070, 4, 1);
+    assert_eq!(dev.read(0x070, 4), 1);
+
+    dev.write(0x070, 2, 0);
+    assert_eq!(dev.read(0x070, 4), 1);
+}
+
+#[test]
 fn test_virtio_features() {
     let (dev, _) = make_test_device();
     dev.write(0x014, 4, 0);
     let f0 = dev.read(0x010, 4);
     dev.write(0x014, 4, 1);
     let f1 = dev.read(0x010, 4);
-    assert_eq!(f0, 0);
+    assert_ne!(f0 & VIRTIO_BLK_F_SEG_MAX, 0);
+    assert_ne!(f0 & VIRTIO_BLK_F_BLK_SIZE, 0);
+    assert_ne!(f0 & VIRTIO_BLK_F_TOPOLOGY, 0);
     assert_eq!(f1, 1); // VIRTIO_F_VERSION_1
+}
+
+#[test]
+fn test_virtio_blk_basic_qemu_config_features() {
+    let (dev, _) = make_test_device();
+
+    dev.write(0x014, 4, 0);
+    let f0 = dev.read(0x010, 4);
+    assert_ne!(f0 & VIRTIO_BLK_F_SEG_MAX, 0);
+    assert_ne!(f0 & VIRTIO_BLK_F_BLK_SIZE, 0);
+    assert_ne!(f0 & VIRTIO_BLK_F_TOPOLOGY, 0);
+
+    assert_eq!(dev.read(0x100 + 12, 4), 254);
+    assert_eq!(dev.read(0x100 + 20, 4), 512);
 }
 
 #[test]
@@ -130,6 +174,9 @@ fn test_virtio_queue_num_max() {
 #[test]
 fn test_virtio_realize_via_sysbus_maps_mmio() {
     let (mut dev, _) = make_test_device();
+    assert!(!dev.realized());
+    assert_eq!(dev.object_info().local_id, "virtio-mmio");
+
     let mut bus = SysBus::new("sysbus0");
     dev.attach_to_bus(&mut bus).unwrap();
     let region = dev.make_mmio_region("virtio-mmio0", 0x1000);
@@ -138,10 +185,44 @@ fn test_virtio_realize_via_sysbus_maps_mmio() {
     let mut address_space = make_address_space();
     dev.realize_onto(&mut bus, &mut address_space).unwrap();
 
+    assert!(dev.realized());
     assert!(address_space.is_mapped(GPA::new(0x1000_1000), 4));
     assert_eq!(address_space.read(GPA::new(0x1000_1000), 4), 0x74726976);
     assert_eq!(bus.mappings().len(), 1);
     assert_eq!(bus.mappings()[0].owner, "virtio-mmio");
+
+    let err = dev
+        .realize_onto(&mut bus, &mut address_space)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already realized"), "{err}");
+}
+
+#[test]
+fn test_virtio_named_lifecycle_and_mom_identity() {
+    let (mut dev, _) = make_named_test_device("virtio-mmio1");
+    assert!(!dev.realized());
+    assert_eq!(dev.object_info().local_id, "virtio-mmio1");
+
+    let mut bus = SysBus::new("sysbus0");
+    dev.attach_to_bus(&mut bus).unwrap();
+    let region = dev.make_mmio_region("virtio-mmio1", 0x1000);
+    dev.register_mmio(region, GPA::new(0x1000_2000)).unwrap();
+
+    let mut address_space = make_address_space();
+    dev.realize_onto(&mut bus, &mut address_space).unwrap();
+
+    assert!(dev.realized());
+    assert!(address_space.is_mapped(GPA::new(0x1000_2000), 4));
+    assert_eq!(address_space.read(GPA::new(0x1000_2000), 4), 0x74726976);
+    assert_eq!(bus.mappings().len(), 1);
+    assert_eq!(bus.mappings()[0].owner, "virtio-mmio1");
+
+    let err = dev
+        .realize_onto(&mut bus, &mut address_space)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already realized"), "{err}");
 }
 
 // ── Multi-queue transport tests (AC-1) ───────────────

@@ -12,6 +12,7 @@ use machina_memory::region::{MemoryRegion, MmioOps};
 const NUM_IRQS: usize = 256;
 const NUM_U32: usize = NUM_IRQS / 32;
 const NUM_HWI: usize = 8;
+const NUM_IPMAP_HWI: u32 = 4;
 const NODEMAP_BASE: u64 = 0x00A0;
 const IPMAP_BASE: u64 = 0x00C0;
 const ENABLE_BASE: u64 = 0x0200;
@@ -24,17 +25,26 @@ struct EiointcRegs {
     nodemap: [u32; NUM_U32],
     enable: [u32; NUM_U32],
     isr: [u32; NUM_U32],
+    /// Per-CPU core ISR — cleared on CORE_ISR write (ack) without
+    /// affecting global ISR.
+    core_isr: Vec<[u32; NUM_U32]>,
     coremap: [u8; NUM_IRQS],
     ipmap: [u8; 8],
     bounce: [u32; NUM_U32],
 }
 
 impl EiointcRegs {
-    fn new() -> Self {
+    fn new(num_cpus: usize) -> Self {
+        let nc = num_cpus.max(1);
+        let mut core_isr = Vec::with_capacity(nc);
+        for _ in 0..nc {
+            core_isr.push([0u32; NUM_U32]);
+        }
         Self {
             nodemap: [0; NUM_U32],
             enable: [0; NUM_U32],
             isr: [0; NUM_U32],
+            core_isr,
             coremap: [0; NUM_IRQS],
             ipmap: [0; 8],
             bounce: [0; NUM_U32],
@@ -56,9 +66,10 @@ impl Eiointc {
 
     #[must_use]
     pub fn new_named(local_id: &str, num_cpus: u32) -> Self {
+        let nc = num_cpus.max(1) as usize;
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(EiointcRegs::new()),
+            regs: DeviceRefCell::new(EiointcRegs::new(nc)),
             hwi_outputs: parking_lot::Mutex::new(empty_hwi_outputs(num_cpus)),
         }
     }
@@ -121,7 +132,12 @@ impl Eiointc {
             outputs.push(empty_hwi_output_row());
         }
         outputs[cpu_id as usize][hwi as usize] = Some(irq);
+        let route_cpu_count = outputs.len().max(1) as u32;
         drop(outputs);
+        {
+            let mut regs = self.regs.borrow();
+            rebuild_core_isr(&mut regs, route_cpu_count);
+        }
         self.update_outputs();
     }
 
@@ -129,6 +145,7 @@ impl Eiointc {
         if irq >= NUM_IRQS as u32 {
             return;
         }
+        let route_cpu_count = self.route_cpu_count_for(0);
         {
             let mut regs = self.regs.borrow();
             let idx = (irq / 32) as usize;
@@ -138,6 +155,7 @@ impl Eiointc {
             } else {
                 regs.isr[idx] &= !bit;
             }
+            rebuild_core_isr(&mut regs, route_cpu_count);
         }
         self.update_outputs();
     }
@@ -150,15 +168,20 @@ impl Eiointc {
             let mut regs = self.regs.borrow();
             let idx = (irq / 32) as usize;
             let bit = 1u32 << (irq % 32);
-            regs.isr[idx] &= !bit;
+            // Clear per-CPU core_isr; global ISR tracks source
+            // assertion state.
+            for core in &mut regs.core_isr {
+                core[idx] &= !bit;
+            }
         }
         self.update_outputs();
     }
 
     #[must_use]
     pub fn pending_for_cpu(&self, cpu_id: u32) -> u8 {
+        let route_cpu_count = self.route_cpu_count_for(cpu_id);
         let regs = self.regs.borrow();
-        hwi_bits_for_cpu(&regs, cpu_id, self.route_cpu_count_for(cpu_id))
+        hwi_bits_for_cpu(&regs, cpu_id, route_cpu_count)
     }
 
     #[must_use]
@@ -271,19 +294,47 @@ impl IrqSink for EiointcIrqSink {
     }
 }
 
+fn rebuild_core_isr(regs: &mut EiointcRegs, route_cpu_count: u32) {
+    resize_core_isr(regs, route_cpu_count);
+    for word in regs.core_isr.iter_mut().flatten() {
+        *word = 0;
+    }
+    let ncpus = regs.core_isr.len();
+    for irq in 0..NUM_IRQS {
+        let idx = irq / 32;
+        let bit = 1u32 << (irq % 32);
+        if regs.isr[idx] & bit == 0 {
+            continue;
+        }
+        if regs.enable[idx] & bit == 0 {
+            continue;
+        }
+        let cpu = decoded_cpu_for_irq(regs, irq, route_cpu_count) as usize;
+        if cpu < ncpus {
+            regs.core_isr[cpu][idx] |= bit;
+        }
+    }
+}
+
+fn resize_core_isr(regs: &mut EiointcRegs, route_cpu_count: u32) {
+    regs.core_isr
+        .resize(route_cpu_count.max(1) as usize, [0u32; NUM_U32]);
+}
+
 fn hwi_bits_for_cpu(
     regs: &EiointcRegs,
     cpu_id: u32,
-    route_cpu_count: u32,
+    _route_cpu_count: u32,
 ) -> u8 {
+    let cpu = cpu_id as usize;
+    if cpu >= regs.core_isr.len() {
+        return 0;
+    }
     let mut hwi_bits: u8 = 0;
     for irq in 0..NUM_IRQS {
         let idx = irq / 32;
         let bit = 1u32 << (irq % 32);
-        if regs.isr[idx] & regs.enable[idx] & bit == 0 {
-            continue;
-        }
-        if decoded_cpu_for_irq(regs, irq, route_cpu_count) != cpu_id {
+        if regs.core_isr[cpu][idx] & bit == 0 {
             continue;
         }
         let hwi = decoded_hwi_for_irq(regs, irq);
@@ -339,15 +390,18 @@ fn write_reg_byte(
         NODEMAP_BASE..=0x00BF => {
             let rel = (offset - NODEMAP_BASE) as usize;
             write_u32_byte(&mut regs.nodemap[rel / 4], rel % 4, val);
-            false
+            rebuild_core_isr(regs, route_cpu_count);
+            true
         }
         IPMAP_BASE..=0x00C7 => {
             regs.ipmap[(offset - IPMAP_BASE) as usize] = val;
+            rebuild_core_isr(regs, route_cpu_count);
             true
         }
         ENABLE_BASE..=0x021F => {
             let rel = (offset - ENABLE_BASE) as usize;
             write_u32_byte(&mut regs.enable[rel / 4], rel % 4, val);
+            rebuild_core_isr(regs, route_cpu_count);
             true
         }
         BOUNCE_BASE..=0x029F => {
@@ -361,6 +415,7 @@ fn write_reg_byte(
         }
         COREMAP_BASE..=0x08FF => {
             regs.coremap[(offset - COREMAP_BASE) as usize] = val;
+            rebuild_core_isr(regs, route_cpu_count);
             true
         }
         _ => false,
@@ -380,25 +435,14 @@ fn write_u32_byte(word: &mut u32, byte: usize, val: u8) {
 fn core_isr_word_for_cpu(
     regs: &EiointcRegs,
     cpu_id: u32,
-    route_cpu_count: u32,
+    _route_cpu_count: u32,
     word_idx: usize,
 ) -> u32 {
-    if word_idx >= NUM_U32 {
+    let cpu = cpu_id as usize;
+    if word_idx >= NUM_U32 || cpu >= regs.core_isr.len() {
         return 0;
     }
-    let mut word = 0u32;
-    let pending = regs.isr[word_idx] & regs.enable[word_idx];
-    for bit in 0..32 {
-        let mask = 1u32 << bit;
-        if pending & mask == 0 {
-            continue;
-        }
-        let irq = word_idx * 32 + bit;
-        if decoded_cpu_for_irq(regs, irq, route_cpu_count) == cpu_id {
-            word |= mask;
-        }
-    }
-    word
+    regs.core_isr[cpu][word_idx]
 }
 
 fn clear_core_isr_byte(
@@ -409,6 +453,10 @@ fn clear_core_isr_byte(
     val: u8,
 ) {
     let first_irq = ((offset - CORE_ISR_BASE) as usize) * 8;
+    let cpu = cpu_id as usize;
+    if cpu >= regs.core_isr.len() {
+        return;
+    }
     for bit in 0..8 {
         if val & (1 << bit) == 0 {
             continue;
@@ -420,13 +468,15 @@ fn clear_core_isr_byte(
         if decoded_cpu_for_irq(regs, irq, route_cpu_count) != cpu_id {
             continue;
         }
-        regs.isr[irq / 32] &= !(1u32 << (irq % 32));
+        // Clear per-CPU core_isr only; global ISR preserves
+        // source-asserted state.
+        regs.core_isr[cpu][irq / 32] &= !(1u32 << (irq % 32));
     }
 }
 
 fn decoded_hwi_for_irq(regs: &EiointcRegs, irq: usize) -> u8 {
     let group = irq / 32;
-    decode_one_hot(regs.ipmap.get(group).copied().unwrap_or(0), NUM_HWI as u32)
+    decode_one_hot(regs.ipmap.get(group).copied().unwrap_or(0), NUM_IPMAP_HWI)
         as u8
 }
 

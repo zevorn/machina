@@ -1,0 +1,2591 @@
+use std::sync::{Arc, Mutex};
+
+use machina_core::address::GPA;
+use machina_hw_core::bus::SysBus;
+use machina_hw_core::irq::{InterruptSource, IrqSink};
+use machina_hw_ssi::m25p80::M25p80;
+use machina_hw_ssi::pl022::{Pl022, Pl022Mmio};
+use machina_hw_ssi::sifive_spi::{SiFiveSpi, SiFiveSpiMmio};
+use machina_hw_ssi::{SpiBus, SpiCsPolarity, SpiSlave};
+use machina_hw_storage::{FlashMedia, MemBackend};
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
+
+/// Mock SPI slave that echoes back shifted data.
+struct EchoSlave {
+    cs_state: Mutex<bool>,
+}
+
+impl EchoSlave {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            cs_state: Mutex::new(false),
+        })
+    }
+
+    fn cs(&self) -> bool {
+        *self.cs_state.lock().unwrap()
+    }
+}
+
+impl SpiSlave for EchoSlave {
+    fn transfer(&self, val: u32) -> u32 {
+        val ^ 0xAA
+    }
+
+    fn set_cs(&self, cs: bool) {
+        *self.cs_state.lock().unwrap() = cs;
+    }
+
+    fn cs_polarity(&self) -> SpiCsPolarity {
+        SpiCsPolarity::High
+    }
+
+    fn cs_index(&self) -> u8 {
+        0
+    }
+}
+
+fn make_test_aspace() -> (AddressSpace, SysBus) {
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let aspace = AddressSpace::new(root);
+    let bus = SysBus::new("sysbus");
+    (aspace, bus)
+}
+
+// -- Positive Tests --
+
+#[test]
+fn test_spi_bus_new() {
+    let bus = SpiBus::new();
+    assert_eq!(bus.last_result(), 0);
+}
+
+#[test]
+fn test_spi_attach_detach() {
+    let bus = SpiBus::new();
+    let slave = EchoSlave::new();
+
+    assert!(bus.attach(slave.clone()).is_ok());
+    assert!(bus.get_cs(0).is_some());
+
+    let removed = bus.detach(0);
+    assert!(removed.is_some());
+    assert!(bus.get_cs(0).is_none());
+}
+
+#[test]
+fn test_spi_transfer_no_slave_returns_0xff() {
+    let bus = SpiBus::new();
+    assert_eq!(bus.transfer(0x12), 0xFF);
+    assert_eq!(bus.last_result(), 0xFF);
+}
+
+#[test]
+fn test_spi_transfer_with_slave() {
+    let bus = SpiBus::new();
+    let slave = EchoSlave::new();
+    bus.attach(slave.clone()).unwrap();
+
+    // Activate CS (active high)
+    bus.set_cs(0, true);
+    assert!(slave.cs());
+
+    let result = bus.transfer(0x42);
+    assert_eq!(result, 0x42 ^ 0xAA);
+    assert_eq!(bus.last_result(), 0x42 ^ 0xAA);
+}
+
+#[test]
+fn test_spi_transfer_slave_not_selected_returns_0xff() {
+    let bus = SpiBus::new();
+    let slave = EchoSlave::new();
+    bus.attach(slave).unwrap();
+
+    // CS not asserted -> slave not selected (active-high)
+    assert_eq!(bus.transfer(0x42), 0xFF);
+}
+
+#[test]
+fn test_spi_active_low_cs() {
+    struct ActiveLowSlave {
+        cs_state: Mutex<bool>,
+    }
+
+    impl ActiveLowSlave {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                cs_state: Mutex::new(false),
+            })
+        }
+    }
+
+    impl SpiSlave for ActiveLowSlave {
+        fn transfer(&self, val: u32) -> u32 {
+            val.wrapping_add(1)
+        }
+
+        fn set_cs(&self, cs: bool) {
+            *self.cs_state.lock().unwrap() = cs;
+        }
+
+        fn cs_polarity(&self) -> SpiCsPolarity {
+            SpiCsPolarity::Low
+        }
+
+        fn cs_index(&self) -> u8 {
+            0
+        }
+    }
+
+    let bus = SpiBus::new();
+    let slave = ActiveLowSlave::new();
+    bus.attach(slave).unwrap();
+
+    // CS Low = selected for active-low
+    bus.set_cs(0, false);
+    assert_eq!(bus.transfer(0x10), 0x11);
+
+    // CS High = deselected
+    bus.set_cs(0, true);
+    assert_eq!(bus.transfer(0x10), 0xFF);
+}
+
+#[test]
+fn test_spi_cs_none_always_selected() {
+    struct AlwaysOnSlave;
+
+    impl SpiSlave for AlwaysOnSlave {
+        fn transfer(&self, val: u32) -> u32 {
+            val
+        }
+
+        fn set_cs(&self, _cs: bool) {}
+
+        fn cs_polarity(&self) -> SpiCsPolarity {
+            SpiCsPolarity::None
+        }
+
+        fn cs_index(&self) -> u8 {
+            0
+        }
+    }
+
+    let bus = SpiBus::new();
+    let slave = Arc::new(AlwaysOnSlave);
+    bus.attach(slave).unwrap();
+
+    // Should respond regardless of CS
+    assert_eq!(bus.transfer(0xAB), 0xAB);
+}
+
+// -- Negative Tests --
+
+#[test]
+fn test_spi_attach_duplicate_cs_fails() {
+    let bus = SpiBus::new();
+    let s1 = EchoSlave::new();
+    let s2 = EchoSlave::new();
+
+    assert!(bus.attach(s1).is_ok());
+    assert!(bus.attach(s2).is_err());
+}
+
+#[test]
+fn test_spi_detach_nonexistent_returns_none() {
+    let bus = SpiBus::new();
+    assert!(bus.detach(0).is_none());
+    assert!(bus.detach(255).is_none());
+}
+
+#[test]
+fn test_spi_get_cs_nonexistent_returns_none() {
+    let bus = SpiBus::new();
+    assert!(bus.get_cs(0).is_none());
+}
+
+#[test]
+fn test_spi_multiple_slaves_or_result() {
+    struct Add1Slave;
+    struct Add2Slave;
+
+    impl SpiSlave for Add1Slave {
+        fn transfer(&self, val: u32) -> u32 {
+            val + 1
+        }
+        fn set_cs(&self, _cs: bool) {}
+        fn cs_polarity(&self) -> SpiCsPolarity {
+            SpiCsPolarity::None
+        }
+        fn cs_index(&self) -> u8 {
+            0
+        }
+    }
+
+    impl SpiSlave for Add2Slave {
+        fn transfer(&self, val: u32) -> u32 {
+            val + 2
+        }
+        fn set_cs(&self, _cs: bool) {}
+        fn cs_polarity(&self) -> SpiCsPolarity {
+            SpiCsPolarity::None
+        }
+        fn cs_index(&self) -> u8 {
+            1
+        }
+    }
+
+    let bus = SpiBus::new();
+    bus.attach(Arc::new(Add1Slave)).unwrap();
+    bus.attach(Arc::new(Add2Slave)).unwrap();
+
+    // Both have CS=None, so both are selected -> OR result
+    let r = bus.transfer(0);
+    // (0+1) | (0+2) = 1 | 2 = 3
+    assert_eq!(r, 3);
+}
+
+#[test]
+fn test_spi_cs_transition_calls_set_cs_once() {
+    struct CountingSlave {
+        cs_calls: Mutex<u32>,
+        cs_state: Mutex<bool>,
+    }
+
+    impl CountingSlave {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                cs_calls: Mutex::new(0),
+                cs_state: Mutex::new(false),
+            })
+        }
+    }
+
+    impl SpiSlave for CountingSlave {
+        fn transfer(&self, _val: u32) -> u32 {
+            0
+        }
+        fn set_cs(&self, cs: bool) {
+            let mut count = self.cs_calls.lock().unwrap();
+            *count += 1;
+            *self.cs_state.lock().unwrap() = cs;
+        }
+        fn cs_polarity(&self) -> SpiCsPolarity {
+            SpiCsPolarity::High
+        }
+        fn cs_index(&self) -> u8 {
+            0
+        }
+    }
+
+    let bus = SpiBus::new();
+    let slave = CountingSlave::new();
+    bus.attach(slave.clone()).unwrap();
+
+    // First CS change: 0 -> 1
+    bus.set_cs(0, true);
+    assert_eq!(*slave.cs_calls.lock().unwrap(), 1);
+
+    // Same level again: no change
+    bus.set_cs(0, true);
+    assert_eq!(*slave.cs_calls.lock().unwrap(), 1);
+
+    // Different level: 1 -> 0
+    bus.set_cs(0, false);
+    assert_eq!(*slave.cs_calls.lock().unwrap(), 2);
+}
+
+// ---- M25P80 SPI flash tests ----
+
+fn make_m25p80(data: Vec<u8>) -> Arc<M25p80<MemBackend>> {
+    make_m25p80_with_id(data, [0x20, 0xba, 0x18])
+}
+
+fn make_m25p80_with_id(
+    data: Vec<u8>,
+    jedec_id: [u8; 3],
+) -> Arc<M25p80<MemBackend>> {
+    let flash = FlashMedia::new(MemBackend::new(data, false), 4096).unwrap();
+    Arc::new(M25p80::new(0, flash, jedec_id))
+}
+
+fn m25p80_transaction(flash: &M25p80<MemBackend>, bytes: &[u8]) -> Vec<u8> {
+    flash.set_cs(false);
+    let out = bytes
+        .iter()
+        .map(|byte| flash.transfer(u32::from(*byte)) as u8)
+        .collect();
+    flash.set_cs(true);
+    out
+}
+
+#[test]
+fn test_m25p80_lifecycle_and_mom_identity() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+    assert!(!flash.realized());
+    flash.with_mdevice(|device| assert_eq!(device.local_id(), "m25p80"));
+    assert_eq!(flash.object_info().local_id, "m25p80");
+
+    flash.realize().unwrap();
+    assert!(flash.realized());
+    let err = flash.realize().unwrap_err();
+    assert!(
+        err.to_string().contains("already realized"),
+        "unexpected second-realize error: {err}"
+    );
+
+    flash.unrealize().unwrap();
+    assert!(!flash.realized());
+    let err = flash.unrealize().unwrap_err();
+    assert!(
+        err.to_string().contains("not realized"),
+        "unexpected second-unrealize error: {err}"
+    );
+}
+
+#[test]
+fn test_m25p80_defaults_status_and_jedec_id() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(flash.cs_polarity(), SpiCsPolarity::Low);
+    assert_eq!(flash.cs_index(), 0);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0x00, 0x00]), [0, 0, 0]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x9f, 0x00, 0x00, 0x00, 0x00]),
+        [0, 0x20, 0xba, 0x18, 0]
+    );
+}
+
+#[test]
+fn test_m25p80_jedec_id_returns_six_bytes_then_decodes_next_command() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x9f, 0, 0, 0, 0, 0, 0, 0x05, 0]),
+        [0, 0x20, 0xba, 0x18, 0, 0, 0, 0, 0x02]
+    );
+}
+
+#[test]
+fn test_m25p80_sst_read_id_commands_loop_manufacturer_and_device() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xbf, 0x25, 0x41]);
+    let non_sst = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x90, 0x00, 0x00, 0x00, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0xbf, 0x41, 0xbf, 0x41]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0xab, 0x00, 0x00, 0x01, 0, 0]),
+        [0, 0, 0, 0, 0x41, 0xbf]
+    );
+
+    m25p80_transaction(&flash, &[0xb7]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x90, 0x00, 0x00, 0x00, 0x01, 0, 0]),
+        [0, 0, 0, 0, 0, 0x41, 0xbf]
+    );
+    assert_eq!(
+        m25p80_transaction(&non_sst, &[0x90, 0x00, 0x00, 0x00, 0, 0]),
+        [0, 0, 0, 0, 0, 0]
+    );
+}
+
+#[test]
+fn test_m25p80_sst_aai_word_program_continues_until_write_disable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xbf, 0x25, 0x41]);
+
+    m25p80_transaction(&flash, &[0xad, 0x00, 0x00, 0x11, 0xaa, 0xbb]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]
+    );
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xad, 0x00, 0x00, 0x11, 0xaa, 0xbb]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x42]);
+
+    m25p80_transaction(&flash, &[0xad, 0xcc, 0xdd]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x42]);
+
+    m25p80_transaction(&flash, &[0x04]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0xad, 0xee, 0x99]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd, 0xff, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_sst_aai_word_program_is_sst_only() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xad, 0x00, 0x00, 0x10, 0xaa, 0xbb]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0]),
+        [0, 0, 0, 0, 0xff, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_read_nonvolatile_config_returns_default_bytes() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0xb5, 0, 0, 0]),
+        [0, 0xff, 0x8f, 0]
+    );
+}
+
+#[test]
+fn test_m25p80_write_nonvolatile_config_requires_wel_and_numonyx() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+    let sst = make_m25p80_with_id(vec![0xff; 8192], [0xbf, 0x25, 0x41]);
+
+    m25p80_transaction(&flash, &[0xb1, 0x34, 0x12]);
+    assert_eq!(m25p80_transaction(&flash, &[0xb5, 0, 0]), [0, 0xff, 0x8f]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xb1, 0x34, 0x12]);
+    assert_eq!(m25p80_transaction(&flash, &[0xb5, 0, 0]), [0, 0x34, 0x12]);
+
+    m25p80_transaction(&sst, &[0x06]);
+    m25p80_transaction(&sst, &[0xb1, 0x78, 0x56]);
+    assert_eq!(m25p80_transaction(&sst, &[0xb5, 0, 0]), [0, 0xff, 0x8f]);
+}
+
+#[test]
+fn test_m25p80_volatile_config_read_write_requires_wel_and_updates_rdcr() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0, 0]), [0, 0x8b, 0]);
+
+    m25p80_transaction(&flash, &[0x81, 0x4a]);
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x8b]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x81, 0x4a]);
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0, 0]), [0, 0x4a, 0]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x4a]);
+
+    m25p80_transaction(&flash, &[0xb7]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x6a]);
+}
+
+#[test]
+fn test_m25p80_enhanced_volatile_config_read_write_requires_wel() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0, 0]), [0, 0xdf, 0]);
+
+    m25p80_transaction(&flash, &[0x61, 0x2c]);
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0]), [0, 0xdf]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x2c]);
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0, 0]), [0, 0x2c, 0]);
+}
+
+#[test]
+fn test_m25p80_numonyx_qio_blocks_standard_read() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xa5;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x5f]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0]
+    );
+}
+
+#[test]
+fn test_m25p80_numonyx_qio_rejected_read_keeps_parser_ready() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x5f]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x03, 0x05, 0]), [0, 0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_numonyx_qio_blocks_jedec_read() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x5f]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x9f, 0, 0, 0]), [0, 0, 0, 0]);
+}
+
+#[test]
+fn test_m25p80_numonyx_qio_blocks_dual_page_program() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x5f]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xa2, 0x00, 0x00, 0x20, 0xa2]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0xdf]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_numonyx_dio_blocks_quad_page_program() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0x9f]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x32, 0x00, 0x00, 0x20, 0x32]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x61, 0xdf]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_nop_leaves_parser_ready_for_next_command() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+
+    flash.set_cs(false);
+    assert_eq!(flash.transfer(0x00), 0);
+    assert_eq!(flash.transfer(0x05), 0);
+    assert_eq!(flash.transfer(0x00), 0x02);
+    flash.set_cs(true);
+}
+
+#[test]
+fn test_m25p80_flag_status_reports_ready_and_4byte_mode() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x70, 0]), [0, 0x80]);
+
+    m25p80_transaction(&flash, &[0xb7]);
+    assert_eq!(m25p80_transaction(&flash, &[0x70, 0]), [0, 0x81]);
+}
+
+#[test]
+fn test_m25p80_read_config_reports_4byte_mode() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x8b]);
+
+    m25p80_transaction(&flash, &[0xb7]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0xab]);
+
+    m25p80_transaction(&flash, &[0xe9]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x8b]);
+}
+
+#[test]
+fn test_m25p80_numonyx_reset_recomputes_volatile_config() {
+    let flash = make_m25p80(vec![0xff; 32 * 1024 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x81, 0x4a]);
+    m25p80_transaction(&flash, &[0x61, 0x2c]);
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x4a]);
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0]), [0, 0x2c]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xb1, 0xfe, 0x8f]);
+    m25p80_transaction(&flash, &[0x66]);
+    m25p80_transaction(&flash, &[0x99]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x8b]);
+    assert_eq!(m25p80_transaction(&flash, &[0x65, 0]), [0, 0xdf]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0xab]);
+    assert_eq!(m25p80_transaction(&flash, &[0x70, 0]), [0, 0x81]);
+}
+
+#[test]
+fn test_m25p80_macronix_reset_sets_volatile_config_default() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xc2, 0x20, 0x19]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x07]);
+}
+
+#[test]
+fn test_m25p80_winbond_status2_controls_quad_enable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xef, 0x40, 0x18]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0x31, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x31, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_winbond_write_status_consumes_second_byte_for_quad_enable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xef, 0x40, 0x18]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x00, 0x02]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_spansion_write_status_second_byte_sets_quad_enable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0x01, 0x02, 0x19]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x00, 0x02]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x35, 0]), [0, 0x02]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_macronix_rdcr_eqio_sets_and_rstqio_clears_quad_enable() {
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xc2, 0x20, 0x19]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0x35]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x40]);
+
+    m25p80_transaction(&flash, &[0xf5]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_macronix_write_status_consumes_second_byte_for_volatile_config()
+{
+    let flash = make_m25p80_with_id(vec![0xff; 8192], [0xc2, 0x20, 0x19]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x40, 0x20]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x40]);
+    assert_eq!(m25p80_transaction(&flash, &[0x85, 0]), [0, 0x20]);
+    assert_eq!(m25p80_transaction(&flash, &[0x15, 0]), [0, 0x20]);
+    assert_eq!(m25p80_transaction(&flash, &[0x70, 0]), [0, 0x81]);
+}
+
+#[test]
+fn test_m25p80_read_24bit_address_streams_data() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x14].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+    let flash = make_m25p80(data);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0, 0, 0]),
+        [0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44]
+    );
+}
+
+#[test]
+fn test_m25p80_fast_read_consumes_config_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x13].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
+    let flash = make_m25p80(data);
+
+    let mut input = vec![0x0b, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 8]);
+    input.extend_from_slice(&[0, 0, 0]);
+    let mut expected = vec![0; 12];
+    expected.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_spansion_fast_read_consumes_cr2_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xa1;
+    let flash = make_m25p80_with_id(data, [0x01, 0x02, 0x19]);
+
+    let mut input = vec![0x0b, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 8]);
+    input.push(0);
+    let mut expected = vec![0; 12];
+    expected.push(0xa1);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_spansion_io_read_consumes_mode_and_cr2_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xb1;
+    let flash = make_m25p80_with_id(data, [0x01, 0x02, 0x19]);
+
+    let mut input = vec![0xbb, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 9]);
+    input.push(0);
+    let mut expected = vec![0; 13];
+    expected.push(0xb1);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_winbond_dual_io_read_consumes_continuous_mode_byte() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xc1;
+    let flash = make_m25p80_with_id(data, [0xef, 0x40, 0x18]);
+
+    let input = [0xbb, 0x00, 0x00, 0x10, 0, 0];
+
+    assert_eq!(m25p80_transaction(&flash, &input), [0, 0, 0, 0, 0, 0xc1]);
+}
+
+#[test]
+fn test_m25p80_winbond_quad_io_read_consumes_mode_and_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0xc2;
+    let flash = make_m25p80_with_id(data, [0xef, 0x40, 0x18]);
+
+    let mut input = vec![0xeb, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 5]);
+    input.push(0);
+    let mut expected = vec![0; 9];
+    expected.push(0xc2);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_read4_consumes_four_address_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x12].copy_from_slice(&[0x4a, 0x4b]);
+    let flash = make_m25p80(data);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x13, 0x00, 0x00, 0x00, 0x10, 0, 0]),
+        [0, 0, 0, 0, 0, 0x4a, 0x4b]
+    );
+}
+
+#[test]
+fn test_m25p80_enter_4byte_mode_makes_read_use_four_address_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10] = 0x5a;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0xb7]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0, 0x5a]
+    );
+}
+
+#[test]
+fn test_m25p80_exit_4byte_mode_restores_three_address_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0] = 0x6a;
+    data[0x10] = 0x6b;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0xb7]);
+    m25p80_transaction(&flash, &[0xe9]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x6a, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_extended_address_register_offsets_24bit_read() {
+    let high_base = 1usize << 24;
+    let mut data = vec![0xff; high_base + 0x20];
+    data[0x10] = 0x7a;
+    data[high_base + 0x10] = 0x7b;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xc5, 0x01]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0xc8, 0]), [0, 0x01]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x7b]
+    );
+}
+
+#[test]
+fn test_m25p80_bank_register_alias_offsets_24bit_read() {
+    let high_base = 2usize << 24;
+    let mut data = vec![0xff; high_base + 0x20];
+    data[0x10] = 0x7c;
+    data[high_base + 0x10] = 0x7d;
+    let flash = make_m25p80(data);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x17, 0x02]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x16, 0]), [0, 0x02]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x7d]
+    );
+}
+
+#[test]
+fn test_m25p80_fast_read4_consumes_four_address_bytes_and_config_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x12].copy_from_slice(&[0x4c, 0x4d]);
+    let flash = make_m25p80(data);
+
+    let mut input = vec![0x0c, 0x00, 0x00, 0x00, 0x10];
+    input.extend_from_slice(&[0; 8]);
+    input.extend_from_slice(&[0, 0]);
+    let mut expected = vec![0; 13];
+    expected.extend_from_slice(&[0x4c, 0x4d]);
+
+    assert_eq!(m25p80_transaction(&flash, &input), expected);
+}
+
+#[test]
+fn test_m25p80_output_read_aliases_use_fast_read_framing() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x12].copy_from_slice(&[0xd0, 0xd1]);
+    data[0x20..0x22].copy_from_slice(&[0xd2, 0xd3]);
+    data[0x30..0x32].copy_from_slice(&[0xd4, 0xd5]);
+    data[0x40..0x42].copy_from_slice(&[0xd6, 0xd7]);
+    let flash = make_m25p80(data);
+
+    let mut cases = vec![
+        (vec![0x3b, 0x00, 0x00, 0x10], 12, [0xd0, 0xd1]),
+        (vec![0x6b, 0x00, 0x00, 0x20], 12, [0xd2, 0xd3]),
+        (vec![0x3c, 0x00, 0x00, 0x00, 0x30], 13, [0xd4, 0xd5]),
+        (vec![0x6c, 0x00, 0x00, 0x00, 0x40], 13, [0xd6, 0xd7]),
+    ];
+    for (input, _, _) in &mut cases {
+        input.extend_from_slice(&[0; 8]);
+        input.extend_from_slice(&[0, 0]);
+    }
+
+    let observed = cases
+        .iter()
+        .map(|(input, _, _)| m25p80_transaction(&flash, input))
+        .collect::<Vec<_>>();
+    let expected = cases
+        .iter()
+        .map(|(_, zeroes, data)| {
+            let mut output = vec![0; *zeroes];
+            output.extend_from_slice(data);
+            output
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(observed, expected);
+}
+
+#[test]
+fn test_m25p80_io_read_aliases_use_config_dummy_bytes() {
+    let mut data = vec![0xff; 8192];
+    data[0x10..0x12].copy_from_slice(&[0xe0, 0xe1]);
+    data[0x20..0x22].copy_from_slice(&[0xe2, 0xe3]);
+    data[0x30..0x32].copy_from_slice(&[0xe4, 0xe5]);
+    data[0x40..0x42].copy_from_slice(&[0xe6, 0xe7]);
+    let flash = make_m25p80(data);
+
+    let mut cases = vec![
+        (vec![0xbb, 0x00, 0x00, 0x10], 12, [0xe0, 0xe1]),
+        (vec![0xeb, 0x00, 0x00, 0x20], 12, [0xe2, 0xe3]),
+        (vec![0xbc, 0x00, 0x00, 0x00, 0x30], 13, [0xe4, 0xe5]),
+        (vec![0xec, 0x00, 0x00, 0x00, 0x40], 13, [0xe6, 0xe7]),
+    ];
+    for (input, _, _) in &mut cases {
+        input.extend_from_slice(&[0; 8]);
+        input.extend_from_slice(&[0, 0]);
+    }
+
+    let observed = cases
+        .iter()
+        .map(|(input, _, _)| m25p80_transaction(&flash, input))
+        .collect::<Vec<_>>();
+    let expected = cases
+        .iter()
+        .map(|(_, zeroes, data)| {
+            let mut output = vec![0; *zeroes];
+            output.extend_from_slice(data);
+            output
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(observed, expected);
+}
+
+#[test]
+fn test_m25p80_read_wraps_at_flash_size() {
+    let mut data = vec![0xff; 8192];
+    data[0] = 0x11;
+    data[0x1fff] = 0x22;
+    let flash = make_m25p80(data);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x1f, 0xff, 0, 0]),
+        [0, 0, 0, 0, 0x22, 0x11]
+    );
+}
+
+#[test]
+fn test_m25p80_page_program_requires_write_enable() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x10, 0x0f]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+
+    m25p80_transaction(&flash, &[0x06]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x10, 0x0f, 0xf0]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0, 0]),
+        [0, 0, 0, 0, 0x0f, 0xf0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_write_disable_clears_write_enable() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+
+    m25p80_transaction(&flash, &[0x04]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x30, 0x33]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x30, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_write_status_requires_write_enable_and_clears_latch() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x01, 0x9c]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x9c]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x9c]);
+}
+
+#[test]
+fn test_m25p80_block_protect_status_prevents_top_sector_program() {
+    let flash = make_m25p80(vec![0xff; 128 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x04]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x04]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x10, 0x11]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x01, 0x00, 0x10, 0x22]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x11]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+}
+
+#[test]
+fn test_m25p80_numonyx_top_bottom_status_protects_bottom_sector() {
+    let flash = make_m25p80_with_id(vec![0xff; 128 * 1024], [0x20, 0xba, 0x19]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x01, 0x24]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x24]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x10, 0x11]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x01, 0x00, 0x10, 0x22]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0x22]
+    );
+}
+
+#[test]
+fn test_m25p80_page_program_wraps_at_flash_size() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x1f, 0xff, 0x12, 0x34]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x1f, 0xff, 0, 0]),
+        [0, 0, 0, 0, 0x12, 0x34]
+    );
+}
+
+#[test]
+fn test_m25p80_page_program4_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x12, 0x00, 0x00, 0x00, 0x20, 0x4e]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0x4e]
+    );
+}
+
+#[test]
+fn test_m25p80_page_program4_alias_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x3e, 0x00, 0x00, 0x00, 0x20, 0x5e]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0x5e]
+    );
+}
+
+#[test]
+fn test_m25p80_input_page_program_aliases_use_page_program_framing() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xa2, 0x00, 0x00, 0x50, 0xa2]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x32, 0x00, 0x00, 0x60, 0x32]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x34, 0x00, 0x00, 0x00, 0x70, 0x34]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x50, 0]),
+        [0, 0, 0, 0, 0xa2]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x60, 0]),
+        [0, 0, 0, 0, 0x32]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x70, 0]),
+        [0, 0, 0, 0, 0x34]
+    );
+}
+
+#[test]
+fn test_m25p80_program_only_clears_bits() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x20, 0x0f]);
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x02, 0x00, 0x00, 0x20, 0xff]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x20, 0]),
+        [0, 0, 0, 0, 0x0f]
+    );
+}
+
+#[test]
+fn test_m25p80_erase_4k_requires_write_enable() {
+    let flash = make_m25p80(vec![0x00; 8192]);
+
+    m25p80_transaction(&flash, &[0x20, 0x00, 0x00, 0x10]);
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0]
+    );
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x20, 0x00, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x10, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_erase4_4k_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0x00; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x21, 0x00, 0x00, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_erase_32k_clears_only_32k() {
+    let flash = make_m25p80(vec![0x00; 96 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x52, 0x00, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x7f, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x80, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_erase4_32k_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0x00; 128 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x5c, 0x00, 0x00, 0x80, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x7f, 0xff, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x80, 0x00, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_sector_erase_clears_only_64k() {
+    let flash = make_m25p80(vec![0x00; 128 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xd8, 0x00, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_bulk_erase_preserves_write_enable_latch() {
+    let flash = make_m25p80(vec![0x00; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xc7]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0x00, 0x10, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_numonyx_stacked_die_erase_clears_selected_die_only() {
+    let flash = make_m25p80_with_id(vec![0x00; 256 * 1024], [0x20, 0xba, 0x21]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xc4, 0x01, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0x00]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x02, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0x00]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_erase4_sector_consumes_four_address_bytes() {
+    let flash = make_m25p80(vec![0x00; 192 * 1024]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0xdc, 0x00, 0x01, 0x00, 0x10]);
+
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x00, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x01, 0xff, 0xff, 0]),
+        [0, 0, 0, 0, 0xff]
+    );
+    assert_eq!(
+        m25p80_transaction(&flash, &[0x03, 0x02, 0x00, 0x00, 0]),
+        [0, 0, 0, 0, 0]
+    );
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+}
+
+#[test]
+fn test_m25p80_cs_deassert_resets_partial_command() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    flash.set_cs(false);
+    assert_eq!(flash.transfer(0x03), 0);
+    assert_eq!(flash.transfer(0x00), 0);
+    flash.set_cs(true);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_reset_runtime_clears_write_enable_and_parser() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    flash.set_cs(false);
+    assert_eq!(flash.transfer(0x03), 0);
+    flash.reset_runtime();
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+#[test]
+fn test_m25p80_reset_memory_requires_reset_enable() {
+    let flash = make_m25p80(vec![0xff; 8192]);
+
+    m25p80_transaction(&flash, &[0x06]);
+    m25p80_transaction(&flash, &[0x99]);
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0x02]);
+
+    m25p80_transaction(&flash, &[0x66]);
+    m25p80_transaction(&flash, &[0x99]);
+
+    assert_eq!(m25p80_transaction(&flash, &[0x05, 0]), [0, 0]);
+}
+
+// ---- PL022 tests ----
+
+struct TestSink {
+    level: Mutex<bool>,
+}
+
+impl TestSink {
+    fn new() -> Self {
+        Self {
+            level: Mutex::new(false),
+        }
+    }
+
+    fn level(&self) -> bool {
+        *self.level.lock().unwrap()
+    }
+}
+
+impl IrqSink for TestSink {
+    fn set_irq(&self, _irq: u32, level: bool) {
+        *self.level.lock().unwrap() = level;
+    }
+}
+
+#[test]
+fn test_pl022_lifecycle_and_mom_identity() {
+    let pl022 = Arc::new(Pl022::new());
+    assert!(!pl022.realized());
+    pl022.with_mdevice(|device| assert_eq!(device.local_id(), "pl022"));
+    assert_eq!(pl022.object_info().local_id, "pl022");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x1000);
+    let region = MemoryRegion::io(
+        "pl022",
+        0x1000,
+        Arc::new(Pl022Mmio(Arc::clone(&pl022))),
+    );
+
+    pl022.attach_to_bus(&mut bus).unwrap();
+    pl022.register_mmio(region, base).unwrap();
+    pl022.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(pl022.realized());
+    assert_eq!(aspace.read(GPA(base.0 + 0xfe0), 4), 0x22);
+
+    let err = pl022.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
+fn test_pl022_defaults() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    assert_eq!(mmio.read(0x00, 4), 0); // CR0
+    assert_eq!(mmio.read(0x04, 4), 0); // CR1
+    assert_eq!(mmio.read(0x0C, 4), 0x03); // SR: TFE|TNF
+    assert_eq!(mmio.read(0x10, 4), 0); // CPSR
+    assert_eq!(mmio.read(0x14, 4), 0); // IM
+    assert_eq!(mmio.read(0x18, 4), 0x08); // IS: TX=1
+    assert_eq!(mmio.read(0x1C, 4), 0); // MIS
+}
+
+#[test]
+fn test_pl022_id_registers() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    assert_eq!(mmio.read(0xFE0, 4), 0x22);
+    assert_eq!(mmio.read(0xFE4, 4), 0x10);
+    assert_eq!(mmio.read(0xFE8, 4), 0x04);
+    assert_eq!(mmio.read(0xFEC, 4), 0x00);
+    assert_eq!(mmio.read(0xFF0, 4), 0x0D);
+    assert_eq!(mmio.read(0xFF4, 4), 0xF0);
+    assert_eq!(mmio.read(0xFF8, 4), 0x05);
+    assert_eq!(mmio.read(0xFFC, 4), 0xB1);
+}
+
+#[test]
+fn test_pl022_cr0_bitmask() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    // DSS=0 → bitmask = (1 << 1) - 1 = 1 → 1-bit transfer
+    mmio.write(0x00, 4, 0x00);
+    assert_eq!(mmio.read(0x00, 4), 0x00);
+
+    // DSS=7 → bitmask = (1 << 8) - 1 = 0xFF
+    mmio.write(0x00, 4, 0x07);
+    assert_eq!(mmio.read(0x00, 4), 0x07);
+}
+
+#[test]
+fn test_pl022_wide_mmio_read_splits_into_32bit_callbacks() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 4, 0x07);
+    mmio.write(0x04, 4, 0x02);
+
+    assert_eq!(mmio.read(0x00, 8), 0x0000_0002_0000_0007);
+}
+
+#[test]
+fn test_pl022_unaligned_id_reads_split_like_qemu() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    assert_eq!(mmio.read(0xfe1, 4), 0x1000_2222);
+    assert_eq!(mmio.read(0xfe2, 4), 0x0010_0022);
+    assert_eq!(mmio.read(0xfe3, 4), 0x1000_1022);
+}
+
+#[test]
+fn test_pl022_wide_mmio_write_splits_into_32bit_callbacks() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 8, 0x0000_0002_0000_0007);
+
+    assert_eq!(mmio.read(0x00, 4), 0x07);
+    assert_eq!(mmio.read(0x04, 4), 0x02);
+}
+
+#[test]
+fn test_pl022_narrow_accesses_use_access_width_bits() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 4, 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 1), 0x78);
+    assert_eq!(mmio.read(0x00, 2), 0x5678);
+    assert_eq!(mmio.read(0x01, 1), 0);
+    assert_eq!(mmio.read(0x02, 2), 0);
+
+    mmio.write(0x00, 1, 0x1234);
+    assert_eq!(mmio.read(0x00, 4), 0x34);
+    mmio.write(0x10, 2, 0x1234_5678);
+    assert_eq!(mmio.read(0x10, 4), 0x78);
+}
+
+#[test]
+fn test_pl022_tx_fifo_write_read() {
+    let pl022 = Arc::new(Pl022::new());
+    let bus = Arc::new(SpiBus::new());
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    // Enable SSE, set bitmask wide enough
+    mmio.write(0x00, 4, 0x07); // DSS=7 → 8-bit, bitmask=0xFF
+    mmio.write(0x04, 4, 0x02); // SSE=1
+
+    // Write data to TX FIFO
+    mmio.write(0x08, 4, 0xAB);
+    // SSI bus with no slave returns 0xFF, bitmask=0xFF → rx=0xFF
+    assert_eq!(mmio.read(0x08, 4), 0xFF);
+}
+
+#[test]
+fn test_pl022_dr_read_empty_returns_zero() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    // RX FIFO empty → read returns 0
+    assert_eq!(mmio.read(0x08, 4), 0);
+}
+
+#[test]
+fn test_pl022_sr_reflects_fifo() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    // Default: TX FIFO empty → TFE + TNF
+    assert_eq!(mmio.read(0x0C, 4), 0x03);
+
+    // Enable SSE, write data
+    mmio.write(0x00, 4, 0x07);
+    mmio.write(0x04, 4, 0x02);
+
+    // After xfer, TX FIFO should be empty again (data moved to RX)
+    let sr = mmio.read(0x0C, 4) as u32;
+    assert!(sr & 0x01 != 0); // TFE still set (SSI returned immediately)
+}
+
+#[test]
+fn test_pl022_is_reflects_fifo_levels() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    // Default: TX empty → TX interrupt active, RX empty → RX inactive
+    let is = mmio.read(0x18, 4) as u32;
+    assert!(is & 0x08 != 0); // TX interrupt
+    assert!(is & 0x04 == 0); // RX interrupt
+}
+
+#[test]
+fn test_pl022_im_masks_interrupt() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+    let sink = Arc::new(TestSink::new());
+    let irq = InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+    pl022.connect_irq(irq);
+
+    // Default: IM=0, IS=TX → IRQ low (masked)
+    assert!(!sink.level());
+
+    // Unmask TX interrupt
+    mmio.write(0x14, 4, 0x08);
+    assert!(sink.level());
+}
+
+#[test]
+fn test_pl022_icr_clear() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    // Write to ICR clears ROR and RT only
+    mmio.write(0x20, 4, 0x03);
+    // IS should have ROR and RT cleared (TX should remain)
+    let is = mmio.read(0x18, 4) as u32;
+    assert!(is & 0x08 != 0); // TX still set
+}
+
+#[test]
+fn test_pl022_cpsr_write() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x10, 4, 0xFE);
+    assert_eq!(mmio.read(0x10, 4), 0xFE); // CPSR low byte only
+}
+
+#[test]
+fn test_pl022_reset_runtime() {
+    let pl022 = Arc::new(Pl022::new());
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 4, 0x07);
+    mmio.write(0x14, 4, 0xFF);
+    mmio.write(0x10, 4, 0x55);
+
+    pl022.reset_runtime();
+
+    assert_eq!(mmio.read(0x14, 4), 0); // IM reset
+    assert_eq!(mmio.read(0x0C, 4), 0x03); // SR: TFE|TNF
+    assert_eq!(mmio.read(0x18, 4), 0x08); // IS: TX
+}
+
+// -- SiFive SPI tests --
+
+#[test]
+fn test_sifive_spi_lifecycle_and_mom_identity() {
+    let spi = Arc::new(SiFiveSpi::new());
+    assert!(!spi.realized());
+    spi.with_mdevice(|device| assert_eq!(device.local_id(), "sifive_spi"));
+    assert_eq!(spi.object_info().local_id, "sifive_spi");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x2000);
+    let region = MemoryRegion::io(
+        "sifive_spi",
+        0x1000,
+        Arc::new(SiFiveSpiMmio(Arc::clone(&spi))),
+    );
+
+    spi.attach_to_bus(&mut bus).unwrap();
+    spi.register_mmio(region, base).unwrap();
+    spi.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(spi.realized());
+    assert_eq!(aspace.read(base, 4), 0x03);
+    aspace.write(GPA(base.0 + 0x14), 4, 0x00);
+    assert_eq!(aspace.read(GPA(base.0 + 0x14), 4), 0x00);
+
+    let err = spi.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
+fn test_sifive_spi_defaults() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    assert_eq!(mmio.read(0x00, 4), 0x03); // SCKDIV
+    assert_eq!(mmio.read(0x10, 4), 0x00); // CSID
+    assert_eq!(mmio.read(0x14, 4), 0x01); // CSDEF = 1 (num_cs=1)
+    assert_eq!(mmio.read(0x18, 4), 0x00); // CSMODE
+    assert_eq!(mmio.read(0x28, 4), 0x1001); // DELAY0
+    assert_eq!(mmio.read(0x2C, 4), 0x01); // DELAY1
+    assert_eq!(mmio.read(0x70, 4), 0x00); // IE
+    assert_eq!(mmio.read(0x74, 4), 0x00); // IP
+}
+
+#[test]
+fn test_sifive_spi_rejects_non_4byte_mmio_accesses() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    assert_eq!(mmio.read(0x4C, 1), 0);
+    assert_eq!(mmio.read(0x4C, 2), 0);
+    assert_eq!(mmio.read(0x4C, 8), 0);
+
+    mmio.write(0x00, 1, 0x12);
+    mmio.write(0x00, 2, 0x3456);
+    mmio.write(0x00, 8, 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 4), 0x03);
+}
+
+#[test]
+fn test_sifive_spi_rejects_unaligned_mmio_accesses() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    assert_eq!(mmio.read(0x01, 4), 0);
+
+    mmio.write(0x01, 4, 7);
+    assert_eq!(mmio.read(0x00, 4), 0x03);
+
+    mmio.write(0x14, 4, 0);
+    assert_eq!(mmio.read(0x14, 4), 0);
+
+    mmio.write(0x15, 4, 1);
+    assert_eq!(mmio.read(0x14, 4), 0);
+}
+
+#[test]
+fn test_sifive_spi_txdata_full_flag() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // TXDATA empty → reads 0 (not FULL)
+    assert_eq!(mmio.read(0x48, 4), 0);
+}
+
+#[test]
+fn test_sifive_spi_rxdata_empty_flag() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // RXDATA empty → reads RXDATA_EMPTY (1<<31)
+    assert_eq!(mmio.read(0x4C, 4), 0x8000_0000);
+}
+
+#[test]
+fn test_sifive_spi_tx_fifo_write() {
+    let spi = Arc::new(SiFiveSpi::new());
+
+    // Connect SSI bus and write data
+    let bus = Arc::new(SpiBus::new());
+    spi.connect_ssi_bus(Arc::clone(&bus));
+
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // Write to TXDATA
+    mmio.write(0x48, 4, 0x42);
+
+    // With no slave, SSI returns 0xFF → RXDATA should have 0xFF
+    let rx = mmio.read(0x4C, 4);
+    assert_eq!(rx, 0xFF);
+}
+
+#[test]
+fn test_sifive_spi_tx_full_asserts_ip() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let bus = Arc::new(SpiBus::new());
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // Set TXMARK high enough that FIFO stays below watermark
+    mmio.write(0x50, 4, 7); // TXMARK=7
+
+    // Fill TX FIFO with 8 entries; after each write, flush drains
+    // it via the SSI bus, so FIFO stays empty.
+    for i in 0..8u64 {
+        mmio.write(0x48, 4, i);
+    }
+
+    // With bus draining, TXDATA is empty (not FULL)
+    assert_eq!(mmio.read(0x48, 4), 0);
+}
+
+#[test]
+fn test_sifive_spi_ie_controls_irq() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let bus = Arc::new(SpiBus::new());
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+    let sink = Arc::new(TestSink::new());
+    let irq = InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+    spi.connect_irq(irq);
+
+    // Set TXMARK high so empty FIFO triggers watermark
+    mmio.write(0x50, 4, 7); // TXMARK=7
+
+    // Enable TXWM interrupt mask
+    mmio.write(0x70, 4, 0x01); // IE_TXWM
+
+    // TX FIFO=0 < TXMARK=7 → IP.TXWM set → IRQ asserts
+    assert!(sink.level());
+}
+
+#[test]
+fn test_sifive_spi_cs_lines() {
+    let spi = Arc::new(SiFiveSpi::with_num_cs(4));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // num_cs=4 → CSDEF reset = 0x0F
+    assert_eq!(mmio.read(0x14, 4), 0x0F);
+
+    // CSID should be 0 by default
+    assert_eq!(mmio.read(0x10, 4), 0x00);
+}
+
+#[test]
+fn test_sifive_spi_reserved_regs() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // Reserved offsets return 0 on read
+    assert_eq!(mmio.read(0x08, 4), 0);
+    assert_eq!(mmio.read(0x0C, 4), 0);
+    assert_eq!(mmio.read(0x30, 4), 0);
+    assert_eq!(mmio.read(0x38, 4), 0);
+
+    // Writes to reserved offsets are silently ignored
+    mmio.write(0x08, 4, 0xDEAD_BEEF);
+}
+
+#[test]
+fn test_sifive_spi_ip_read_only() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // IP is read-only, write should be ignored
+    mmio.write(0x74, 4, 0xFF);
+    assert_eq!(mmio.read(0x74, 4), 0x00);
+}
+
+#[test]
+fn test_sifive_spi_rxdata_read_only() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // RXDATA is read-only, write should be ignored
+    mmio.write(0x4C, 4, 0xDEAD_BEEF);
+    assert_eq!(mmio.read(0x4C, 4), 0x8000_0000); // Still empty
+}
+
+#[test]
+fn test_sifive_spi_reset_runtime() {
+    let spi = Arc::new(SiFiveSpi::new());
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    mmio.write(0x00, 4, 0xFF); // SCKDIV
+    mmio.write(0x14, 4, 0x00); // CSDEF
+    mmio.write(0x28, 4, 0xFF); // DELAY0
+    mmio.write(0x70, 4, 0xFF); // IE
+
+    spi.reset_runtime();
+
+    assert_eq!(mmio.read(0x00, 4), 0x03); // SCKDIV reset
+    assert_eq!(mmio.read(0x14, 4), 0x01); // CSDEF reset
+    assert_eq!(mmio.read(0x28, 4), 0x1001); // DELAY0 reset
+    assert_eq!(mmio.read(0x70, 4), 0x00); // IE reset
+}
+
+#[test]
+fn test_sifive_spi_watermark_bounds_rejected() {
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // TXMARK >= FIFO_CAPACITY rejected
+    mmio.write(0x50, 4, 8);
+    assert_eq!(mmio.read(0x50, 4), 0);
+
+    // Valid watermark accepted
+    mmio.write(0x50, 4, 3);
+    assert_eq!(mmio.read(0x50, 4), 3);
+}
+
+// -- Regression: active-low slave default-deselected on attach --
+
+#[test]
+fn test_spi_active_low_default_deselected_after_attach() {
+    // An active-low slave attached to a bare SpiBus must return 0xFF
+    // (pull-up) before any SpiBus::set_cs() call, because cs_state
+    // starts as None (unconfigured/deselected for all polarities).
+    struct ActiveLowSlave(Mutex<bool>);
+    impl SpiSlave for ActiveLowSlave {
+        fn transfer(&self, val: u32) -> u32 {
+            val.wrapping_add(1)
+        }
+        fn set_cs(&self, cs: bool) {
+            *self.0.lock().unwrap() = cs;
+        }
+        fn cs_polarity(&self) -> SpiCsPolarity {
+            SpiCsPolarity::Low
+        }
+        fn cs_index(&self) -> u8 {
+            0
+        }
+    }
+
+    let bus = SpiBus::new();
+    let slave = Arc::new(ActiveLowSlave(Mutex::new(false)));
+    bus.attach(slave.clone()).unwrap();
+
+    // No set_cs called yet — cs_state is None → not selected
+    assert_eq!(bus.transfer(0x42), 0xFF);
+    assert!(!*slave.0.lock().unwrap());
+
+    // After explicit CS low, slave is selected
+    bus.set_cs(0, false);
+    assert_eq!(bus.transfer(0x42), 0x43);
+}
+
+// -- Regression: SiFiveSpi AUTO mode CS assertion --
+
+/// Mock slave that records CS transitions and returns a fixed response.
+struct CsspySlave {
+    selected: Mutex<bool>,
+    cs_calls: Mutex<Vec<bool>>,
+}
+
+impl CsspySlave {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            selected: Mutex::new(false),
+            cs_calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn selected(&self) -> bool {
+        *self.selected.lock().unwrap()
+    }
+
+    fn cs_calls(&self) -> Vec<bool> {
+        self.cs_calls.lock().unwrap().clone()
+    }
+}
+
+impl SpiSlave for CsspySlave {
+    fn transfer(&self, val: u32) -> u32 {
+        // Echo with XOR so we can distinguish slave response vs 0xFF
+        val ^ 0x5A
+    }
+
+    fn set_cs(&self, cs: bool) {
+        self.cs_calls.lock().unwrap().push(cs);
+        *self.selected.lock().unwrap() = cs;
+    }
+
+    fn cs_polarity(&self) -> SpiCsPolarity {
+        SpiCsPolarity::High
+    }
+
+    fn cs_index(&self) -> u8 {
+        0
+    }
+}
+
+#[test]
+fn test_sifive_spi_auto_mode_cs_assertion() {
+    let bus = Arc::new(SpiBus::new());
+    let slave = CsspySlave::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CsspySlave is active-high. CSDEF=0 (idle low) makes
+    // assert_level = true (high) → selects the slave.
+    // This write also calls update_cs(), producing a CS call.
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (idle low = active-high)
+    let cs_calls_before = slave.cs_calls().len();
+
+    // In AUTO mode, writing TXDATA asserts CS before transfer
+    // and deasserts after.
+    mmio.write(0x48, 4, 0x42); // TXDATA
+
+    let rx = mmio.read(0x4C, 4);
+    assert_eq!(rx, 0x42 ^ 0x5A);
+
+    // Verify the transfer produced exactly 2 CS calls
+    let calls = slave.cs_calls();
+    let new_calls = &calls[cs_calls_before..];
+    assert_eq!(new_calls.len(), 2);
+    assert!(new_calls[0]); // assert (true = high) for active-high
+    assert!(!new_calls[1]); // deassert (false = low) for active-high
+    assert!(!slave.selected());
+}
+
+#[test]
+fn test_sifive_spi_active_low_cs_auto_mode() {
+    // Active-low slave with CSDEF=1 (reset default): idle high,
+    // assert low. AUTO mode toggles CS: assert=false, deassert=true.
+    let bus = Arc::new(SpiBus::new());
+
+    struct ActiveLowEchoSlave {
+        cs_state: Mutex<bool>,
+        cs_calls: Mutex<Vec<bool>>,
+    }
+    impl ActiveLowEchoSlave {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                cs_state: Mutex::new(false),
+                cs_calls: Mutex::new(Vec::new()),
+            })
+        }
+    }
+    impl SpiSlave for ActiveLowEchoSlave {
+        fn transfer(&self, val: u32) -> u32 {
+            val ^ 0x3C
+        }
+        fn set_cs(&self, cs: bool) {
+            self.cs_calls.lock().unwrap().push(cs);
+            *self.cs_state.lock().unwrap() = cs;
+        }
+        fn cs_polarity(&self) -> SpiCsPolarity {
+            SpiCsPolarity::Low
+        }
+        fn cs_index(&self) -> u8 {
+            0
+        }
+    }
+
+    let slave = ActiveLowEchoSlave::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CSDEF=1 (reset default): idle high, active-low
+    // No explicit CSDEF write needed — it's the reset value.
+
+    let cs_calls_before = slave.cs_calls.lock().unwrap().len();
+
+    // AUTO mode (default): write TXDATA
+    mmio.write(0x48, 4, 0x7F);
+    let rx = mmio.read(0x4C, 4);
+
+    // CSDEF=1, AUTO: assert_level = !bit(CSDEF,0) = false
+    // assert=false → active-low selected → slave responds
+    // deassert=true → deselected
+    assert_eq!(rx, 0x7F ^ 0x3C);
+
+    let calls = slave.cs_calls.lock().unwrap().clone();
+    let new_calls = &calls[cs_calls_before..];
+    assert_eq!(new_calls.len(), 2);
+    assert!(!new_calls[0]); // assert low (active-low)
+    assert!(new_calls[1]); // deassert high
+    assert!(*slave.cs_state.lock().unwrap()); // ended deasserted (high)
+}
+
+#[test]
+fn test_sifive_spi_hold_mode_cs_persistent() {
+    let bus = Arc::new(SpiBus::new());
+    let slave = CsspySlave::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CsspySlave is active-high. CSDEF=0 (idle low) makes
+    // assert_level = true (high) → selects the slave in HOLD.
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (idle low = active-high)
+    mmio.write(0x18, 4, 2); // CSMODE=HOLD
+
+    // In HOLD mode, update_cs() asserts CS persistently
+    assert!(slave.selected());
+
+    // Write TXDATA: in HOLD, CS stays asserted across bytes
+    mmio.write(0x48, 4, 0x11);
+    let rx = mmio.read(0x4C, 4);
+    assert_eq!(rx, 0x11 ^ 0x5A);
+
+    // CS still asserted after transfer
+    assert!(slave.selected());
+
+    // Switch to OFF mode → CS deasserts
+    mmio.write(0x18, 4, 3); // CSMODE=OFF
+    assert!(!slave.selected());
+}
+
+#[test]
+fn test_sifive_spi_reset_deasserts_cs() {
+    let bus = Arc::new(SpiBus::new());
+    let slave = CsspySlave::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CsspySlave is active-high. CSDEF=0 (idle low) →
+    // assert_level=true selects in HOLD; reset drives
+    // default_level=false which deasserts.
+    mmio.write(0x14, 4, 0x00); // CSDEF=0
+    mmio.write(0x18, 4, 2); // CSMODE=HOLD
+    assert!(slave.selected());
+
+    // Reset → CS must deassert
+    spi.reset_runtime();
+    assert!(slave.cs_calls().len() > 0);
+}
+
+// -- Regression: Pl022 CS assertion --
+
+#[test]
+fn test_pl022_cs_assertion_during_transfer() {
+    // Pl022 nSSP is active-low: assert=false, deassert=true.
+    // Use active-low slave so the transfer reaches it.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 4, 0x07); // DSS=7 → 8-bit
+    mmio.write(0x04, 4, 0x02); // SSE=1
+
+    mmio.write(0x08, 4, 0xAB); // Write data → triggers xfer
+
+    let rx = mmio.read(0x08, 4);
+    assert_eq!(rx, (0xAB & 0xFF) ^ 0x5A);
+
+    // CS: assert=false (low), deassert=true (high)
+    let calls = slave.cs_calls();
+    assert_eq!(calls.len(), 2);
+    assert!(!calls[0]); // assert low
+    assert!(calls[1]); // deassert high
+}
+
+#[test]
+fn test_pl022_no_cs_when_sse_disabled() {
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    // SSE disabled (default)
+    mmio.write(0x08, 4, 0xCD); // Write to DR with SSE=0
+
+    // No CS transitions should occur
+    assert!(slave.cs_calls().is_empty());
+}
+
+#[test]
+fn test_pl022_reset_deasserts_cs() {
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 4, 0x07);
+    mmio.write(0x04, 4, 0x02);
+    mmio.write(0x08, 4, 0x55);
+    // After transfer CS is deasserted (true) → active-low deselected
+    assert!(!slave.selected());
+
+    // Re-assert CS to false (low) to simulate lingering assertion
+    bus.set_cs(0, false);
+    assert!(slave.selected());
+    let calls_before = slave.cs_calls().len();
+
+    // Reset must deassert: CS false → true
+    pl022.reset_runtime();
+    assert!(!slave.selected());
+    assert!(slave.cs_calls().len() > calls_before);
+}
+
+// -- Regression: active-low slave CSDEF=0 deassert semantics --
+
+/// Active-low mock slave that records CS transitions and logical
+/// selection state. Uses `SpiCsPolarity::Low` — selected when CS=false.
+struct ActiveLowCsSpy {
+    selected: Mutex<bool>,
+    cs_calls: Mutex<Vec<bool>>,
+}
+
+impl ActiveLowCsSpy {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            selected: Mutex::new(false),
+            cs_calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Returns whether the slave is logically selected
+    /// (accounts for active-low polarity).
+    fn selected(&self) -> bool {
+        *self.selected.lock().unwrap()
+    }
+
+    fn cs_calls(&self) -> Vec<bool> {
+        self.cs_calls.lock().unwrap().clone()
+    }
+}
+
+impl SpiSlave for ActiveLowCsSpy {
+    fn transfer(&self, val: u32) -> u32 {
+        val ^ 0x5A
+    }
+
+    fn set_cs(&self, cs: bool) {
+        self.cs_calls.lock().unwrap().push(cs);
+        // Active-low: logically selected when physical CS = false
+        *self.selected.lock().unwrap() = !cs;
+    }
+
+    fn cs_polarity(&self) -> SpiCsPolarity {
+        SpiCsPolarity::Low
+    }
+
+    fn cs_index(&self) -> u8 {
+        0
+    }
+}
+
+#[test]
+fn test_sifive_spi_active_low_off_deasserts() {
+    // CSDEF=1 (reset default = idle high), OFF mode:
+    // CS must be deasserted (default_level = high/true).
+    // Active-low slave is selected by CS=false, so high=true
+    // must not select it.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CSDEF=1 (reset default) — idle high, active-low
+    mmio.write(0x18, 4, 3); // CSMODE=OFF
+
+    // default_level = bit(CSDEF,0) != 0 = true (high)
+    // Active-low slave: CS=true → deselected
+    assert!(
+        !slave.selected(),
+        "active-low slave must be deselected in OFF mode with CSDEF=1"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_hold_persists_and_off_deasserts() {
+    // CSDEF=1 (idle high), HOLD mode: selected CS stays asserted
+    // (assert_level = false = low). Switch to OFF: CS must deassert
+    // (default_level = true = high).
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CSDEF=1 is reset default
+    mmio.write(0x18, 4, 2); // CSMODE=HOLD
+
+    // HOLD selected: assert_level = !CSDEF = false (low)
+    // Active-low slave → CS=false → selected
+    assert!(slave.selected(), "CS=false must select active-low slave");
+
+    // Transfer — CS stays asserted throughout flush_txfifo
+    mmio.write(0x48, 4, 0x77);
+    let rx = mmio.read(0x4C, 4);
+    assert_eq!(rx, 0x77 ^ 0x5A);
+    assert!(slave.selected(), "CS must stay asserted in HOLD mode");
+
+    // Switch to OFF → default_level = true (high)
+    mmio.write(0x18, 4, 3);
+    assert!(
+        !slave.selected(),
+        "OFF must deassert CS (true) for CSDEF=1 active-low"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_reset_deasserts() {
+    // CSDEF=1 (reset default, idle high), HOLD mode asserts CS low.
+    // After reset_runtime(), update_cs() runs with CSDEF=1 in AUTO:
+    // default_level = true = deasserted. Active-low slave must be
+    // deselected in the final post-reset state.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // Default CSDEF=1 (idle high)
+    mmio.write(0x18, 4, 2); // CSMODE=HOLD
+    assert!(slave.selected()); // CS=false asserted
+
+    spi.reset_runtime();
+    // After reset: regs back to CSDEF=1, update_cs in AUTO drives
+    // default_level = true (high) → active-low slave deselected
+    assert!(
+        !slave.selected(),
+        "reset must leave active-low slave deselected with CSDEF=1"
+    );
+}
+
+#[test]
+fn test_sifive_spi_csdef_write_propagates_to_bus() {
+    // CSDEF=0 (idle low = active-high), HOLD mode: assert_level = true.
+    // Write CSDEF=1 → idle high → assert_level changes to false.
+    // Active-low slave goes from deselected (CS=true) to selected
+    // (CS=false).
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    mmio.write(0x14, 4, 0x00); // CSDEF=0 (idle low, active-high)
+    mmio.write(0x18, 4, 2); // CSMODE=HOLD
+                            // CSDEF=0 HOLD: assert_level = true (high)
+                            // Active-low slave needs CS=false → not selected
+    assert!(
+        !slave.selected(),
+        "CSDEF=0 idle-low: CS=true, active-low slave not selected"
+    );
+
+    // Write CSDEF=1: idle high → assert_level = false (low) →
+    // active-low slave gets selected
+    mmio.write(0x14, 4, 0x01);
+    assert!(
+        slave.selected(),
+        "CSDEF=1 idle-high: assert_level=false selects active-low slave"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_auto_steady_state_deasserted() {
+    // Reset-default CSDEF=1 (idle high). After an AUTO-mode
+    // transfer, the controller restores default_level = true.
+    // update_cs() (called on CSID write) must also drive
+    // default_level = true, keeping the active-low slave deselected.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CSDEF=1 is reset default, CSMODE defaults to 0 (AUTO)
+
+    // Transfer: assert=false, transfer, deassert=true
+    mmio.write(0x48, 4, 0x33);
+    let rx = mmio.read(0x4C, 4);
+    assert_eq!(rx, 0x33 ^ 0x5A, "transfer must reach active-low slave");
+    assert!(!slave.selected(), "deasserted after transfer");
+
+    // CSID write triggers update_cs: AUTO → default_level = true
+    mmio.write(0x10, 4, 0); // CSID=0 (same value, triggers update_cs)
+    assert!(
+        !slave.selected(),
+        "update_cs() in AUTO must keep CS deasserted (true)"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_auto_transfer_cs_toggle() {
+    // Reset-default CSDEF=1 (idle high). AUTO transfer must:
+    // 1. assert CS=false (low) → slave receives CS assertion
+    // 2. transfer reaches the selected slave
+    // 3. deassert CS=true (high) → slave deselected
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CSDEF=1 is reset default, CSMODE defaults to AUTO
+
+    let cs_calls_before = slave.cs_calls().len();
+    mmio.write(0x48, 4, 0x88);
+    let calls = &slave.cs_calls()[cs_calls_before..];
+
+    // flush_txfifo in AUTO mode: assert=false, then deassert=true
+    assert_eq!(calls.len(), 2, "AUTO must toggle CS: assert + deassert");
+    assert!(
+        !calls[0],
+        "assert must be false (low) for CSDEF=1 active-low"
+    );
+    assert!(calls[1], "deassert must be true (high) for CSDEF=1");
+    assert!(
+        !slave.selected(),
+        "slave must be deselected after AUTO transfer"
+    );
+}
+
+#[test]
+fn test_sifive_spi_active_low_unrealize_deasserts() {
+    // unrealize must leave CS at default_level (deasserted).
+    // CSDEF=1 (reset default) → default_level = true (high) →
+    // active-low slave deselected.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    spi.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    // CSDEF=1 is reset default
+    mmio.write(0x18, 4, 2); // HOLD → assert_level=false → selected
+    assert!(slave.selected());
+
+    // unrealize
+    use machina_core::address::GPA;
+    use machina_hw_core::bus::SysBus;
+    use machina_memory::address_space::AddressSpace;
+    use machina_memory::region::MemoryRegion;
+
+    let mut bus_sys = SysBus::new("sysbus");
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let mut aspace = AddressSpace::new(root);
+    let region = MemoryRegion::io(
+        "mmio",
+        0x1000,
+        Arc::new(SiFiveSpiMmio(Arc::clone(&spi))),
+    );
+    spi.attach_to_bus(&mut bus_sys).unwrap();
+    spi.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    spi.realize_onto(&mut bus_sys, &mut aspace).unwrap();
+    spi.unrealize_from(&mut bus_sys, &mut aspace).unwrap();
+
+    // After unrealize: lower_outputs drives default_level = true
+    // Active-low slave: CS=true → deselected
+    assert!(
+        !slave.selected(),
+        "unrealize must deassert CS for active-low slave"
+    );
+}
+
+// -- Regression: Pl022 with active-low slave (nSSP active-low) --
+
+#[test]
+fn test_pl022_active_low_cs_assertion_during_transfer() {
+    // Pl022 nSSP is active-low: assert = false (low), deassert = true
+    // (high). An active-low slave must be reached by the transfer.
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    mmio.write(0x00, 4, 0x07); // DSS=7 → 8-bit
+    mmio.write(0x04, 4, 0x02); // SSE=1
+
+    mmio.write(0x08, 4, 0xAB); // Write data to DR
+
+    let rx = mmio.read(0x08, 4);
+    assert_eq!(
+        rx,
+        (0xAB & 0xFF) ^ 0x5A,
+        "transfer must reach active-low slave"
+    );
+
+    // After transfer CS is deasserted (true) → active-low deselected
+    assert!(!slave.selected());
+
+    // Verify CS assert=false then deassert=true
+    let calls = slave.cs_calls();
+    assert_eq!(calls.len(), 2);
+    assert!(!calls[0], "assert must be false (low) for PL022 nSSP");
+    assert!(calls[1], "deassert must be true (high) for PL022 nSSP");
+}
+
+#[test]
+fn test_pl022_active_low_reset_deasserts() {
+    // Pl022 reset must drive CS to the deasserted idle level.
+    // nSSP is active-low: idle/deasserted = high (true).
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+    let mmio = Pl022Mmio(Arc::clone(&pl022));
+
+    // Do a transfer to put CS through assert/deassert cycle
+    mmio.write(0x00, 4, 0x07);
+    mmio.write(0x04, 4, 0x02);
+    mmio.write(0x08, 4, 0x55);
+    let _rx = mmio.read(0x08, 4);
+    assert!(!slave.selected()); // deasserted after transfer
+
+    // Re-assert CS to false to simulate a lingering assertion
+    bus.set_cs(0, false);
+    assert!(slave.selected());
+    let cs_calls_before = slave.cs_calls().len();
+
+    // Reset must drive CS to deasserted level (true)
+    pl022.reset_runtime();
+    assert!(
+        !slave.selected(),
+        "reset must deassert CS (true) for active-low PL022"
+    );
+    assert!(
+        slave.cs_calls().len() > cs_calls_before,
+        "reset must produce a CS state change"
+    );
+}
+
+#[test]
+fn test_pl022_active_low_unrealize_deasserts() {
+    // PL022 unrealize must leave CS deasserted (true for nSSP
+    // active-low).
+    let bus = Arc::new(SpiBus::new());
+    let slave = ActiveLowCsSpy::new();
+    bus.attach(slave.clone()).unwrap();
+
+    let mut pl022 = Pl022::new();
+    pl022.set_cs_index(0);
+    let pl022 = Arc::new(pl022);
+    pl022.connect_ssi_bus(Arc::clone(&bus));
+
+    // Assert CS via the bus to simulate an active transfer
+    bus.set_cs(0, false);
+    assert!(slave.selected());
+
+    // Realize then unrealize: the deassert_cs() call in the
+    // unrealize path must drive true (high).
+    use machina_core::address::GPA;
+    use machina_hw_core::bus::SysBus;
+    use machina_memory::address_space::AddressSpace;
+    use machina_memory::region::MemoryRegion;
+
+    let mut bus_sys = SysBus::new("sysbus");
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let mut aspace = AddressSpace::new(root);
+    let region = MemoryRegion::io(
+        "mmio",
+        0x1000,
+        Arc::new(Pl022Mmio(Arc::clone(&pl022))),
+    );
+    pl022.attach_to_bus(&mut bus_sys).unwrap();
+    pl022.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    pl022.realize_onto(&mut bus_sys, &mut aspace).unwrap();
+    pl022.unrealize_from(&mut bus_sys, &mut aspace).unwrap();
+
+    assert!(
+        !slave.selected(),
+        "unrealize must deassert CS (true) for PL022 active-low nSSP"
+    );
+}
+
+// -- Regression: external CS lines (connect_cs) deassertion --
+
+#[test]
+fn test_sifive_spi_external_cs_unrealize_deasserts() {
+    // External cs_lines connected via connect_cs() must be driven
+    // to CSDEF default_level on unrealize, not unconditionally
+    // lowered.  CSDEF=1 (reset default) → default_level = true.
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    let sink = Arc::new(TestSink::new());
+    let cs_line =
+        InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+    spi.connect_cs(0, cs_line);
+
+    // CSDEF=1 is reset default.  Set HOLD mode to select the CS
+    // line: assert_level = !default_level = false.
+    mmio.write(0x18, 4, 2); // HOLD
+                            // update_cs() drives external CS to false (asserted for
+                            // CSDEF=1 active-low).
+    assert!(!sink.level(), "HOLD must assert external CS (false)");
+
+    // unrealize must drive external CS to CSDEF default_level
+    // (= true for CSDEF=1).
+    use machina_core::address::GPA;
+    use machina_hw_core::bus::SysBus;
+    use machina_memory::address_space::AddressSpace;
+    use machina_memory::region::MemoryRegion;
+
+    let mut bus_sys = SysBus::new("sysbus");
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let mut aspace = AddressSpace::new(root);
+    let region = MemoryRegion::io(
+        "mmio",
+        0x1000,
+        Arc::new(SiFiveSpiMmio(Arc::clone(&spi))),
+    );
+    spi.attach_to_bus(&mut bus_sys).unwrap();
+    spi.register_mmio(region, GPA(0x1000_0000)).unwrap();
+    spi.realize_onto(&mut bus_sys, &mut aspace).unwrap();
+    spi.unrealize_from(&mut bus_sys, &mut aspace).unwrap();
+
+    assert!(
+        sink.level(),
+        "unrealize must drive external CS to default_level=true \
+         for CSDEF=1"
+    );
+}
+
+#[test]
+fn test_sifive_spi_external_cs_reset_deasserts() {
+    // External cs_lines must be driven to CSDEF default_level on
+    // reset_runtime().  CSDEF=1 → default_level = true (high).
+    let spi = Arc::new(SiFiveSpi::with_num_cs(1));
+    let mmio = SiFiveSpiMmio(Arc::clone(&spi));
+
+    let sink = Arc::new(TestSink::new());
+    let cs_line =
+        InterruptSource::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
+    spi.connect_cs(0, cs_line);
+
+    // CSDEF=1 (reset default), HOLD mode → assert_level=false
+    mmio.write(0x18, 4, 2); // HOLD
+    assert!(!sink.level(), "HOLD must assert external CS (false)");
+
+    // Reset must drive external CS to CSDEF default_level=true
+    spi.reset_runtime();
+    assert!(
+        sink.level(),
+        "reset must drive external CS to default_level=true \
+         for CSDEF=1"
+    );
+}

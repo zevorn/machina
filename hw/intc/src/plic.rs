@@ -8,14 +8,13 @@
 //
 // Source-layer state (priority, pending, source_level) uses
 // AtomicU32 for lock-free IRQ propagation.  Context-layer
-// state (enable, threshold, claim) is behind DeviceRefCell
+// state (enable, threshold, claim) is behind a mutex
 // for MMIO claim/complete serialization.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use machina_core::address::GPA;
-use machina_core::device_cell::DeviceRefCell;
 use machina_core::mobject::{MObject, MObjectInfo};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::irq::InterruptSource;
@@ -30,7 +29,7 @@ const ENABLE_STRIDE: u64 = 0x80;
 const CONTEXT_BASE: u64 = 0x20_0000;
 const CONTEXT_STRIDE: u64 = 0x1000;
 
-/// Per-context mutable state protected by DeviceRefCell.
+/// Per-context mutable state protected by a mutex.
 pub struct PlicContexts {
     enable: Vec<Vec<u32>>,
     threshold: Vec<u32>,
@@ -47,18 +46,18 @@ pub struct Plic {
     // Lock-free source layer.
     priority: Vec<AtomicU32>,
     pending: Vec<AtomicU32>,
+    /// Claimed bitmap — set on claim, cleared on complete.
+    /// Prevents re-claim of the same source between claim
+    /// and complete.
+    claimed: Vec<AtomicU32>,
     source_level: Vec<AtomicU32>,
     // Locked context layer.
-    contexts: DeviceRefCell<PlicContexts>,
+    contexts: parking_lot::Mutex<PlicContexts>,
     // Output lines. Written only during init (behind
     // parking_lot::Mutex), read lock-free at runtime via
     // the immutable Vec after init completes.
     context_outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
-
-// SAFETY: All mutable state is either atomic or behind
-// DeviceRefCell / parking_lot::Mutex.
-unsafe impl Sync for Plic {}
 
 impl Plic {
     pub fn new(num_sources: u32, num_contexts: u32) -> Self {
@@ -79,6 +78,10 @@ impl Plic {
         for _ in 0..words {
             pending.push(AtomicU32::new(0));
         }
+        let mut claimed = Vec::with_capacity(words);
+        for _ in 0..words {
+            claimed.push(AtomicU32::new(0));
+        }
         let mut source_level = Vec::with_capacity(num_sources as usize);
         for _ in 0..num_sources {
             source_level.push(AtomicU32::new(0));
@@ -93,8 +96,9 @@ impl Plic {
             num_contexts,
             priority,
             pending,
+            claimed,
             source_level,
-            contexts: DeviceRefCell::new(PlicContexts {
+            contexts: parking_lot::Mutex::new(PlicContexts {
                 enable: vec![vec![0u32; words]; num_contexts as usize],
                 threshold: vec![0u32; num_contexts as usize],
                 claim: vec![0u32; num_contexts as usize],
@@ -162,11 +166,14 @@ impl Plic {
         for p in &self.pending {
             p.store(0, Ordering::Relaxed);
         }
+        for c in &self.claimed {
+            c.store(0, Ordering::Relaxed);
+        }
         for s in &self.source_level {
             s.store(0, Ordering::Relaxed);
         }
         {
-            let mut ctx = self.contexts.borrow();
+            let mut ctx = self.contexts.lock();
             for words in &mut ctx.enable {
                 words.fill(0);
             }
@@ -184,9 +191,9 @@ impl Plic {
     }
 
     /// Update the source wire level.  Only a rising edge
-    /// (0→1) latches the pending bit, matching QEMU
-    /// semantics and preventing interrupt storms when the
-    /// guest defers source-clearing to a task/bottom-half.
+    /// (0→1) latches the pending bit, preventing interrupt
+    /// storms when the guest defers source-clearing to a
+    /// task/bottom-half.
     pub fn set_irq(&self, source: u32, level: bool) {
         if source == 0 || source >= self.num_sources {
             return;
@@ -203,7 +210,7 @@ impl Plic {
     /// Re-evaluate all context outputs based on current
     /// pending, enable, priority, and threshold state.
     pub fn update_outputs(&self) {
-        let ctx_guard = self.contexts.borrow();
+        let ctx_guard = self.contexts.lock();
         let outputs = self.context_outputs.lock();
         for ctx in 0..self.num_contexts as usize {
             let thresh = ctx_guard.threshold[ctx];
@@ -213,7 +220,8 @@ impl Plic {
                 let word = (irq / 32) as usize;
                 let bit = 1u32 << (irq % 32);
                 let pend = self.pending[word].load(Ordering::Relaxed);
-                let pending = pend & bit != 0;
+                let clam = self.claimed[word].load(Ordering::Relaxed);
+                let pending = (pend & !clam) & bit != 0;
                 let enabled = ctx_guard.enable[ctx][word] & bit != 0;
                 let pri = self.priority[irq as usize].load(Ordering::Relaxed);
                 if pending && enabled && pri > thresh {
@@ -249,7 +257,7 @@ impl Plic {
             return None;
         }
         let ctx = context as usize;
-        let mut ctx_guard = self.contexts.borrow();
+        let mut ctx_guard = self.contexts.lock();
         let thresh = ctx_guard.threshold[ctx];
 
         let mut best_irq: Option<u32> = None;
@@ -261,7 +269,8 @@ impl Plic {
             let bit = 1u32 << (irq % 32);
 
             let pend = self.pending[word].load(Ordering::Relaxed);
-            let is_pending = pend & bit != 0;
+            let clam = self.claimed[word].load(Ordering::Relaxed);
+            let is_pending = (pend & !clam) & bit != 0;
             let is_enabled = ctx_guard.enable[ctx][word] & bit != 0;
             let pri = self.priority[irq as usize].load(Ordering::Relaxed);
 
@@ -272,10 +281,12 @@ impl Plic {
         }
 
         if let Some(irq) = best_irq {
-            // Atomically clear pending bit.
+            // Clear pending and set claimed to prevent
+            // re-claim before complete.
             let word = (irq / 32) as usize;
             let bit = 1u32 << (irq % 32);
             self.pending[word].fetch_and(!bit, Ordering::Relaxed);
+            self.claimed[word].fetch_or(bit, Ordering::Relaxed);
             ctx_guard.claim[ctx] = irq;
         }
 
@@ -283,28 +294,40 @@ impl Plic {
     }
 
     /// Complete (acknowledge) a previously claimed IRQ.
-    /// If the source is still asserted (level-triggered),
-    /// Complete (acknowledge) a previously claimed IRQ.
-    /// Clears the claim record and re-evaluates outputs.
+    /// Clears the claim record and the claimed bitmap,
+    /// then re-evaluates outputs.
     /// Does NOT automatically re-pend based on source wire
     /// level — the device must de-assert and re-assert to
-    /// generate a new interrupt (matching QEMU semantics).
+    /// generate a new interrupt.
     pub fn complete_irq(&self, context: u32, irq: u32) {
         if context >= self.num_contexts {
             return;
         }
         let ctx = context as usize;
         {
-            let mut ctx_guard = self.contexts.borrow();
+            let mut ctx_guard = self.contexts.lock();
             if ctx_guard.claim[ctx] == irq {
                 ctx_guard.claim[ctx] = 0;
             }
+        }
+        // Clear the claimed bit for any valid completion,
+        // without checking the context's last claim.
+        if (irq as usize) < self.num_sources as usize && irq > 0 {
+            let word = (irq / 32) as usize;
+            let bit = 1u32 << (irq % 32);
+            self.claimed[word].fetch_and(!bit, Ordering::Relaxed);
         }
         self.update_outputs();
     }
 
     pub fn read(&self, offset: u64, size: u32) -> u64 {
-        let _ = size;
+        if size != 4 {
+            return 0;
+        }
+        if (offset & 0x3) != 0 {
+            return 0;
+        }
+
         // Priority registers.
         if offset < PENDING_BASE {
             let idx = (offset - PRIORITY_BASE) as usize / 4;
@@ -326,7 +349,7 @@ impl Plic {
             let rel = offset - ENABLE_BASE;
             let ctx = (rel / ENABLE_STRIDE) as usize;
             let word = ((rel % ENABLE_STRIDE) / 4) as usize;
-            let ctx_guard = self.contexts.borrow();
+            let ctx_guard = self.contexts.lock();
             if ctx < self.num_contexts as usize
                 && word < ctx_guard.enable[ctx].len()
             {
@@ -343,7 +366,7 @@ impl Plic {
         }
         match reg {
             0 => {
-                let ctx_guard = self.contexts.borrow();
+                let ctx_guard = self.contexts.lock();
                 ctx_guard.threshold[ctx] as u64
             }
             4 => {
@@ -359,13 +382,19 @@ impl Plic {
     }
 
     pub fn write(&self, offset: u64, size: u32, val: u64) {
-        let _ = size;
+        if size != 4 {
+            return;
+        }
+        if (offset & 0x3) != 0 {
+            return;
+        }
+
         let v = val as u32;
 
         // Priority registers.
         if offset < PENDING_BASE {
             let idx = (offset - PRIORITY_BASE) as usize / 4;
-            if idx < self.priority.len() {
+            if idx > 0 && idx < self.priority.len() {
                 self.priority[idx].store(v, Ordering::Relaxed);
             }
             self.update_outputs();
@@ -381,7 +410,7 @@ impl Plic {
             let ctx = (rel / ENABLE_STRIDE) as usize;
             let word = ((rel % ENABLE_STRIDE) / 4) as usize;
             {
-                let mut ctx_guard = self.contexts.borrow();
+                let mut ctx_guard = self.contexts.lock();
                 if ctx < self.num_contexts as usize
                     && word < ctx_guard.enable[ctx].len()
                 {
@@ -401,7 +430,7 @@ impl Plic {
         match reg {
             0 => {
                 {
-                    let mut ctx_guard = self.contexts.borrow();
+                    let mut ctx_guard = self.contexts.lock();
                     ctx_guard.threshold[ctx] = v;
                 }
                 self.update_outputs();

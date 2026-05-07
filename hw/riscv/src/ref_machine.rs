@@ -18,8 +18,14 @@ use machina_hw_core::fdt::FdtBuilder;
 use machina_hw_core::irq::{InterruptSource, IrqLine, IrqSink};
 use machina_hw_core::mdev::MDevice;
 use machina_hw_core::property::{MPropertySpec, MPropertyValue};
+use machina_hw_firmware::{FwCfg, FwCfgMmio};
 use machina_hw_intc::aclint::{Aclint, AclintMmio};
 use machina_hw_intc::plic::{Plic, PlicIrqSink, PlicMmio};
+use machina_hw_rtc::goldfish_rtc::{GoldfishRtc, GoldfishRtcMmio};
+use machina_hw_storage::pflash::{
+    PFlashCfi01, PFlashCfi01Config, PFlashCfi01Mmio,
+};
+use machina_hw_storage::{FlashMedia, MemBackend};
 use machina_hw_virtio::mmio::VirtioMmio;
 use machina_memory::address_space::AddressSpace;
 use machina_memory::ram::RamBlock;
@@ -45,6 +51,7 @@ pub enum RefMemMap {
     Plic,
     Uart0,
     FwCfg,
+    Flash0,
     Virtio,
     VirtioNet,
     Dram,
@@ -80,6 +87,10 @@ pub const REF_MEMMAP: [MemMapEntry; RefMemMap::Count as usize] = {
     m[RefMemMap::FwCfg as usize] = MemMapEntry {
         base: 0x1010_0000,
         size: 0x0000_0018,
+    };
+    m[RefMemMap::Flash0 as usize] = MemMapEntry {
+        base: 0x2000_0000,
+        size: 0x0200_0000,
     };
     m[RefMemMap::Virtio as usize] = MemMapEntry {
         base: 0x1000_1000,
@@ -191,7 +202,10 @@ pub struct RefMachine {
     mrom_block: Option<Arc<RamBlock>>,
     plic: Option<Arc<Plic>>,
     aclint: Option<Arc<Aclint>>,
+    rtc: Option<Arc<GoldfishRtc>>,
     uart: Option<Arc<Uart16550>>,
+    fw_cfg: Option<Arc<FwCfg>>,
+    pflash0: Option<Arc<PFlashCfi01<MemBackend>>>,
     uart_chardev: Option<Arc<Mutex<ChardevObject>>>,
     virtio_mmio: Option<VirtioMmio>,
     virtio_mmio_net: Option<VirtioMmio>,
@@ -230,7 +244,10 @@ impl RefMachine {
             mrom_block: None,
             plic: None,
             aclint: None,
+            rtc: None,
             uart: None,
+            fw_cfg: None,
+            pflash0: None,
             uart_chardev: None,
             virtio_mmio: None,
             virtio_mmio_net: None,
@@ -376,8 +393,20 @@ impl RefMachine {
         if let Some(aclint) = &self.aclint {
             infos.push(aclint.object_info());
         }
+        if let Some(rtc) = &self.rtc {
+            infos.push(rtc.object_info());
+        }
         if let Some(uart) = &self.uart {
             infos.push(uart.object_info());
+        }
+        if let Some(fw_cfg) = &self.fw_cfg {
+            infos.push(fw_cfg.with_mdevice(|device| device.object_info()));
+        }
+        if let Some(sifive_test) = &self.sifive_test {
+            infos.push(sifive_test.with_mdevice(|device| device.object_info()));
+        }
+        if let Some(pflash0) = &self.pflash0 {
+            infos.push(pflash0.with_mdevice(|device| device.object_info()));
         }
         if let Some(virtio_mmio) = &self.virtio_mmio {
             infos.push(virtio_mmio.object_info());
@@ -413,6 +442,35 @@ impl RefMachine {
                 return Some(aclint.with_mdevice(f));
             }
         }
+        if let Some(rtc) = &self.rtc {
+            if Self::object_matches(object_ref, &rtc.object_info()) {
+                return Some(rtc.with_mdevice(f));
+            }
+        }
+        if let Some(sifive_test) = &self.sifive_test {
+            let matches = sifive_test.with_mdevice(|device| {
+                Self::object_matches(object_ref, &device.object_info())
+            });
+            if matches {
+                return Some(sifive_test.with_mdevice(f));
+            }
+        }
+        if let Some(fw_cfg) = &self.fw_cfg {
+            let matches = fw_cfg.with_mdevice(|device| {
+                Self::object_matches(object_ref, &device.object_info())
+            });
+            if matches {
+                return Some(fw_cfg.with_mdevice(f));
+            }
+        }
+        if let Some(pflash0) = &self.pflash0 {
+            let matches = pflash0.with_mdevice(|device| {
+                Self::object_matches(object_ref, &device.object_info())
+            });
+            if matches {
+                return Some(pflash0.with_mdevice(f));
+            }
+        }
         if let Some(virtio_mmio) = &self.virtio_mmio {
             if Self::object_matches(object_ref, &virtio_mmio.object_info()) {
                 return Some(f(virtio_mmio));
@@ -444,8 +502,16 @@ impl RefMachine {
         self.aclint.as_ref().expect("machine not initialized")
     }
 
+    pub fn rtc(&self) -> &Arc<GoldfishRtc> {
+        self.rtc.as_ref().expect("machine not initialized")
+    }
+
     pub fn uart(&self) -> &Arc<Uart16550> {
         self.uart.as_ref().expect("machine not initialized")
+    }
+
+    pub fn pflash0(&self) -> &Arc<PFlashCfi01<MemBackend>> {
+        self.pflash0.as_ref().expect("machine not initialized")
     }
 
     pub fn sifive_test(&self) -> &Arc<SifiveTest> {
@@ -554,7 +620,10 @@ impl RefMachine {
         let mut fdt = FdtBuilder::new();
         let plic_mapping = self.realized_sysbus_mapping("plic0");
         let aclint_mapping = self.realized_sysbus_mapping("aclint0");
+        let rtc_mapping = self.realized_sysbus_mapping("goldfish-rtc0");
+        let fw_cfg_mapping = self.realized_sysbus_mapping("fw_cfg0");
         let uart_mapping = self.realized_sysbus_mapping("uart0");
+        let pflash0_mapping = self.realized_sysbus_mapping("pflash0");
         let virtio_mapping = self
             .sysbus()
             .mappings()
@@ -623,6 +692,13 @@ impl RefMachine {
         fdt.property_string("compatible", "simple-bus");
         fdt.property_bytes("ranges", &[]);
 
+        // /soc/fw_cfg@10100000
+        fdt.begin_node(&format!("fw_cfg@{:x}", fw_cfg_mapping.base.0));
+        fdt.property_string("compatible", "qemu,fw-cfg-mmio");
+        fdt.property_u32_list("reg", &self.sysbus_reg_cells("fw_cfg0"));
+        fdt.property_bytes("dma-coherent", &[]);
+        fdt.end_node();
+
         // /soc/plic@c000000
         // Build interrupts-extended: per hart, two contexts
         // (M-mode external=11, S-mode external=9).
@@ -663,6 +739,14 @@ impl RefMachine {
         fdt.property_u32_list("interrupts-extended", &clint_ext);
         fdt.end_node();
 
+        // /soc/rtc@101000
+        fdt.begin_node(&format!("rtc@{:x}", rtc_mapping.base.0));
+        fdt.property_string("compatible", "google,goldfish-rtc");
+        fdt.property_u32_list("reg", &self.sysbus_reg_cells("goldfish-rtc0"));
+        fdt.property_u32("interrupts", REF_IRQMAP.rtc);
+        fdt.property_u32("interrupt-parent", plic_phandle);
+        fdt.end_node();
+
         // /soc/test@100000
         fdt.begin_node("test@100000");
         fdt.property_string("compatible", "sifive,test0");
@@ -677,6 +761,13 @@ impl RefMachine {
         fdt.property_u32("interrupts", REF_IRQMAP.uart0);
         fdt.property_u32("interrupt-parent", plic_phandle);
         fdt.property_u32("clock-frequency", 3686400);
+        fdt.end_node();
+
+        // /soc/flash@20000000
+        fdt.begin_node(&format!("flash@{:x}", pflash0_mapping.base.0));
+        fdt.property_string("compatible", "cfi-flash");
+        fdt.property_u32_list("reg", &self.sysbus_reg_cells("pflash0"));
+        fdt.property_u32("bank-width", 4);
         fdt.end_node();
 
         // /soc/virtio_mmio@10001000 (if drive configured)
@@ -820,6 +911,48 @@ impl Machine for RefMachine {
         aclint.register_mmio(aclint_region, GPA::new(aclint_mm.base))?;
         self.aclint = Some(Arc::clone(&aclint));
 
+        // Goldfish RTC.
+        let rtc = Arc::new(GoldfishRtc::new_named("goldfish-rtc0"));
+        rtc.attach_to_bus(&mut sysbus)?;
+        let rtc_mm = &REF_MEMMAP[RefMemMap::Rtc as usize];
+        let rtc_region = MemoryRegion::io(
+            "goldfish-rtc",
+            rtc_mm.size,
+            Arc::new(GoldfishRtcMmio(Arc::clone(&rtc))),
+        );
+        rtc.register_mmio(rtc_region, GPA::new(rtc_mm.base))?;
+        self.rtc = Some(Arc::clone(&rtc));
+
+        // Virt pflash0 window.
+        let pflash0_mm = &REF_MEMMAP[RefMemMap::Flash0 as usize];
+        let flash = FlashMedia::new(
+            MemBackend::new(vec![0xff; pflash0_mm.size as usize], false),
+            256 * 1024,
+        )?;
+        let pflash0 = Arc::new(PFlashCfi01::new_named(
+            "pflash0",
+            flash,
+            PFlashCfi01Config {
+                bank_width: 4,
+                device_width: 2,
+                sector_len: 256 * 1024,
+                num_blocks: 128,
+                ident0: 0x89,
+                ident1: 0x18,
+                ident2: 0,
+                ident3: 0,
+                ..PFlashCfi01Config::default()
+            },
+        )?);
+        pflash0.attach_to_bus(&mut sysbus)?;
+        let pflash0_region = MemoryRegion::io(
+            "pflash0",
+            pflash0_mm.size,
+            Arc::new(PFlashCfi01Mmio(Arc::clone(&pflash0))),
+        );
+        pflash0.register_mmio(pflash0_region, GPA::new(pflash0_mm.base))?;
+        self.pflash0 = Some(Arc::clone(&pflash0));
+
         // UART0 — interior mutability, no outer Mutex.
         let uart = Arc::new(Uart16550::new_named("uart0"));
         uart.set_chardev_property("/machine/chardev/uart0")?;
@@ -835,14 +968,27 @@ impl Machine for RefMachine {
 
         // SiFive Test (system reset/shutdown).
         let st_mm = &REF_MEMMAP[RefMemMap::SifiveTest as usize];
-        let sifive_test = Arc::new(SifiveTest::new());
+        let sifive_test = Arc::new(SifiveTest::new_named("sifive-test0"));
+        sifive_test.attach_to_bus(&mut sysbus)?;
         let st_region = MemoryRegion::io(
-            "sifive_test",
+            "sifive-test0",
             st_mm.size,
             Arc::new(SifiveTestMmio(Arc::clone(&sifive_test))),
         );
-        root.add_subregion(st_region, GPA::new(st_mm.base));
-        self.sifive_test = Some(sifive_test);
+        sifive_test.register_mmio(st_region, GPA::new(st_mm.base))?;
+        self.sifive_test = Some(Arc::clone(&sifive_test));
+
+        // Firmware configuration interface.
+        let fw_cfg_mm = &REF_MEMMAP[RefMemMap::FwCfg as usize];
+        let fw_cfg = FwCfg::new_named("fw_cfg0");
+        fw_cfg.attach_to_bus(&mut sysbus)?;
+        let fw_cfg_region = MemoryRegion::io(
+            "fw_cfg0",
+            fw_cfg_mm.size,
+            Arc::new(FwCfgMmio::new(Arc::clone(&fw_cfg))),
+        );
+        fw_cfg.register_mmio(fw_cfg_region, GPA::new(fw_cfg_mm.base))?;
+        self.fw_cfg = Some(Arc::clone(&fw_cfg));
 
         // MROM at 0x1000 (mask ROM for reset vector).
         let (mrom_region, mrom_block) = MemoryRegion::ram("mrom", MROM_SIZE);
@@ -912,6 +1058,13 @@ impl Machine for RefMachine {
         // UART IRQ source -> PLIC.
         let plic_as_sink =
             Arc::new(PlicIrqSink(Arc::clone(self.plic.as_ref().unwrap())));
+        self.rtc
+            .as_ref()
+            .unwrap()
+            .connect_output(InterruptSource::new(
+                Arc::clone(&plic_as_sink) as Arc<dyn IrqSink>,
+                REF_IRQMAP.rtc,
+            ));
         let uart_irq_line = IrqLine::new(
             Arc::clone(&plic_as_sink) as Arc<dyn IrqSink>,
             REF_IRQMAP.uart0,
@@ -980,6 +1133,22 @@ impl Machine for RefMachine {
                 .as_ref()
                 .unwrap()
                 .realize_onto(&mut sysbus, address_space)?;
+            self.rtc
+                .as_ref()
+                .unwrap()
+                .realize_onto(&mut sysbus, address_space)?;
+            self.sifive_test
+                .as_ref()
+                .unwrap()
+                .realize_onto(&mut sysbus, address_space)?;
+            self.fw_cfg
+                .as_ref()
+                .unwrap()
+                .realize_onto(&mut sysbus, address_space)?;
+            self.pflash0
+                .as_ref()
+                .unwrap()
+                .realize_onto(&mut sysbus, address_space)?;
             if let Some(virtio_mmio) = self.virtio_mmio.as_mut() {
                 virtio_mmio.realize_onto(&mut sysbus, address_space)?;
             }
@@ -1035,8 +1204,20 @@ impl Machine for RefMachine {
         if let Some(aclint) = &self.aclint {
             aclint.reset_runtime();
         }
+        if let Some(rtc) = &self.rtc {
+            rtc.reset_runtime();
+        }
         if let Some(uart) = &self.uart {
             uart.reset_runtime();
+        }
+        if let Some(sifive_test) = &self.sifive_test {
+            sifive_test.reset_runtime();
+        }
+        if let Some(fw_cfg) = &self.fw_cfg {
+            fw_cfg.reset_runtime();
+        }
+        if let Some(pflash0) = &self.pflash0 {
+            pflash0.reset_runtime();
         }
         if let Some(virtio_mmio) = &mut self.virtio_mmio {
             virtio_mmio.reset_runtime();

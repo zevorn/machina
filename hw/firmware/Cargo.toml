@@ -1,0 +1,18 @@
+[package]
+name = "machina-hw-firmware"
+version.workspace = true
+edition.workspace = true
+description = "Firmware configuration (fw_cfg) interface for Machina"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["riscv", "emulator", "fw_cfg", "firmware"]
+categories = ["emulators", "hardware-support"]
+
+[dependencies]
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }
+machina-memory = { workspace = true }
+
+[lints]
+workspace = true

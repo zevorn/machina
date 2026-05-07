@@ -12,6 +12,7 @@ use machina_hw_intc::pch_pic::{PchPic, PchPicIrqSink};
 pub const LOONGARCH_DEVICE_HWI: u8 = 1;
 pub const LOONGARCH_UART_PCH_IRQ: u32 = 2;
 pub const LOONGARCH_VIRTIO_PCH_IRQ_BASE: u32 = 3;
+pub const LOONGARCH_RTC_PCH_IRQ: u32 = 6;
 
 const PCH_INT_MASK: u64 = 0x020;
 const PCH_HTMSI_VEC: u64 = 0x200;
@@ -114,6 +115,10 @@ impl LoongArchInterruptCascade {
             8,
             pch_mask & !(1u64 << pch_irq),
         );
+        self.route_eio_irq_to_cpu_hwi(eio_irq, cpu_id, hwi);
+    }
+
+    pub fn route_eio_irq_to_cpu_hwi(&self, eio_irq: u32, cpu_id: u32, hwi: u8) {
         self.eiointc.mmio_write_sized(
             cpu_id,
             EIO_IPMAP + u64::from(eio_irq / 32),

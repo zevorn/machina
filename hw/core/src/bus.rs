@@ -186,6 +186,10 @@ impl SysBusDeviceState {
         bus: &mut SysBus,
         address_space: &mut AddressSpace,
     ) -> Result<(), SysBusError> {
+        if self.device.is_realized() {
+            return Err(MDeviceError::AlreadyRealized.into());
+        }
+
         if self.mappings.is_empty() {
             return Err(SysBusError::MissingMmio(
                 self.device.local_id().to_string(),

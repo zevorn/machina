@@ -11,9 +11,16 @@ use machina_hw_char::uart::{Uart16550, Uart16550Mmio};
 use machina_hw_core::bus::{SysBus, SysBusError};
 use machina_hw_core::chardev::{CharFrontend, StdioChardev};
 use machina_hw_core::irq::{InterruptSource, IrqSink};
-use machina_hw_intc::eiointc::{Eiointc, EiointcMmio};
+use machina_hw_firmware::{keys, FwCfg, FwCfgMmio};
+use machina_hw_intc::eiointc::{Eiointc, EiointcIrqSink, EiointcMmio};
 use machina_hw_intc::ipi::{LoongArchIpi, LoongArchIpiMmio};
-use machina_hw_intc::pch_pic::{PchPic, PchPicMmio};
+use machina_hw_intc::pch_msi::{PchMsi, PchMsiMmio};
+use machina_hw_intc::pch_pic::{PchPic, PchPicIrqSink, PchPicMmio};
+use machina_hw_rtc::ls7a_rtc::{Ls7aRtc, Ls7aRtcMmio};
+use machina_hw_storage::pflash::{
+    PFlashCfi01, PFlashCfi01Config, PFlashCfi01Mmio,
+};
+use machina_hw_storage::{FlashMedia, MemBackend};
 use machina_hw_virtio::mmio::VirtioMmio;
 use machina_memory::address_space::AddressSpace;
 use machina_memory::ram::RamBlock;
@@ -21,12 +28,13 @@ use machina_memory::region::MemoryRegion;
 
 use crate::boot;
 use crate::interrupt::{
-    LoongArchInterruptCascade, LOONGARCH_DEVICE_HWI, LOONGARCH_UART_PCH_IRQ,
-    LOONGARCH_VIRTIO_PCH_IRQ_BASE,
+    LoongArchInterruptCascade, LOONGARCH_DEVICE_HWI, LOONGARCH_RTC_PCH_IRQ,
+    LOONGARCH_UART_PCH_IRQ, LOONGARCH_VIRTIO_PCH_IRQ_BASE,
 };
 use crate::iocsr::VirtIocsrBus;
 
 type UartRxCallback = Arc<Mutex<dyn FnMut(u8) + Send>>;
+type LoongArchPFlash = PFlashCfi01<MemBackend>;
 
 pub const VIRT_UART_BASE: u64 = 0x1FE0_01E0;
 pub const VIRT_UART_SIZE: u64 = 0x8;
@@ -36,8 +44,20 @@ pub const VIRT_EIOINTC_BASE: u64 = 0x0200_0000;
 pub const VIRT_EIOINTC_SIZE: u64 = 0x1_0000;
 pub const VIRT_PCH_PIC_BASE: u64 = 0x1000_0000;
 pub const VIRT_PCH_PIC_SIZE: u64 = 0x400;
+pub const VIRT_PCH_MSI_BASE: u64 = 0x2FF0_0000;
+pub const VIRT_PCH_MSI_SIZE: u64 = 0x8;
+pub const LOONGARCH_PCH_MSI_IRQ_BASE: u32 = 32;
+pub const LOONGARCH_PCH_MSI_IRQ_NUM: u32 = 224;
+pub const VIRT_RTC_BASE: u64 = 0x100D_0100;
+pub const VIRT_RTC_SIZE: u64 = 0x100;
+pub const VIRT_FLASH0_BASE: u64 = 0x1C00_0000;
+pub const VIRT_FLASH0_SIZE: u64 = 0x0100_0000;
+pub const VIRT_FLASH1_BASE: u64 = 0x1D00_0000;
+pub const VIRT_FLASH1_SIZE: u64 = 0x0100_0000;
 pub const VIRT_VIRTIO_BASE: u64 = 0x1000_8000;
 pub const VIRT_VIRTIO_SIZE: u64 = 0x1000;
+pub const VIRT_FWCFG_BASE: u64 = 0x1E02_0000;
+pub const VIRT_FWCFG_SIZE: u64 = 0x18;
 pub const VIRT_RAM_BASE: u64 = 0x9000_0000_0000_0000;
 pub const VIRT_RAM_SIZE_DEFAULT: u64 = 256 * 1024 * 1024;
 
@@ -67,9 +87,14 @@ pub struct LoongArchVirtMachine {
     ram_block: Option<Arc<RamBlock>>,
     uart: Option<Arc<Uart16550>>,
     ipi: Option<Arc<LoongArchIpi>>,
+    pch_msi: Option<Arc<PchMsi>>,
+    rtc: Option<Arc<Ls7aRtc>>,
+    pflash0: Option<Arc<LoongArchPFlash>>,
+    pflash1: Option<Arc<LoongArchPFlash>>,
     interrupt_cascade: Option<LoongArchInterruptCascade>,
     iocsr_bus: Option<Arc<VirtIocsrBus>>,
     virtio_mmio: Option<VirtioMmio>,
+    fw_cfg: Option<Arc<FwCfg>>,
     kernel_path: Option<PathBuf>,
     initrd_path: Option<PathBuf>,
     kernel_cmdline: Option<String>,
@@ -89,9 +114,14 @@ impl LoongArchVirtMachine {
             ram_block: None,
             uart: None,
             ipi: None,
+            pch_msi: None,
+            rtc: None,
+            pflash0: None,
+            pflash1: None,
             interrupt_cascade: None,
             iocsr_bus: None,
             virtio_mmio: None,
+            fw_cfg: None,
             kernel_path: None,
             initrd_path: None,
             kernel_cmdline: None,
@@ -172,6 +202,26 @@ impl LoongArchVirtMachine {
     }
 
     #[must_use]
+    pub fn pch_msi(&self) -> Arc<PchMsi> {
+        Arc::clone(self.pch_msi.as_ref().expect("machine not initialized"))
+    }
+
+    #[must_use]
+    pub fn rtc(&self) -> Arc<Ls7aRtc> {
+        Arc::clone(self.rtc.as_ref().expect("machine not initialized"))
+    }
+
+    #[must_use]
+    pub fn pflash0(&self) -> Arc<LoongArchPFlash> {
+        Arc::clone(self.pflash0.as_ref().expect("machine not initialized"))
+    }
+
+    #[must_use]
+    pub fn pflash1(&self) -> Arc<LoongArchPFlash> {
+        Arc::clone(self.pflash1.as_ref().expect("machine not initialized"))
+    }
+
+    #[must_use]
     pub fn iocsr_bus(&self) -> Arc<VirtIocsrBus> {
         Arc::clone(self.iocsr_bus.as_ref().expect("machine not initialized"))
     }
@@ -206,6 +256,7 @@ impl LoongArchVirtMachine {
         ipi: &Arc<LoongArchIpi>,
         eiointc: &Arc<Eiointc>,
         pch_pic: &Arc<PchPic>,
+        pch_msi: &Arc<PchMsi>,
     ) -> Result<(), SysBusError> {
         ipi.attach_to_bus(sysbus)?;
         ipi.register_mmio(
@@ -235,6 +286,16 @@ impl LoongArchVirtMachine {
                 Arc::new(PchPicMmio(Arc::clone(pch_pic))),
             ),
             GPA::new(VIRT_PCH_PIC_BASE),
+        )?;
+
+        pch_msi.attach_to_bus(sysbus)?;
+        pch_msi.register_mmio(
+            MemoryRegion::io(
+                "pch-msi0-mmio",
+                VIRT_PCH_MSI_SIZE,
+                Arc::new(PchMsiMmio(Arc::clone(pch_msi))),
+            ),
+            GPA::new(VIRT_PCH_MSI_BASE),
         )
     }
 
@@ -244,10 +305,49 @@ impl LoongArchVirtMachine {
         ipi: &Arc<LoongArchIpi>,
         eiointc: &Arc<Eiointc>,
         pch_pic: &Arc<PchPic>,
+        pch_msi: &Arc<PchMsi>,
     ) -> Result<(), SysBusError> {
         ipi.realize_onto(sysbus, address_space)?;
         eiointc.realize_onto(sysbus, address_space)?;
-        pch_pic.realize_onto(sysbus, address_space)
+        pch_pic.realize_onto(sysbus, address_space)?;
+        pch_msi.realize_onto(sysbus, address_space)
+    }
+
+    fn create_pflash_bank(
+        local_id: &str,
+        base: u64,
+        size: u64,
+        sysbus: &mut SysBus,
+    ) -> Result<Arc<LoongArchPFlash>, Box<dyn std::error::Error>> {
+        let flash = FlashMedia::new(
+            MemBackend::new(vec![0xff; size as usize], false),
+            256 * 1024,
+        )?;
+        let pflash = Arc::new(PFlashCfi01::new_named(
+            local_id,
+            flash,
+            PFlashCfi01Config {
+                bank_width: 4,
+                device_width: 2,
+                sector_len: 256 * 1024,
+                num_blocks: u32::try_from(size / (256 * 1024))?,
+                ident0: 0x89,
+                ident1: 0x18,
+                ident2: 0,
+                ident3: 0,
+                ..PFlashCfi01Config::default()
+            },
+        )?);
+        pflash.attach_to_bus(sysbus)?;
+        pflash.register_mmio(
+            MemoryRegion::io(
+                local_id,
+                size,
+                Arc::new(PFlashCfi01Mmio(Arc::clone(&pflash))),
+            ),
+            GPA::new(base),
+        )?;
+        Ok(pflash)
     }
 }
 
@@ -298,6 +398,18 @@ impl Machine for LoongArchVirtMachine {
         let (ram_region, ram_block) = MemoryRegion::ram("ram", opts.ram_size);
         root.add_subregion(ram_region, GPA::new(VIRT_RAM_BASE));
 
+        let fw_cfg = FwCfg::new_named("fw_cfg0");
+        fw_cfg.add_i16(keys::MAX_CPUS, opts.cpu_count as u16);
+        fw_cfg.add_i64(keys::RAM_SIZE, opts.ram_size);
+        fw_cfg.add_i16(keys::NB_CPUS, opts.cpu_count as u16);
+        fw_cfg.attach_to_bus(&mut sysbus)?;
+        let fw_cfg_region = MemoryRegion::io(
+            "fw_cfg0",
+            VIRT_FWCFG_SIZE,
+            Arc::new(FwCfgMmio::new(Arc::clone(&fw_cfg))),
+        );
+        fw_cfg.register_mmio(fw_cfg_region, GPA::new(VIRT_FWCFG_BASE))?;
+
         let cpu = Arc::new(Mutex::new(LoongArchCpu::new()));
         {
             let ram_ptr = ram_block.as_ptr() as usize;
@@ -323,17 +435,74 @@ impl Machine for LoongArchVirtMachine {
 
         let eiointc = Arc::new(Eiointc::new_named("eiointc0", opts.cpu_count));
         let pch_pic = Arc::new(PchPic::new_named("pch-pic0", 32));
+        let pch_msi = Arc::new(PchMsi::new_named(
+            "pch-msi0",
+            LOONGARCH_PCH_MSI_IRQ_BASE,
+            LOONGARCH_PCH_MSI_IRQ_NUM,
+        ));
         let cascade = LoongArchInterruptCascade::from_devices(
             Arc::clone(&pch_pic),
             Arc::clone(&eiointc),
         );
         cascade.connect_cpu_hwi(0, LOONGARCH_DEVICE_HWI, Arc::clone(&cpu));
+        for irq in 0..LOONGARCH_PCH_MSI_IRQ_NUM {
+            let eio_irq = LOONGARCH_PCH_MSI_IRQ_BASE + irq;
+            pch_msi.connect_output(
+                irq,
+                InterruptSource::new(
+                    Arc::new(EiointcIrqSink(Arc::clone(&eiointc)))
+                        as Arc<dyn IrqSink>,
+                    eio_irq,
+                ),
+            );
+            cascade.route_eio_irq_to_cpu_hwi(eio_irq, 0, LOONGARCH_DEVICE_HWI);
+        }
 
         let iocsr_bus =
             VirtIocsrBus::new(Arc::clone(&ipi), Arc::clone(&eiointc));
         iocsr_bus.install_on(&mut cpu.lock().unwrap());
 
-        Self::attach_interrupt_devices(&mut sysbus, &ipi, &eiointc, &pch_pic)?;
+        Self::attach_interrupt_devices(
+            &mut sysbus,
+            &ipi,
+            &eiointc,
+            &pch_pic,
+            &pch_msi,
+        )?;
+
+        let rtc = Arc::new(Ls7aRtc::new_named("ls7a-rtc0"));
+        rtc.attach_to_bus(&mut sysbus)?;
+        rtc.register_mmio(
+            MemoryRegion::io(
+                "ls7a-rtc0-mmio",
+                VIRT_RTC_SIZE,
+                Arc::new(Ls7aRtcMmio(Arc::clone(&rtc))),
+            ),
+            GPA::new(VIRT_RTC_BASE),
+        )?;
+        rtc.connect_output(InterruptSource::new(
+            Arc::new(PchPicIrqSink(Arc::clone(&pch_pic))) as Arc<dyn IrqSink>,
+            LOONGARCH_RTC_PCH_IRQ,
+        ));
+        cascade.route_pch_irq_to_cpu_hwi(
+            LOONGARCH_RTC_PCH_IRQ,
+            LOONGARCH_RTC_PCH_IRQ,
+            0,
+            LOONGARCH_DEVICE_HWI,
+        );
+
+        let pflash0 = Self::create_pflash_bank(
+            "pflash0",
+            VIRT_FLASH0_BASE,
+            VIRT_FLASH0_SIZE,
+            &mut sysbus,
+        )?;
+        let pflash1 = Self::create_pflash_bank(
+            "pflash1",
+            VIRT_FLASH1_BASE,
+            VIRT_FLASH1_SIZE,
+            &mut sysbus,
+        )?;
 
         let uart = Arc::new(Uart16550::new_named("uart0"));
         uart.attach_to_bus(&mut sysbus)?;
@@ -396,7 +565,13 @@ impl Machine for LoongArchVirtMachine {
             &ipi,
             &eiointc,
             &pch_pic,
+            &pch_msi,
         )?;
+
+        rtc.realize_onto(&mut sysbus, &mut address_space)?;
+        fw_cfg.realize_onto(&mut sysbus, &mut address_space)?;
+        pflash0.realize_onto(&mut sysbus, &mut address_space)?;
+        pflash1.realize_onto(&mut sysbus, &mut address_space)?;
 
         if let Some(mmio) = virtio_mmio.as_mut() {
             mmio.realize_onto(&mut sysbus, &mut address_space)?;
@@ -414,9 +589,14 @@ impl Machine for LoongArchVirtMachine {
         self.ram_block = Some(ram_block);
         self.uart = Some(uart);
         self.ipi = Some(ipi);
+        self.pch_msi = Some(pch_msi);
+        self.rtc = Some(rtc);
+        self.pflash0 = Some(pflash0);
+        self.pflash1 = Some(pflash1);
         self.interrupt_cascade = Some(cascade);
         self.iocsr_bus = Some(iocsr_bus);
         self.virtio_mmio = virtio_mmio;
+        self.fw_cfg = Some(fw_cfg);
 
         Ok(())
     }
@@ -424,6 +604,21 @@ impl Machine for LoongArchVirtMachine {
     fn reset(&mut self) {
         if let Some(uart) = &self.uart {
             uart.reset_runtime();
+        }
+        if let Some(pch_msi) = &self.pch_msi {
+            pch_msi.reset_runtime();
+        }
+        if let Some(rtc) = &self.rtc {
+            rtc.reset_runtime();
+        }
+        if let Some(fw_cfg) = &self.fw_cfg {
+            fw_cfg.reset_runtime();
+        }
+        if let Some(pflash0) = &self.pflash0 {
+            pflash0.reset_runtime();
+        }
+        if let Some(pflash1) = &self.pflash1 {
+            pflash1.reset_runtime();
         }
         if let Some(virtio_mmio) = &mut self.virtio_mmio {
             virtio_mmio.reset_runtime();
@@ -445,6 +640,7 @@ impl Machine for LoongArchVirtMachine {
             cmdline: self.kernel_cmdline.as_deref(),
             initrd_path: self.initrd_path.as_deref(),
             has_virtio_mmio: self.virtio_mmio.is_some(),
+            fw_cfg: self.fw_cfg.as_ref().map(Arc::clone),
         };
         let boot_info = boot::load_direct_kernel(
             kernel_path,

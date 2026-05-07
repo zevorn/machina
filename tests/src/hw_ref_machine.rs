@@ -1,9 +1,17 @@
 use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts};
 use machina_guest_riscv::riscv::csr::PrivLevel;
-use machina_hw_riscv::ref_machine::{RefMachine, MROM_BASE, RAM_BASE};
+use machina_hw_core::bus::SysBus;
+use machina_hw_firmware::keys;
+use machina_hw_riscv::ref_machine::{
+    RefMachine, RefMemMap, MROM_BASE, RAM_BASE, REF_MEMMAP,
+};
+use machina_hw_riscv::sifive_test::{ShutdownReason, SifiveTest};
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
 use std::fs;
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 fn default_opts() -> MachineOpts {
     MachineOpts {
@@ -18,6 +26,13 @@ fn default_opts() -> MachineOpts {
         initrd: None,
         netdev: None,
     }
+}
+
+fn make_test_aspace() -> (AddressSpace, SysBus) {
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let aspace = AddressSpace::new(root);
+    let bus = SysBus::new("sysbus");
+    (aspace, bus)
 }
 
 #[test]
@@ -62,11 +77,172 @@ fn test_ref_machine_uart_mmio() {
 }
 
 #[test]
+fn test_ref_machine_fw_cfg_mmio_signature() {
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+    let as_ = m.address_space();
+    let fw_cfg = REF_MEMMAP[RefMemMap::FwCfg as usize].base;
+
+    as_.write(GPA::new(fw_cfg + 0x08), 2, u64::from(keys::SIGNATURE));
+
+    assert_eq!(as_.read(GPA::new(fw_cfg), 4), 0x5145_4d55);
+}
+
+#[test]
+fn test_ref_machine_fw_cfg_is_in_fdt() {
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+
+    let fw_cfg = REF_MEMMAP[RefMemMap::FwCfg as usize];
+    let fdt = m.fdt_blob();
+    let node = format!("fw_cfg@{:x}", fw_cfg.base);
+    assert!(
+        fdt.windows(node.len()).any(|w| w == node.as_bytes()),
+        "FDT must contain fw_cfg node {node}"
+    );
+    let compatible = b"qemu,fw-cfg-mmio";
+    assert!(
+        fdt.windows(compatible.len()).any(|w| w == compatible),
+        "FDT must advertise the fw_cfg MMIO compatible"
+    );
+
+    let mut reg = Vec::new();
+    reg.extend_from_slice(&0u32.to_be_bytes());
+    reg.extend_from_slice(&(fw_cfg.base as u32).to_be_bytes());
+    reg.extend_from_slice(&0u32.to_be_bytes());
+    reg.extend_from_slice(&(fw_cfg.size as u32).to_be_bytes());
+    assert!(
+        fdt.windows(reg.len()).any(|w| w == reg.as_slice()),
+        "FDT fw_cfg node must describe the board MMIO range"
+    );
+}
+
+#[test]
+fn test_ref_machine_fw_cfg_is_realized_via_sysbus_and_mom() {
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+
+    let fw_cfg = REF_MEMMAP[RefMemMap::FwCfg as usize];
+    assert!(
+        m.sysbus().mappings().iter().any(|mapping| {
+            mapping.owner == "fw_cfg0"
+                && mapping.base == GPA::new(fw_cfg.base)
+                && mapping.size == fw_cfg.size
+        }),
+        "fw_cfg must be realized through sysbus"
+    );
+    assert!(
+        m.lookup_object_by_local_id("fw_cfg0").is_some(),
+        "fw_cfg must be visible in the MOM object tree"
+    );
+}
+
+#[test]
+fn test_ref_machine_pflash0_is_mapped_mmio_and_in_fdt() {
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+
+    const PFLASH_BASE: u64 = 0x2000_0000;
+    const PFLASH_SIZE: u64 = 32 * 1024 * 1024;
+
+    assert!(
+        m.sysbus()
+            .mappings()
+            .iter()
+            .any(|mapping| mapping.owner == "pflash0"
+                && mapping.base == GPA::new(PFLASH_BASE)
+                && mapping.size == PFLASH_SIZE),
+        "pflash0 must be realized through sysbus at the virt flash window"
+    );
+    assert!(
+        m.pflash0().realized(),
+        "pflash0 device state must be realized through its own MOM lifecycle"
+    );
+
+    let as_ = m.address_space();
+    as_.write(GPA::new(PFLASH_BASE + 0x55), 1, 0x98);
+    assert_eq!(as_.read(GPA::new(PFLASH_BASE + 0x40), 1), u64::from(b'Q'));
+    assert_eq!(as_.read(GPA::new(PFLASH_BASE + 0x44), 1), u64::from(b'R'));
+    assert_eq!(as_.read(GPA::new(PFLASH_BASE + 0x48), 1), u64::from(b'Y'));
+
+    as_.write(GPA::new(PFLASH_BASE), 1, 0xff);
+    as_.write(GPA::new(PFLASH_BASE), 1, 0x40);
+    as_.write(GPA::new(PFLASH_BASE + 0x20), 1, 0x0f);
+    as_.write(GPA::new(PFLASH_BASE), 1, 0xff);
+    assert_eq!(as_.read(GPA::new(PFLASH_BASE + 0x20), 1), 0x0f);
+
+    let fdt = m.fdt_blob();
+    let node = b"flash@20000000";
+    assert!(
+        fdt.windows(node.len()).any(|w| w == node),
+        "FDT must contain the pflash0 node"
+    );
+    let compatible = b"cfi-flash";
+    assert!(
+        fdt.windows(compatible.len()).any(|w| w == compatible),
+        "FDT must advertise the CFI flash compatible"
+    );
+    let mut reg = Vec::new();
+    reg.extend_from_slice(&0u32.to_be_bytes());
+    reg.extend_from_slice(&(PFLASH_BASE as u32).to_be_bytes());
+    reg.extend_from_slice(&0u32.to_be_bytes());
+    reg.extend_from_slice(&(PFLASH_SIZE as u32).to_be_bytes());
+    assert!(
+        fdt.windows(reg.len()).any(|w| w == reg.as_slice()),
+        "FDT pflash0 node must describe the board MMIO range"
+    );
+}
+
+#[test]
+fn test_ref_machine_rtc_is_mapped_irq_wired_and_in_fdt() {
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+
+    let rtc = REF_MEMMAP[RefMemMap::Rtc as usize];
+    assert!(
+        m.sysbus()
+            .mappings()
+            .iter()
+            .any(|mapping| mapping.owner == "goldfish-rtc0"
+                && mapping.base == GPA::new(rtc.base)
+                && mapping.size == rtc.size),
+        "RTC must be realized through sysbus at the ref memmap address"
+    );
+
+    let as_ = m.address_space();
+    as_.write(GPA::new(rtc.base), 4, 0x1234_5678);
+    assert_eq!(as_.read(GPA::new(rtc.base), 4), 0x1234_5678);
+
+    let plic_base = REF_MEMMAP[RefMemMap::Plic as usize].base;
+    as_.write(GPA::new(plic_base + 4 * u64::from(11u32)), 4, 1);
+    as_.write(GPA::new(plic_base + 0x2000), 4, 1 << 11);
+    as_.write(GPA::new(rtc.base + 0x10), 4, 1);
+    as_.write(GPA::new(rtc.base + 0x08), 4, 0);
+    assert_ne!(
+        m.plic().read(0x1000, 4) & (1 << 11),
+        0,
+        "RTC alarm must raise PLIC source 11"
+    );
+
+    let fdt = m.fdt_blob();
+    let node = format!("rtc@{:x}", rtc.base);
+    assert!(
+        fdt.windows(node.len()).any(|w| w == node.as_bytes()),
+        "FDT must contain RTC node {node}"
+    );
+    let compatible = b"google,goldfish-rtc";
+    assert!(
+        fdt.windows(compatible.len()).any(|w| w == compatible),
+        "FDT must advertise the goldfish RTC compatible"
+    );
+}
+
+#[test]
 fn test_ref_machine_uart_is_realized_via_sysbus() {
     let mut m = RefMachine::new();
     m.init(&default_opts()).expect("init failed");
 
-    assert_eq!(m.sysbus().mappings().len(), 3);
+    assert_eq!(m.sysbus().mappings().len(), 7);
     assert!(m
         .sysbus()
         .mappings()
@@ -82,6 +258,26 @@ fn test_ref_machine_uart_is_realized_via_sysbus() {
         .mappings()
         .iter()
         .any(|mapping| mapping.owner == "aclint0"));
+    assert!(m
+        .sysbus()
+        .mappings()
+        .iter()
+        .any(|mapping| mapping.owner == "fw_cfg0"));
+    assert!(m
+        .sysbus()
+        .mappings()
+        .iter()
+        .any(|mapping| mapping.owner == "goldfish-rtc0"));
+    assert!(m
+        .sysbus()
+        .mappings()
+        .iter()
+        .any(|mapping| mapping.owner == "sifive-test0"));
+    assert!(m
+        .sysbus()
+        .mappings()
+        .iter()
+        .any(|mapping| mapping.owner == "pflash0"));
 
     let uart = m.uart();
     assert_eq!(
@@ -100,7 +296,7 @@ fn test_ref_machine_virtio_is_realized_via_sysbus() {
     opts.drive = Some(image.path().to_path_buf());
     m.init(&opts).expect("init failed");
 
-    assert_eq!(m.sysbus().mappings().len(), 4);
+    assert_eq!(m.sysbus().mappings().len(), 8);
     assert!(m
         .sysbus()
         .mappings()
@@ -127,7 +323,19 @@ fn test_ref_machine_sysbus_owner_set_matches_migrated_devices() {
         .collect::<Vec<_>>();
     owners.sort_unstable();
 
-    assert_eq!(owners, vec!["aclint0", "plic0", "uart0", "virtio-mmio0"]);
+    assert_eq!(
+        owners,
+        vec![
+            "aclint0",
+            "fw_cfg0",
+            "goldfish-rtc0",
+            "pflash0",
+            "plic0",
+            "sifive-test0",
+            "uart0",
+            "virtio-mmio0"
+        ]
+    );
 }
 
 #[test]
@@ -539,12 +747,129 @@ fn test_mrom_reset_vector_content() {
 // -- SiFive Test regressions --
 
 #[test]
+fn test_sifive_test_lifecycle_and_mom_identity() {
+    let dev = Arc::new(SifiveTest::new());
+    assert!(!dev.realized());
+    dev.with_mdevice(|device| assert_eq!(device.local_id(), "sifive-test"));
+    assert_eq!(dev.object_info().local_id, "sifive-test");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA::new(0x10_0000);
+
+    dev.attach_to_bus(&mut bus).unwrap();
+    dev.register_mmio(
+        MemoryRegion::io("sifive-test", 0x1000, dev.clone()),
+        base,
+    )
+    .unwrap();
+
+    dev.realize_onto(&mut bus, &mut aspace).unwrap();
+    assert!(dev.realized());
+    assert_eq!(aspace.read(base, 4), 0);
+
+    let err = dev.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(
+        err.to_string().contains("already realized"),
+        "unexpected second-realize error: {err}"
+    );
+
+    aspace.write(base, 4, 0x5555);
+    assert!(dev.is_triggered());
+    dev.reset_runtime();
+    assert!(!dev.is_triggered());
+
+    dev.unrealize_from(&mut bus, &mut aspace).unwrap();
+    assert!(!dev.realized());
+    assert_eq!(aspace.read(base, 4), 0);
+
+    let err = dev.unrealize_from(&mut bus, &mut aspace).unwrap_err();
+    assert!(
+        err.to_string().contains("not realized"),
+        "unexpected second-unrealize error: {err}"
+    );
+}
+
+#[test]
 fn test_sifive_test_mmio_read_returns_zero() {
     let mut m = RefMachine::new();
     m.init(&default_opts()).expect("init failed");
     let as_ = m.address_space();
     let val = as_.read(GPA::new(0x10_0000), 4);
     assert_eq!(val, 0, "SiFive Test MMIO read must return 0");
+}
+
+#[test]
+fn test_sifive_test_ignores_writes_away_from_finisher_offset() {
+    let dev = SifiveTest::new();
+    let reason = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&reason);
+    dev.set_shutdown_handler(Box::new(move |value| {
+        *seen.lock().unwrap() = Some(value);
+    }));
+
+    dev.write(4, 4, 0x5555);
+
+    assert!(!dev.is_triggered());
+    assert_eq!(*reason.lock().unwrap(), None);
+}
+
+#[test]
+fn test_sifive_test_rejects_unsupported_access_sizes() {
+    let dev = SifiveTest::new();
+    let reason = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&reason);
+    dev.set_shutdown_handler(Box::new(move |value| {
+        *seen.lock().unwrap() = Some(value);
+    }));
+
+    for size in [1_u32, 8] {
+        dev.write(0, size, 0x5555);
+        assert!(!dev.is_triggered(), "size {size} must be ignored");
+        assert_eq!(*reason.lock().unwrap(), None);
+    }
+}
+
+#[test]
+fn test_sifive_test_decodes_status_and_exit_code_fields() {
+    let dev = SifiveTest::new();
+    let reason = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&reason);
+    dev.set_shutdown_handler(Box::new(move |value| {
+        *seen.lock().unwrap() = Some(value);
+    }));
+
+    dev.write(0, 4, 0x002a_5555);
+    assert_eq!(*reason.lock().unwrap(), Some(ShutdownReason::Pass));
+
+    dev.reset_runtime();
+    *reason.lock().unwrap() = None;
+    dev.write(0, 4, 0x0000_7777);
+    assert_eq!(*reason.lock().unwrap(), Some(ShutdownReason::Reset));
+
+    dev.reset_runtime();
+    *reason.lock().unwrap() = None;
+    dev.write(0, 4, 0x002b_3333);
+    assert_eq!(*reason.lock().unwrap(), Some(ShutdownReason::Fail(0x2b)));
+}
+
+#[test]
+fn test_sifive_test_is_realized_via_sysbus_and_mom() {
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+
+    let st = REF_MEMMAP[RefMemMap::SifiveTest as usize];
+    assert!(
+        m.sysbus().mappings().iter().any(|mapping| {
+            mapping.owner == "sifive-test0"
+                && mapping.base == GPA::new(st.base)
+                && mapping.size == st.size
+        }),
+        "SiFive Test must be realized through sysbus"
+    );
+    assert!(
+        m.lookup_object_by_local_id("sifive-test0").is_some(),
+        "SiFive Test must be visible in the MOM object tree"
+    );
 }
 
 #[test]

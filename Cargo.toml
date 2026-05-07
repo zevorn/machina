@@ -27,7 +27,20 @@ members = [
     "hw/riscv",
     "hw/loongarch",
     "hw/virtio",
+    "hw/ssi",
+    "hw/i2c",
+    "hw/sd",
+    "hw/timer",
+    "hw/firmware",
+    "hw/storage",
+    "hw/dma",
+    "hw/sensor",
+    "hw/watchdog",
+    "hw/misc",
+    "hw/gpio",
+    "hw/rtc",
     "tests/mtest",
+    "tools/oracle",
     "tools/difftest",
     "softfloat",
 ]
@@ -54,6 +67,19 @@ machina-system      = { version = "0.1.2", path = "system" }
 machina-gdbstub     = { version = "0.1.2", path = "gdbstub" }
 machina-hw-riscv    = { version = "0.1.2", path = "hw/riscv" }
 machina-hw-loongarch = { version = "0.1.2", path = "hw/loongarch" }
+machina-hw-ssi      = { version = "0.1.2", path = "hw/ssi" }
+machina-hw-i2c      = { version = "0.1.2", path = "hw/i2c" }
+machina-hw-sd       = { version = "0.1.2", path = "hw/sd" }
+machina-hw-timer    = { version = "0.1.2", path = "hw/timer" }
+machina-hw-firmware = { version = "0.1.2", path = "hw/firmware" }
+machina-hw-storage  = { version = "0.1.2", path = "hw/storage" }
+machina-hw-dma      = { version = "0.1.2", path = "hw/dma" }
+machina-hw-sensor   = { version = "0.1.2", path = "hw/sensor" }
+machina-hw-watchdog = { version = "0.1.2", path = "hw/watchdog" }
+machina-hw-misc     = { version = "0.1.2", path = "hw/misc" }
+machina-hw-gpio     = { version = "0.1.2", path = "hw/gpio" }
+machina-hw-rtc      = { version = "0.1.2", path = "hw/rtc" }
+machina-oracle      = { version = "0.1.2", path = "tools/oracle" }
 machina-tests       = { version = "0.1.2", path = "tests" }
 machina-mtest       = { version = "0.1.2", path = "tests/mtest" }
 machina-irdump      = { version = "0.1.2", path = "tools/irdump" }

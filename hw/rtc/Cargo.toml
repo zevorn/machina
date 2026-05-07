@@ -1,0 +1,20 @@
+[package]
+name = "machina-hw-rtc"
+version.workspace = true
+edition.workspace = true
+description = "RTC (Real-Time Clock) device models for Machina"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["riscv", "emulator", "rtc", "timer"]
+categories = ["emulators", "hardware-support"]
+
+[dependencies]
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }
+machina-hw-i2c = { workspace = true }
+machina-memory = { workspace = true }
+parking_lot = { workspace = true }
+
+[lints]
+workspace = true

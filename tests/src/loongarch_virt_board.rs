@@ -8,12 +8,18 @@ use machina_guest_loongarch::loongarch::csr::{
 };
 use machina_hw_core::bus::SysBusMapping;
 use machina_hw_core::chardev::{ByteCb, CharFrontend, Chardev};
+use machina_hw_firmware::keys;
 use machina_hw_loongarch::interrupt::LOONGARCH_DEVICE_HWI;
 use machina_hw_loongarch::virt_machine::{
-    LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE, VIRT_IPI_BASE,
-    VIRT_IPI_SIZE, VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE, VIRT_RAM_BASE,
-    VIRT_UART_BASE, VIRT_UART_SIZE, VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE,
+    LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE,
+    VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE, VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE,
+    VIRT_FWCFG_BASE, VIRT_FWCFG_SIZE, VIRT_IPI_BASE, VIRT_IPI_SIZE,
+    VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE, VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE,
+    VIRT_RAM_BASE, VIRT_RTC_BASE, VIRT_RTC_SIZE, VIRT_UART_BASE,
+    VIRT_UART_SIZE, VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE,
 };
+
+const LOONGARCH_RTC_PCH_IRQ_UNDER_TEST: u32 = 6;
 
 fn default_opts() -> MachineOpts {
     MachineOpts {
@@ -89,6 +95,10 @@ fn task42_virt_board_realizes_expected_mmio_map() {
     assert_mapping(&mappings, "ipi0", VIRT_IPI_BASE, VIRT_IPI_SIZE);
     assert_mapping(&mappings, "eiointc0", VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE);
     assert_mapping(&mappings, "pch-pic0", VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE);
+    assert_mapping(&mappings, "pch-msi0", VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE);
+    assert_mapping(&mappings, "ls7a-rtc0", VIRT_RTC_BASE, VIRT_RTC_SIZE);
+    assert_mapping(&mappings, "pflash0", VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE);
+    assert_mapping(&mappings, "pflash1", VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE);
 
     assert!(
         machine
@@ -115,6 +125,179 @@ fn task42_virt_board_realizes_expected_mmio_map() {
     let cpu = cpu.lock().unwrap();
     assert_eq!(cpu.ram_base_val(), VIRT_RAM_BASE);
     assert_eq!(cpu.ram_end_val(), VIRT_RAM_BASE + opts.ram_size);
+}
+
+#[test]
+fn task42_virt_board_maps_pch_msi_and_routes_vectors_to_cpu_hwi() {
+    let mut machine = LoongArchVirtMachine::new();
+    machine.init(&default_opts()).expect("init loongarch ref");
+
+    assert_mapping(
+        &machine.sysbus().mappings(),
+        "pch-msi0",
+        VIRT_PCH_MSI_BASE,
+        VIRT_PCH_MSI_SIZE,
+    );
+    assert_eq!(
+        machine.address_space().read(GPA::new(VIRT_PCH_MSI_BASE), 4),
+        0
+    );
+
+    enable_device_hwi(&machine);
+    machine
+        .address_space()
+        .write(GPA::new(VIRT_PCH_MSI_BASE), 4, 32);
+
+    let expected_line = Some(u32::from(LOONGARCH_DEVICE_HWI) + 2);
+    assert_eq!(
+        machine.cpu().lock().unwrap().pending_interrupt_line(),
+        expected_line
+    );
+    machine.interrupt_cascade().ack_eiointc(0, 32);
+    assert_eq!(machine.cpu().lock().unwrap().pending_interrupt_line(), None);
+
+    machine
+        .address_space()
+        .write(GPA::new(VIRT_PCH_MSI_BASE + 4), 4, 37);
+    assert_eq!(
+        machine.cpu().lock().unwrap().pending_interrupt_line(),
+        expected_line
+    );
+}
+
+#[test]
+fn task42_virt_board_maps_ls7a_rtc_and_routes_alarm_to_cpu_hwi() {
+    let mut machine = LoongArchVirtMachine::new();
+    machine.init(&default_opts()).expect("init loongarch ref");
+
+    assert_mapping(
+        &machine.sysbus().mappings(),
+        "ls7a-rtc0",
+        VIRT_RTC_BASE,
+        VIRT_RTC_SIZE,
+    );
+
+    let as_ = machine.address_space();
+    assert_eq!(as_.read(GPA::new(VIRT_RTC_BASE + 0x40), 4), 0);
+    as_.write(GPA::new(VIRT_RTC_BASE + 0x40), 4, (1 << 11) | (1 << 8));
+    let toy_now = as_.read(GPA::new(VIRT_RTC_BASE + 0x2c), 4);
+    assert_ne!(toy_now, 0);
+
+    enable_device_hwi(&machine);
+    as_.write(GPA::new(VIRT_RTC_BASE + 0x34), 4, toy_now);
+    machine.rtc().tick(0);
+
+    let expected_line = Some(u32::from(LOONGARCH_DEVICE_HWI) + 2);
+    assert_eq!(
+        machine.cpu().lock().unwrap().pending_interrupt_line(),
+        expected_line
+    );
+    machine
+        .interrupt_cascade()
+        .ack_eiointc(0, LOONGARCH_RTC_PCH_IRQ_UNDER_TEST);
+    assert_eq!(machine.cpu().lock().unwrap().pending_interrupt_line(), None);
+}
+
+#[test]
+fn task42_virt_board_maps_loongarch_pflash_banks() {
+    let mut machine = LoongArchVirtMachine::new();
+    machine.init(&default_opts()).expect("init loongarch ref");
+
+    assert_mapping(
+        &machine.sysbus().mappings(),
+        "pflash0",
+        VIRT_FLASH0_BASE,
+        VIRT_FLASH0_SIZE,
+    );
+    assert_mapping(
+        &machine.sysbus().mappings(),
+        "pflash1",
+        VIRT_FLASH1_BASE,
+        VIRT_FLASH1_SIZE,
+    );
+    assert!(
+        machine.pflash0().realized(),
+        "pflash0 device state must be realized through its own MOM lifecycle"
+    );
+    assert!(
+        machine.pflash1().realized(),
+        "pflash1 device state must be realized through its own MOM lifecycle"
+    );
+
+    let as_ = machine.address_space();
+    as_.write(GPA::new(VIRT_FLASH0_BASE + 0x55), 1, 0x98);
+    assert_eq!(
+        as_.read(GPA::new(VIRT_FLASH0_BASE + 0x40), 1),
+        u64::from(b'Q')
+    );
+    assert_eq!(
+        as_.read(GPA::new(VIRT_FLASH0_BASE + 0x44), 1),
+        u64::from(b'R')
+    );
+    assert_eq!(
+        as_.read(GPA::new(VIRT_FLASH0_BASE + 0x48), 1),
+        u64::from(b'Y')
+    );
+
+    as_.write(GPA::new(VIRT_FLASH1_BASE), 1, 0xff);
+    as_.write(GPA::new(VIRT_FLASH1_BASE), 1, 0x40);
+    as_.write(GPA::new(VIRT_FLASH1_BASE + 0x20), 1, 0x5a);
+    as_.write(GPA::new(VIRT_FLASH1_BASE), 1, 0xff);
+    assert_eq!(as_.read(GPA::new(VIRT_FLASH1_BASE + 0x20), 1), 0x5a);
+}
+
+#[test]
+fn task45_virt_board_maps_fw_cfg_mmio_window() {
+    let mut machine = LoongArchVirtMachine::new();
+    let opts = default_opts();
+    machine.init(&opts).expect("init loongarch ref");
+    let as_ = machine.address_space();
+
+    assert_mapping(
+        &machine.sysbus().mappings(),
+        "fw_cfg0",
+        VIRT_FWCFG_BASE,
+        VIRT_FWCFG_SIZE,
+    );
+
+    as_.write(
+        GPA::new(VIRT_FWCFG_BASE + 0x08),
+        2,
+        u64::from(keys::SIGNATURE),
+    );
+    assert_eq!(as_.read(GPA::new(VIRT_FWCFG_BASE), 4), 0x5145_4d55);
+
+    as_.write(
+        GPA::new(VIRT_FWCFG_BASE + 0x08),
+        2,
+        u64::from(keys::MAX_CPUS),
+    );
+    assert_eq!(
+        as_.read(GPA::new(VIRT_FWCFG_BASE), 1),
+        opts.cpu_count as u64
+    );
+    assert_eq!(as_.read(GPA::new(VIRT_FWCFG_BASE), 1), 0);
+
+    as_.write(
+        GPA::new(VIRT_FWCFG_BASE + 0x08),
+        2,
+        u64::from(keys::NB_CPUS),
+    );
+    assert_eq!(
+        as_.read(GPA::new(VIRT_FWCFG_BASE), 1),
+        opts.cpu_count as u64
+    );
+    assert_eq!(as_.read(GPA::new(VIRT_FWCFG_BASE), 1), 0);
+
+    as_.write(
+        GPA::new(VIRT_FWCFG_BASE + 0x08),
+        2,
+        u64::from(keys::RAM_SIZE),
+    );
+    let ram_size = (0..8).fold(0u64, |value, shift| {
+        value | (as_.read(GPA::new(VIRT_FWCFG_BASE), 1) << (shift * 8))
+    });
+    assert_eq!(ram_size, opts.ram_size);
 }
 
 #[test]

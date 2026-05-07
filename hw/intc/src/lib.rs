@@ -1,5 +1,10 @@
 pub mod aclint;
+pub mod aplic;
+pub mod dintc;
 pub mod eiointc;
+pub mod imsic;
 pub mod ipi;
+pub mod liointc;
+pub mod pch_msi;
 pub mod pch_pic;
 pub mod plic;

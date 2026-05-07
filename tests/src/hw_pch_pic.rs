@@ -50,11 +50,14 @@ fn unmask_word(irq: u32) -> u64 {
 }
 
 #[test]
-fn task37_pch_pic_realizes_as_sysbus_mmio_device() {
+fn test_pch_pic_lifecycle_and_mom_identity() {
     let pic = Arc::new(PchPic::new_named("pchpic0", 32));
     let mut bus = SysBus::new("sysbus0");
     let mut address_space = make_address_space();
     let base = GPA::new(0x1000_0000);
+    assert!(!pic.realized());
+    pic.with_mdevice(|device| assert_eq!(device.local_id(), "pchpic0"));
+    assert_eq!(pic.object_info().local_id, "pchpic0");
 
     pic.register_mmio(
         MemoryRegion::io(
@@ -81,6 +84,17 @@ fn task37_pch_pic_realizes_as_sysbus_mmio_device() {
     assert_eq!(bus.mappings()[0].owner, "pchpic0");
     assert_eq!(bus.mappings()[0].name, "pchpic0-mmio");
     assert_eq!(bus.mappings()[0].base, base);
+
+    let err = pic.realize_onto(&mut bus, &mut address_space).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+
+    pic.unrealize_from(&mut bus, &mut address_space).unwrap();
+    assert!(!pic.realized());
+
+    let err = pic
+        .unrealize_from(&mut bus, &mut address_space)
+        .unwrap_err();
+    assert!(err.to_string().contains("not realized"));
 }
 
 #[test]
@@ -99,6 +113,24 @@ fn task37_pch_pic_mask_suppresses_until_unmasked() {
 
     assert!(sink.level(5));
     assert_ne!(pic.mmio_read_sized(INT_STATUS, 8) & (1 << 3), 0);
+}
+
+#[test]
+fn test_pch_pic_bulk_unmask_accepts_all_pending_irqs() {
+    let pic = Arc::new(PchPic::new_named("pchpic0", 32));
+    let sink = RecordingSink::new(16);
+    pic.connect_output(4, recording_line(&sink, 4));
+    pic.connect_output(5, recording_line(&sink, 5));
+    pic.mmio_write_sized(HTMSI_VEC + 2, 1, 4);
+    pic.mmio_write_sized(HTMSI_VEC + 3, 1, 5);
+
+    pic.set_irq(2, true);
+    pic.set_irq(3, true);
+    pic.mmio_write_sized(INT_MASK, 8, u64::MAX & !((1 << 2) | (1 << 3)));
+
+    assert_eq!(pic.mmio_read_sized(INT_STATUS, 8), (1 << 2) | (1 << 3));
+    assert!(sink.level(4));
+    assert!(sink.level(5));
 }
 
 #[test]
@@ -156,13 +188,19 @@ fn task37_pch_pic_level_reasserts_after_masking_while_high() {
     pic.set_irq(1, true);
     assert!(sink.level(6));
 
+    // QEMU: mask gates ISR acceptance, not ongoing output.
+    // intisr still drives the line even while masked.
     pic.mmio_write_sized(INT_MASK, 8, u64::MAX);
-    assert!(!sink.level(6));
+    assert!(sink.level(6));
+
+    // INT_STATUS reads intisr & ~int_mask, so it shows 0.
     assert_eq!(pic.mmio_read_sized(INT_STATUS, 8) & (1 << 1), 0);
 
+    // Unmasking has no retroactive effect on already-active IRQ.
     pic.mmio_write_sized(INT_MASK, 8, unmask_word(1));
     assert!(sink.level(6));
 
+    // Deasserting the source clears intisr and drops the line.
     pic.set_irq(1, false);
     assert!(!sink.level(6));
     assert_eq!(pic.mmio_read_sized(INT_STATUS, 8) & (1 << 1), 0);
@@ -185,4 +223,17 @@ fn task37_pch_pic_route_and_vector_bytes_are_sized_and_independent() {
 
     assert!(sink.level(7));
     assert!(!sink.level(8));
+}
+
+#[test]
+fn test_pch_pic_rejects_unsupported_mmio_access_sizes() {
+    let pic = Arc::new(PchPic::new_named("pchpic0", 32));
+
+    assert_eq!(pic.mmio_read_sized(INT_MASK, 3), 0);
+
+    pic.mmio_write_sized(INT_MASK, 3, 0);
+    assert_eq!(pic.mmio_read_sized(INT_MASK, 8), u64::MAX);
+
+    pic.mmio_write_sized(HTMSI_VEC, 16, 0x0807_0605_0403_0201);
+    assert_eq!(pic.mmio_read_sized(HTMSI_VEC, 8), 0);
 }
