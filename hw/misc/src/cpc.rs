@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_memory::region::MmioOps;
 
@@ -56,7 +56,7 @@ impl CpcRegs {
 #[mom(state = state, lock = "parking_lot")]
 pub struct Cpc {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<CpcRegs>,
+    regs: DeviceRegs<CpcRegs>,
     mtime_cb: Mutex<Option<CpcMtimeCb>>,
     vp_action_cb: Mutex<Option<CpcVpActionCb>>,
 }
@@ -78,7 +78,7 @@ impl Cpc {
     ) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(CpcRegs::new(
+            regs: DeviceRegs::new(CpcRegs::new(
                 cluster_id,
                 num_vp,
                 num_hart,

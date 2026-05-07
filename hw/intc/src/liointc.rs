@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::{InterruptSource, IrqSink};
 use machina_memory::region::MmioOps;
@@ -49,7 +49,7 @@ fn parent_index(core: usize, ip: usize) -> usize {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct Liointc {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<LiointcRegs>,
+    regs: DeviceRegs<LiointcRegs>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
 
@@ -63,7 +63,7 @@ impl Liointc {
     pub fn new_named(local_id: &str) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(LiointcRegs::new()),
+            regs: DeviceRegs::new(LiointcRegs::new()),
             outputs: parking_lot::Mutex::new({
                 let mut v = Vec::with_capacity(NUM_PARENTS);
                 v.resize_with(NUM_PARENTS, || None);

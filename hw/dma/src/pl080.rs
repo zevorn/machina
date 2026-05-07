@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use machina_core::address::GPA;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::address_space::AddressSpace;
@@ -65,7 +66,7 @@ impl Default for Pl080Regs {
 #[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_outputs)]
 pub struct Pl080 {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: parking_lot::Mutex<Pl080Regs>,
+    regs: DeviceRegs<Pl080Regs>,
     dma_address_space: parking_lot::Mutex<Option<Arc<AddressSpace>>>,
     irqs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
@@ -78,7 +79,7 @@ impl Pl080 {
     pub fn new_named(local_id: &str) -> Arc<Self> {
         Arc::new(Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: parking_lot::Mutex::new(Pl080Regs::default()),
+            regs: DeviceRegs::new(Pl080Regs::default()),
             dma_address_space: parking_lot::Mutex::new(None),
             irqs: parking_lot::Mutex::new(
                 std::iter::repeat_with(|| None).take(3).collect(),

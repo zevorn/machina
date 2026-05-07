@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_hw_timer::{Ptimer, PtimerCallback};
@@ -59,7 +60,7 @@ impl Default for SbsaGwdtRegs {
 #[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = [lower_irq, stop_timer])]
 pub struct SbsaGwdt {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: parking_lot::Mutex<SbsaGwdtRegs>,
+    regs: DeviceRegs<SbsaGwdtRegs>,
     irq: parking_lot::Mutex<Option<InterruptSource>>,
     clock_frequency: u32,
     timer: Arc<Ptimer>,
@@ -93,7 +94,7 @@ impl SbsaGwdt {
                 state: parking_lot::Mutex::new(SysBusDeviceState::new(
                     local_id,
                 )),
-                regs: parking_lot::Mutex::new(SbsaGwdtRegs::default()),
+                regs: DeviceRegs::new(SbsaGwdtRegs::default()),
                 irq: parking_lot::Mutex::new(None),
                 clock_frequency,
                 timer: Ptimer::new(Some(callback), 0),

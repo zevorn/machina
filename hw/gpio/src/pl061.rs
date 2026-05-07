@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -163,7 +163,7 @@ impl Pl061Regs {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct Pl061 {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<Pl061Regs>,
+    regs: DeviceRegs<Pl061Regs>,
     output: parking_lot::Mutex<Option<InterruptSource>>,
     gpio_outputs: parking_lot::Mutex<[Option<InterruptSource>; N_GPIOS]>,
 }
@@ -187,9 +187,7 @@ impl Pl061 {
     fn new_variant(pullups: u8, pulldowns: u8, luminary: bool) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new("pl061")),
-            regs: DeviceRefCell::new(Pl061Regs::new(
-                pullups, pulldowns, luminary,
-            )),
+            regs: DeviceRegs::new(Pl061Regs::new(pullups, pulldowns, luminary)),
             output: parking_lot::Mutex::new(None),
             gpio_outputs: parking_lot::Mutex::new([
                 None, None, None, None, None, None, None, None,

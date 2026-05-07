@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_memory::region::MmioOps;
 
@@ -70,7 +70,7 @@ impl CmgcrRegs {
 #[mom(state = state, lock = "parking_lot")]
 pub struct Cmgcr {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<CmgcrRegs>,
+    regs: DeviceRegs<CmgcrRegs>,
     vp_reset_base_cb: Mutex<Option<CpuResetBaseCb>>,
 }
 
@@ -92,7 +92,7 @@ impl Cmgcr {
     ) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(CmgcrRegs::new(
+            regs: DeviceRegs::new(CmgcrRegs::new(
                 gcr_rev,
                 cluster_id,
                 num_vps_val,

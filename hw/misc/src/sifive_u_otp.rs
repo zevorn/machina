@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_memory::region::MmioOps;
 
@@ -105,7 +105,7 @@ impl SiFiveUOtpRegs {
 #[mom(state = state, lock = "parking_lot")]
 pub struct SiFiveUOtp {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<SiFiveUOtpRegs>,
+    regs: DeviceRegs<SiFiveUOtpRegs>,
 }
 
 impl SiFiveUOtp {
@@ -120,7 +120,7 @@ impl SiFiveUOtp {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(
                 "sifive_u_otp",
             )),
-            regs: DeviceRefCell::new(SiFiveUOtpRegs::new(serial)),
+            regs: DeviceRegs::new(SiFiveUOtpRegs::new(serial)),
         }
     }
 

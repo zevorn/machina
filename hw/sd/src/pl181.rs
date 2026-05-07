@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -123,7 +124,7 @@ impl Pl181Regs {
 #[mom(state = state, lock = "std")]
 pub struct Pl181 {
     state: Mutex<SysBusDeviceState>,
-    regs: Mutex<Pl181Regs>,
+    regs: DeviceRegs<Pl181Regs>,
     bus: Mutex<Option<Arc<SdBus>>>,
     outputs: Mutex<Vec<Option<InterruptSource>>>,
 }
@@ -138,7 +139,7 @@ impl Pl181 {
     pub fn new_named(local_id: &str) -> Self {
         Self {
             state: Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: Mutex::new(Pl181Regs::new()),
+            regs: DeviceRegs::new(Pl181Regs::new()),
             bus: Mutex::new(None),
             outputs: Mutex::new({
                 let mut v = Vec::with_capacity(PL181_NUM_IRQS);
@@ -162,7 +163,7 @@ impl Pl181 {
     }
 
     pub fn reset_runtime(&self) {
-        *self.regs.lock().unwrap() = Pl181Regs::new();
+        *self.regs.lock() = Pl181Regs::new();
         self.update_irqs();
     }
 
@@ -181,7 +182,7 @@ impl Pl181 {
             return self.read_fifo(size);
         }
 
-        let regs = self.regs.lock().unwrap();
+        let regs = self.regs.lock();
         let value = match offset {
             REG_POWER => regs.power,
             REG_CLOCK => regs.clock,
@@ -226,7 +227,7 @@ impl Pl181 {
         let mut update_irq = false;
 
         {
-            let mut regs = self.regs.lock().unwrap();
+            let mut regs = self.regs.lock();
             match offset {
                 REG_POWER => regs.power = value & 0xff,
                 REG_CLOCK => regs.clock = value & 0xff,
@@ -276,7 +277,7 @@ impl Pl181 {
                 let mut read_buffer = None;
                 let mut write_transfer_len = None;
                 let (read_enabled, write_enabled, transfer_len) = {
-                    let regs = self.regs.lock().unwrap();
+                    let regs = self.regs.lock();
                     (
                         regs.read_data_enabled(),
                         regs.write_data_enabled(),
@@ -296,7 +297,7 @@ impl Pl181 {
                     write_transfer_len = Some(transfer_len);
                 }
 
-                let mut regs = self.regs.lock().unwrap();
+                let mut regs = self.regs.lock();
                 regs.response_cmd = u32::from(cmd);
                 regs.response = response_words(&response);
                 regs.status &= !STATUS_COMMAND_TIMEOUT;
@@ -330,7 +331,7 @@ impl Pl181 {
     }
 
     fn record_command_error(&self, _err: SdError) {
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         regs.status |= STATUS_COMMAND_TIMEOUT;
         drop(regs);
         self.update_irqs();
@@ -339,7 +340,7 @@ impl Pl181 {
     fn read_fifo(&self, size: u32) -> u64 {
         let len = (size as usize).min(8);
         let mut bytes = [0; 8];
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
 
         for byte in bytes.iter_mut().take(len) {
             if regs.data_offset >= regs.data_buffer.len() {
@@ -375,7 +376,7 @@ impl Pl181 {
         let mut completed = None;
 
         {
-            let mut regs = self.regs.lock().unwrap();
+            let mut regs = self.regs.lock();
             if !regs.write_transfer_active {
                 return;
             }
@@ -405,7 +406,7 @@ impl Pl181 {
             {
                 return;
             }
-            let mut regs = self.regs.lock().unwrap();
+            let mut regs = self.regs.lock();
             regs.status &= !(STATUS_DATA_END | STATUS_DATA_BLOCK_END);
         }
         self.update_irqs();
@@ -413,7 +414,7 @@ impl Pl181 {
 
     fn update_irqs(&self) {
         let (status, mask0, mask1) = {
-            let regs = self.regs.lock().unwrap();
+            let regs = self.regs.lock();
             (regs.status, regs.mask0, regs.mask1)
         };
         let outputs = self.outputs.lock().unwrap();

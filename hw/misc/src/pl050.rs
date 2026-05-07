@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -53,7 +53,7 @@ impl Pl050Regs {
 #[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_irq)]
 pub struct Pl050 {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<Pl050Regs>,
+    regs: DeviceRegs<Pl050Regs>,
     irq: parking_lot::Mutex<Option<InterruptSource>>,
 }
 
@@ -62,7 +62,7 @@ impl Pl050 {
     pub fn new() -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new("pl050")),
-            regs: DeviceRefCell::new(Pl050Regs::new()),
+            regs: DeviceRegs::new(Pl050Regs::new()),
             irq: parking_lot::Mutex::new(None),
         }
     }

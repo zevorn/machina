@@ -5,6 +5,8 @@
 //! delivery used by SPI-mode SD probes.
 
 use std::collections::VecDeque;
+
+use machina_core::device_cell::DeviceRegs;
 use std::sync::{Arc, Mutex};
 
 use machina_hw_core::mdev::MDeviceState;
@@ -54,7 +56,7 @@ struct SsiSdRegs {
 #[mom(state = state, lock = "std")]
 pub struct SsiSd {
     state: Mutex<MDeviceState>,
-    regs: Mutex<SsiSdRegs>,
+    regs: DeviceRegs<SsiSdRegs>,
     sd_bus: Mutex<Option<Arc<SdBus>>>,
     cs_index: u8,
 }
@@ -69,7 +71,7 @@ impl SsiSd {
     pub fn new_named(local_id: &str, cs_index: u8) -> Self {
         Self {
             state: Mutex::new(MDeviceState::new(local_id)),
-            regs: Mutex::new(SsiSdRegs::default()),
+            regs: DeviceRegs::new(SsiSdRegs::default()),
             sd_bus: Mutex::new(None),
             cs_index,
         }
@@ -80,7 +82,7 @@ impl SsiSd {
     }
 
     pub fn reset_runtime(&self) {
-        *self.regs.lock().unwrap() = SsiSdRegs::default();
+        *self.regs.lock() = SsiSdRegs::default();
     }
 
     fn dispatch_packet(&self, packet: &[u8]) -> Vec<u8> {
@@ -103,8 +105,7 @@ impl SsiSd {
                         out.extend_from_slice(&[PULL_UP as u8; 2]);
                     }
                 } else if cmd == CMD_WRITE_SINGLE_BLOCK && bus.receive_ready() {
-                    self.regs.lock().unwrap().write_state =
-                        WriteState::WaitingToken;
+                    self.regs.lock().write_state = WriteState::WaitingToken;
                 }
                 out
             }
@@ -177,7 +178,7 @@ impl SpiSlave for SsiSd {
         let mut completed_write = None;
 
         {
-            let mut regs = self.regs.lock().unwrap();
+            let mut regs = self.regs.lock();
             if !regs.selected {
                 return PULL_UP;
             }
@@ -218,7 +219,7 @@ impl SpiSlave for SsiSd {
 
         if let Some(packet) = packet {
             let response = self.dispatch_packet(&packet);
-            let mut regs = self.regs.lock().unwrap();
+            let mut regs = self.regs.lock();
             regs.response = VecDeque::from(response);
             regs.response_delay = usize::from(!regs.response.is_empty());
         }
@@ -228,7 +229,7 @@ impl SpiSlave for SsiSd {
 
     fn set_cs(&self, cs: bool) {
         let selected = !cs;
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         if regs.selected != selected {
             regs.command.clear();
             regs.response.clear();

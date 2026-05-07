@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_memory::region::MmioOps;
 
@@ -115,7 +115,7 @@ pub type CounterCallback = Box<dyn Fn() + Send + Sync>;
 #[mom(state = state, lock = "parking_lot")]
 pub struct SseCounter {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<SseCounterRegs>,
+    regs: DeviceRegs<SseCounterRegs>,
     callbacks: parking_lot::Mutex<Vec<CounterCallback>>,
 }
 
@@ -131,7 +131,7 @@ impl SseCounter {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(
                 "sse_counter",
             )),
-            regs: DeviceRefCell::new(SseCounterRegs::new(freq_hz)),
+            regs: DeviceRegs::new(SseCounterRegs::new(freq_hz)),
             callbacks: parking_lot::Mutex::new(Vec::new()),
         }
     }

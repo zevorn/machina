@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_memory::region::MmioOps;
 
@@ -142,7 +143,7 @@ impl SdhciRegs {
 #[mom(state = state, lock = "std")]
 pub struct Sdhci {
     state: Mutex<SysBusDeviceState>,
-    regs: Mutex<SdhciRegs>,
+    regs: DeviceRegs<SdhciRegs>,
     bus: Mutex<Option<Arc<SdBus>>>,
 }
 
@@ -156,7 +157,7 @@ impl Sdhci {
     pub fn new_named(local_id: &str) -> Self {
         Self {
             state: Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: Mutex::new(SdhciRegs::new()),
+            regs: DeviceRegs::new(SdhciRegs::new()),
             bus: Mutex::new(None),
         }
     }
@@ -166,12 +167,12 @@ impl Sdhci {
     }
 
     pub fn reset_runtime(&self) {
-        self.regs.lock().unwrap().reset_runtime();
+        self.regs.lock().reset_runtime();
     }
 
     #[must_use]
     pub fn present_state(&self) -> u32 {
-        self.regs.lock().unwrap().present_state()
+        self.regs.lock().present_state()
     }
 
     fn read_reg(&self, offset: u64, size: u32) -> u64 {
@@ -183,7 +184,7 @@ impl Sdhci {
             return self.read_data_port(size);
         }
 
-        let regs = self.regs.lock().unwrap();
+        let regs = self.regs.lock();
         let value = match offset {
             REG_BLOCK_SIZE => u64::from(regs.block_size),
             REG_BLOCK_COUNT => u64::from(regs.block_count),
@@ -218,7 +219,7 @@ impl Sdhci {
             return;
         }
 
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         match offset {
             REG_BLOCK_SIZE => {
                 regs.block_size = value as u16;
@@ -275,7 +276,7 @@ impl Sdhci {
         match bus.do_command(&SdRequest::new(cmd, argument), &mut response) {
             Ok(_) => {
                 let (block_len, block_count) = {
-                    let regs = self.regs.lock().unwrap();
+                    let regs = self.regs.lock();
                     (regs.transfer_block_len(), regs.transfer_block_count())
                 };
                 let mut read_buffer = None;
@@ -293,7 +294,7 @@ impl Sdhci {
                         Some(block_len * transfer_blocks(cmd, block_count));
                 }
 
-                let mut regs = self.regs.lock().unwrap();
+                let mut regs = self.regs.lock();
                 regs.response = response_words(&response);
                 regs.normal_int_status |= INT_COMMAND_COMPLETE;
                 if let Some(data) = read_buffer {
@@ -317,7 +318,7 @@ impl Sdhci {
     }
 
     fn record_command_error(&self, _err: SdError) {
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         regs.error_int_status |= ERR_COMMAND_TIMEOUT;
         regs.normal_int_status |= INT_ERROR;
     }
@@ -325,7 +326,7 @@ impl Sdhci {
     fn read_data_port(&self, size: u32) -> u64 {
         let len = (size as usize).min(8);
         let mut bytes = [0; 8];
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         if regs.write_transfer_active || regs.data_buffer.is_empty() {
             return 0;
         }
@@ -356,7 +357,7 @@ impl Sdhci {
         let mut completed = false;
 
         {
-            let mut regs = self.regs.lock().unwrap();
+            let mut regs = self.regs.lock();
             if !regs.write_transfer_active || regs.data_buffer.is_empty() {
                 return;
             }
@@ -375,7 +376,7 @@ impl Sdhci {
         }
 
         if bus.write_data(&chunk).is_err() && completed {
-            let mut regs = self.regs.lock().unwrap();
+            let mut regs = self.regs.lock();
             regs.normal_int_status &= !INT_TRANSFER_COMPLETE;
         }
     }
@@ -389,7 +390,7 @@ impl Default for Sdhci {
 
 impl SdBusHost for Sdhci {
     fn set_inserted(&self, inserted: bool) {
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         if regs.inserted == inserted {
             return;
         }
@@ -402,7 +403,7 @@ impl SdBusHost for Sdhci {
     }
 
     fn set_readonly(&self, readonly: bool) {
-        self.regs.lock().unwrap().readonly = readonly;
+        self.regs.lock().readonly = readonly;
     }
 }
 

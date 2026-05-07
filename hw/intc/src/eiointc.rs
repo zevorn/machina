@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::{InterruptSource, IrqSink};
 use machina_memory::region::MmioOps;
@@ -52,7 +52,7 @@ impl EiointcRegs {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct Eiointc {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<EiointcRegs>,
+    regs: DeviceRegs<EiointcRegs>,
     hwi_outputs: parking_lot::Mutex<Vec<Vec<Option<InterruptSource>>>>,
 }
 
@@ -67,7 +67,7 @@ impl Eiointc {
         let nc = num_cpus.max(1) as usize;
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(EiointcRegs::new(nc)),
+            regs: DeviceRegs::new(EiointcRegs::new(nc)),
             hwi_outputs: parking_lot::Mutex::new(empty_hwi_outputs(num_cpus)),
         }
     }

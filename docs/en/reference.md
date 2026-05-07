@@ -1064,6 +1064,26 @@ declarative helper macros and typed schema builders. Device sources use
 the derive/attribute entry points, while the low-level helper macros stay
 inside `hw/core` as compatibility and implementation detail.
 
+#### 2.8 Register State
+
+Guest-visible register banks use interior mutability by default. This
+matches the Rust-in-QEMU rule that QOM-like device objects are normally
+accessed through shared references, and mutable register state is entered
+through a cell-like wrapper.
+
+- `DeviceRegs<T>` is the default container for register banks such as
+  `FooRegs`
+- `DeviceCell<T>` remains suitable for individual `Copy` scalar
+  registers that need independent interior mutability
+- register bank types and fields stay private to the device module
+- device files should not expose `pub regs`, `pub fn regs()`, or public
+  `*Regs` structs
+- MMIO, I2C, SSI, SD, and other bus callbacks are the public register
+  access surface
+- register writes that trigger side effects should compute the register
+  update first, release the register borrow, and then update IRQs,
+  timers, or frontend/backend wiring
+
 ### 3. Device Lifecycle
 
 The migrated-device lifecycle is:

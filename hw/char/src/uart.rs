@@ -11,7 +11,7 @@
 //   7: SCR
 //
 // Interior mutability: register state is in
-// DeviceRefCell<Uart16550Regs>, setup state in
+// DeviceRegs<Uart16550Regs>, setup state in
 // parking_lot::Mutex<SysBusDeviceState>.  All public
 // methods take &self so the device can be shared via
 // Arc<Uart16550> without an outer Mutex.
@@ -19,7 +19,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::{DeviceRefCell, DeviceRegs};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::chardev::{
     ByteCb, CharFrontend, ChardevResolveError, ChardevResolver,
@@ -98,8 +98,8 @@ impl From<ChardevResolveError> for UartError {
     }
 }
 
-/// Mutable register state protected by DeviceRefCell.
-pub struct Uart16550Regs {
+/// Mutable register state protected by DeviceRegs.
+struct Uart16550Regs {
     rbr: u8,
     thr: u8,
     ier: u8,
@@ -188,7 +188,7 @@ pub struct Uart16550 {
     // called through &self (Arc<Uart16550>).
     state: parking_lot::Mutex<SysBusDeviceState>,
     // Runtime register state.
-    regs: DeviceRefCell<Uart16550Regs>,
+    regs: DeviceRegs<Uart16550Regs>,
     // IRQ line. Written during realize, read at runtime.
     irq_line: parking_lot::Mutex<Option<IrqLine>>,
     // Chardev frontend for TX output.
@@ -213,7 +213,7 @@ impl Uart16550 {
 
         Self {
             state: parking_lot::Mutex::new(state),
-            regs: DeviceRefCell::new(Uart16550Regs::new()),
+            regs: DeviceRegs::new(Uart16550Regs::new()),
             irq_line: parking_lot::Mutex::new(None),
             chardev: DeviceRefCell::new(None),
             configured_chardev: parking_lot::Mutex::new(None),

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -226,7 +226,7 @@ impl SiFiveGpioRegs {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct SiFiveGpio {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<SiFiveGpioRegs>,
+    regs: DeviceRegs<SiFiveGpioRegs>,
     outputs: parking_lot::Mutex<[Option<InterruptSource>; SIFIVE_GPIO_PINS]>,
 }
 
@@ -237,7 +237,7 @@ impl SiFiveGpio {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(
                 "sifive_gpio",
             )),
-            regs: DeviceRefCell::new(SiFiveGpioRegs::new()),
+            regs: DeviceRegs::new(SiFiveGpioRegs::new()),
             outputs: parking_lot::Mutex::new(
                 [const { None }; SIFIVE_GPIO_PINS],
             ),

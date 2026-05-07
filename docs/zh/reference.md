@@ -1027,6 +1027,20 @@ derive 层保持很薄：它展开到同一套 declarative helper macro 和 type
 schema builder。设备源码使用 derive/attribute 入口，底层 helper macro
 则留在 `hw/core` 内作为兼容和实现细节。
 
+#### 2.8 寄存器状态
+
+客户可见的 register bank 默认使用内部可变性。这与 Rust-in-QEMU 的
+QOM 规则一致：设备对象通常通过共享引用访问，可变寄存器状态需要通过
+cell-like wrapper 进入。
+
+- `DeviceRegs<T>` 是 `FooRegs` 这类 register bank 的默认容器
+- 单独的 `Copy` 标量寄存器仍可使用 `DeviceCell<T>` 表达独立的内部可变性
+- register bank 类型和字段默认保持 device module 私有
+- 设备文件不暴露 `pub regs`、`pub fn regs()` 或公开的 `*Regs` struct
+- MMIO、I2C、SSI、SD 等 bus callback 是公开寄存器访问面
+- 会触发副作用的寄存器写入应先完成寄存器更新，释放 register borrow，
+  再更新 IRQ、timer 或 frontend/backend wiring
+
 ### 3. 设备生命周期
 
 已迁移设备的生命周期为：

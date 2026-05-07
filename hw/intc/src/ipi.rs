@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -36,7 +36,7 @@ impl IpiCore {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct LoongArchIpi {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    cores: DeviceRefCell<Vec<IpiCore>>,
+    cores: DeviceRegs<Vec<IpiCore>>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
 
@@ -51,7 +51,7 @@ impl LoongArchIpi {
         let count = num_cpus.max(1) as usize;
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            cores: DeviceRefCell::new(vec![IpiCore::new(); count]),
+            cores: DeviceRegs::new(vec![IpiCore::new(); count]),
             outputs: parking_lot::Mutex::new(empty_outputs(count)),
         }
     }

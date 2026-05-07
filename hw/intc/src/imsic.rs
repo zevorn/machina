@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -53,9 +53,9 @@ pub struct RiscvImsic {
     hartid: u32,
     num_pages: u32,
     num_irqs: u32,
-    eidelivery: DeviceRefCell<Vec<u32>>,
-    eithreshold: DeviceRefCell<Vec<u32>>,
-    eistate: DeviceRefCell<Vec<u32>>,
+    eidelivery: DeviceRegs<Vec<u32>>,
+    eithreshold: DeviceRegs<Vec<u32>>,
+    eistate: DeviceRegs<Vec<u32>>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
 
@@ -81,9 +81,9 @@ impl RiscvImsic {
             mmode,
             num_pages: np,
             num_irqs: ni,
-            eidelivery: DeviceRefCell::new(vec![0u32; np as usize]),
-            eithreshold: DeviceRefCell::new(vec![0u32; np as usize]),
-            eistate: DeviceRefCell::new(vec![0u32; num_eistate]),
+            eidelivery: DeviceRegs::new(vec![0u32; np as usize]),
+            eithreshold: DeviceRegs::new(vec![0u32; np as usize]),
+            eistate: DeviceRegs::new(vec![0u32; num_eistate]),
             outputs: parking_lot::Mutex::new({
                 let mut v = Vec::with_capacity(np as usize);
                 v.resize_with(np as usize, || None);

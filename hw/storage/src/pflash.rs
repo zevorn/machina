@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_memory::region::MmioOps;
 
@@ -67,7 +68,7 @@ pub struct PFlashCfi01<B: BlockBackend> {
     flash: FlashMedia<B>,
     config: PFlashCfi01Config,
     writeblock_size: u64,
-    regs: Mutex<PFlashCfi01Regs>,
+    regs: DeviceRegs<PFlashCfi01Regs>,
 }
 
 impl<B: BlockBackend> PFlashCfi01<B> {
@@ -114,7 +115,7 @@ impl<B: BlockBackend> PFlashCfi01<B> {
             flash: flash.with_readonly(config.read_only),
             config,
             writeblock_size,
-            regs: Mutex::new(PFlashCfi01Regs {
+            regs: DeviceRegs::new(PFlashCfi01Regs {
                 wcycle: 0,
                 cmd: 0,
                 status: STATUS_READY,
@@ -126,7 +127,7 @@ impl<B: BlockBackend> PFlashCfi01<B> {
     }
 
     pub fn reset_runtime(&self) {
-        let mut regs = lock(&self.regs);
+        let mut regs = self.regs.lock();
         regs.wcycle = 0;
         regs.cmd = 0;
         regs.status = STATUS_READY;
@@ -138,7 +139,7 @@ impl<B: BlockBackend> PFlashCfi01<B> {
         if size == 0 || size > 8 {
             return 0;
         }
-        let mut regs = lock(&self.regs);
+        let mut regs = self.regs.lock();
         match regs.cmd {
             0x00 => self.read_data(offset, size),
             0x10 | 0x20 | 0x28 | 0x40 | 0x50 | 0x60 | 0x70 | 0xe8 => {
@@ -159,7 +160,7 @@ impl<B: BlockBackend> PFlashCfi01<B> {
             return;
         }
         let cmd = value as u8;
-        let mut regs = lock(&self.regs);
+        let mut regs = self.regs.lock();
         match regs.wcycle {
             0 => self.write_cfi01_cycle0(&mut regs, size, value, cmd),
             1 => self.write_cfi01_cycle1(&mut regs, offset, size, value, cmd),
@@ -554,7 +555,7 @@ pub struct PFlashCfi02<B: BlockBackend> {
     flash: FlashMedia<B>,
     config: PFlashCfi02Config,
     chip_len: u64,
-    regs: Mutex<PFlashCfi02Regs>,
+    regs: DeviceRegs<PFlashCfi02Regs>,
 }
 
 impl<B: BlockBackend> PFlashCfi02<B> {
@@ -592,7 +593,7 @@ impl<B: BlockBackend> PFlashCfi02<B> {
             flash: flash.with_readonly(config.read_only),
             config,
             chip_len,
-            regs: Mutex::new(PFlashCfi02Regs {
+            regs: DeviceRegs::new(PFlashCfi02Regs {
                 wcycle: 0,
                 cmd: 0,
                 status: 0,
@@ -605,7 +606,7 @@ impl<B: BlockBackend> PFlashCfi02<B> {
     }
 
     pub fn reset_runtime(&self) {
-        let mut regs = lock(&self.regs);
+        let mut regs = self.regs.lock();
         Self::cfi02_reset(&mut regs);
         regs.erase_suspended = false;
         regs.erasing_ranges.clear();
@@ -613,7 +614,7 @@ impl<B: BlockBackend> PFlashCfi02<B> {
     }
 
     pub fn expire_timer(&self) {
-        let mut regs = lock(&self.regs);
+        let mut regs = self.regs.lock();
         if regs.cmd == 0x10 || regs.cmd == 0x30 {
             regs.status ^= 0x80;
             regs.erase_suspended = false;
@@ -627,7 +628,7 @@ impl<B: BlockBackend> PFlashCfi02<B> {
             return 0;
         }
         let offset = self.wrap_offset(offset);
-        let mut regs = lock(&self.regs);
+        let mut regs = self.regs.lock();
         if regs.erase_suspended && self.cfi02_offset_is_erasing(&regs, offset) {
             regs.status ^= 0x04;
             return u64::from(regs.status);
@@ -662,7 +663,7 @@ impl<B: BlockBackend> PFlashCfi02<B> {
         let cmd = value as u8;
         let offset = self.wrap_offset(offset);
         let boff = self.command_offset(offset);
-        let mut regs = lock(&self.regs);
+        let mut regs = self.regs.lock();
         if regs.cmd != 0xa0
             && cmd == 0xf0
             && regs.cmd != 0x10

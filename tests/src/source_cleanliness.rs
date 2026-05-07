@@ -92,6 +92,12 @@ const LOW_LEVEL_MOM_ACCESSOR_HELPERS: &[&str] = &[
     "machina_parking_lot_mdevice_accessors!(",
 ];
 
+const DIRECT_REGISTER_BANK_FIELDS: &[&str] = &[
+    "regs: DeviceRefCell<",
+    "regs: Mutex<",
+    "regs: parking_lot::Mutex<",
+];
+
 #[test]
 fn translated_device_sources_do_not_use_unsafe() {
     let repo = repo_root();
@@ -130,6 +136,44 @@ fn translated_device_sources_do_not_embed_qemu_references() {
     assert!(
         violations.is_empty(),
         "translated device sources embed QEMU references: {violations:#?}"
+    );
+}
+
+#[test]
+fn translated_device_registers_use_private_device_regs() {
+    let repo = repo_root();
+    let mut violations = Vec::new();
+
+    for file in DEVICE_SOURCE_FILES {
+        let content = std::fs::read_to_string(repo.join(file)).unwrap();
+        for (line_number, line) in content.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub struct ") && trimmed.contains("Regs") {
+                violations
+                    .push(format!("{file}:{}: {trimmed}", line_number + 1));
+            }
+            if trimmed.starts_with("pub fn regs")
+                || trimmed.starts_with("pub(crate) fn regs")
+                || trimmed.starts_with("pub regs:")
+                || trimmed.starts_with("pub(crate) regs:")
+            {
+                violations
+                    .push(format!("{file}:{}: {trimmed}", line_number + 1));
+            }
+            for pattern in DIRECT_REGISTER_BANK_FIELDS {
+                if line.contains(pattern) && line.contains("Regs") {
+                    violations.push(format!(
+                        "{file}:{}: register banks must use DeviceRegs<T>",
+                        line_number + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "translated device register banks should be private and use DeviceRegs<T>: {violations:#?}"
     );
 }
 

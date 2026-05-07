@@ -11,7 +11,7 @@
 // and then asserts MTI via the IRQ line.
 //
 // Interior mutability: register state is in
-// DeviceRefCell<AclintRegs>, setup state in
+// DeviceRegs<AclintRegs>, setup state in
 // parking_lot::Mutex<SysBusDeviceState>.  All public
 // methods take &self so the device can be shared via
 // Arc<Aclint> without an outer Mutex.
@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_core::wfi::WfiWaker;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::IrqLine;
@@ -39,8 +39,8 @@ struct TimerState {
     cancel_gen: Vec<AtomicU64>,
 }
 
-/// Mutable register state protected by DeviceRefCell.
-pub struct AclintRegs {
+/// Mutable register state protected by DeviceRegs.
+struct AclintRegs {
     epoch: Instant,
     mtime_base: u64,
     mtimecmp: Vec<u64>,
@@ -56,7 +56,7 @@ pub struct Aclint {
     state: parking_lot::Mutex<SysBusDeviceState>,
     num_harts: u32,
     // Runtime register state.
-    regs: DeviceRefCell<AclintRegs>,
+    regs: DeviceRegs<AclintRegs>,
     // Output lines. Written only during init (behind
     // parking_lot::Mutex), read at runtime via the lock.
     mti_outputs: parking_lot::Mutex<Vec<Option<IrqLine>>>,
@@ -86,7 +86,7 @@ impl Aclint {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
             num_harts,
-            regs: DeviceRefCell::new(AclintRegs {
+            regs: DeviceRegs::new(AclintRegs {
                 epoch: Instant::now(),
                 mtime_base: 0,
                 mtimecmp: vec![u64::MAX; n],

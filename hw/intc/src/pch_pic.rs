@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::{InterruptSource, IrqSink};
 use machina_memory::region::MmioOps;
@@ -49,7 +49,7 @@ impl PchPicRegs {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct PchPic {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<PchPicRegs>,
+    regs: DeviceRegs<PchPicRegs>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
     irq_num: usize,
 }
@@ -64,7 +64,7 @@ impl PchPic {
     pub fn new_named(local_id: &str, irq_num: u32) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(PchPicRegs::new()),
+            regs: DeviceRegs::new(PchPicRegs::new()),
             outputs: parking_lot::Mutex::new(empty_outputs()),
             irq_num: (irq_num as usize).clamp(1, NUM_IRQS),
         }

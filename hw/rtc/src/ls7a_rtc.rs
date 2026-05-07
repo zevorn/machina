@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -217,7 +217,7 @@ impl Ls7aRtcRegs {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct Ls7aRtc {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<Ls7aRtcRegs>,
+    regs: DeviceRegs<Ls7aRtcRegs>,
     output: parking_lot::Mutex<Option<InterruptSource>>,
 }
 
@@ -231,7 +231,7 @@ impl Ls7aRtc {
     pub fn new_named(local_id: &str) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(Ls7aRtcRegs::new()),
+            regs: DeviceRegs::new(Ls7aRtcRegs::new()),
             output: parking_lot::Mutex::new(None),
         }
     }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -161,7 +161,7 @@ impl SiFivePwmRegs {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct SiFivePwm {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<SiFivePwmRegs>,
+    regs: DeviceRegs<SiFivePwmRegs>,
     outputs: parking_lot::Mutex<[Option<InterruptSource>; PWM_CHANS]>,
 }
 
@@ -177,7 +177,7 @@ impl SiFivePwm {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(
                 "sifive_pwm",
             )),
-            regs: DeviceRefCell::new(SiFivePwmRegs::new(freq_hz)),
+            regs: DeviceRegs::new(SiFivePwmRegs::new(freq_hz)),
             outputs: parking_lot::Mutex::new([None, None, None, None]),
         }
     }

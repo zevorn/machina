@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -90,7 +90,7 @@ impl SseTimerRegs {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct SseTimer {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<SseTimerRegs>,
+    regs: DeviceRegs<SseTimerRegs>,
     counter: Arc<SseCounter>,
     output: parking_lot::Mutex<Option<InterruptSource>>,
 }
@@ -100,7 +100,7 @@ impl SseTimer {
     pub fn new(counter: Arc<SseCounter>) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new("sse_timer")),
-            regs: DeviceRefCell::new(SseTimerRegs::new()),
+            regs: DeviceRegs::new(SseTimerRegs::new()),
             counter,
             output: parking_lot::Mutex::new(None),
         }

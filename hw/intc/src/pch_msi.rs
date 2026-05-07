@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -31,7 +31,7 @@ impl PchMsiRegs {
 #[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct PchMsi {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<PchMsiRegs>,
+    regs: DeviceRegs<PchMsiRegs>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
 
@@ -46,7 +46,7 @@ impl PchMsi {
         let irq_count = irq_num as usize;
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(PchMsiRegs { irq_base, irq_num }),
+            regs: DeviceRegs::new(PchMsiRegs { irq_base, irq_num }),
             outputs: parking_lot::Mutex::new({
                 let mut v = Vec::with_capacity(irq_count);
                 v.resize_with(irq_count, || None);

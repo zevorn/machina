@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use machina_core::address::GPA;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::address_space::AddressSpace;
@@ -72,7 +73,7 @@ impl Default for SifivePdmaRegs {
 #[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_outputs)]
 pub struct SifivePdma {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: parking_lot::Mutex<SifivePdmaRegs>,
+    regs: DeviceRegs<SifivePdmaRegs>,
     irqs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
     dma_address_space: parking_lot::Mutex<Option<Arc<AddressSpace>>>,
 }
@@ -85,7 +86,7 @@ impl SifivePdma {
     pub fn new_named(local_id: &str) -> Arc<Self> {
         Arc::new(Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: parking_lot::Mutex::new(SifivePdmaRegs::default()),
+            regs: DeviceRegs::new(SifivePdmaRegs::default()),
             irqs: parking_lot::Mutex::new(
                 std::iter::repeat_with(|| None).take(IRQ_COUNT).collect(),
             ),

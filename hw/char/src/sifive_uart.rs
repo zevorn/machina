@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::{DeviceRefCell, DeviceRegs};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::chardev::CharFrontend;
 use machina_hw_core::irq::{InterruptSource, IrqSink};
@@ -135,7 +135,7 @@ impl SiFiveUartRegs {
 #[mom(state = state, lock = "parking_lot", lifecycle = "manual")]
 pub struct SiFiveUart {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<SiFiveUartRegs>,
+    regs: DeviceRegs<SiFiveUartRegs>,
     output: parking_lot::Mutex<Option<InterruptSource>>,
     chardev: DeviceRefCell<Option<CharFrontend>>,
     configured_chardev: parking_lot::Mutex<Option<CharFrontend>>,
@@ -151,7 +151,7 @@ impl SiFiveUart {
     pub fn new_named(local_id: &str) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(SiFiveUartRegs::new()),
+            regs: DeviceRegs::new(SiFiveUartRegs::new()),
             output: parking_lot::Mutex::new(None),
             chardev: DeviceRefCell::new(None),
             configured_chardev: parking_lot::Mutex::new(None),

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -108,7 +108,7 @@ impl Pl022Regs {
 #[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_irq)]
 pub struct Pl022 {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<Pl022Regs>,
+    regs: DeviceRegs<Pl022Regs>,
     irq: parking_lot::Mutex<Option<InterruptSource>>,
     ssi_bus: parking_lot::Mutex<Option<Arc<SpiBus>>>,
     /// Chip-select index on the SPI bus.
@@ -120,7 +120,7 @@ impl Pl022 {
     pub fn new() -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new("pl022")),
-            regs: DeviceRefCell::new(Pl022Regs::new()),
+            regs: DeviceRegs::new(Pl022Regs::new()),
             irq: parking_lot::Mutex::new(None),
             ssi_bus: parking_lot::Mutex::new(None),
             cs_index: 0,

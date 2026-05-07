@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -135,7 +135,7 @@ fn is_bad_reg(addr: u64, allow_reserved: bool) -> bool {
 #[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_outputs)]
 pub struct SiFiveSpi {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<SiFiveSpiRegs>,
+    regs: DeviceRegs<SiFiveSpiRegs>,
     irq: parking_lot::Mutex<Option<InterruptSource>>,
     cs_lines: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
     num_cs: u32,
@@ -158,7 +158,7 @@ impl SiFiveSpi {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(
                 "sifive_spi",
             )),
-            regs: DeviceRefCell::new(SiFiveSpiRegs::new(num_cs)),
+            regs: DeviceRegs::new(SiFiveSpiRegs::new(num_cs)),
             irq: parking_lot::Mutex::new(None),
             cs_lines: parking_lot::Mutex::new(cs_lines),
             num_cs,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use machina_accel::timer::VirtualClock;
-use machina_core::device_cell::DeviceRefCell;
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
 use machina_memory::region::MmioOps;
@@ -64,7 +64,7 @@ impl SiFiveEAonRegs {
 #[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_irq)]
 pub struct SiFiveEAon {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<SiFiveEAonRegs>,
+    regs: DeviceRegs<SiFiveEAonRegs>,
     irq: parking_lot::Mutex<Option<InterruptSource>>,
     clock: Arc<VirtualClock>,
 }
@@ -81,7 +81,7 @@ impl SiFiveEAon {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(
                 "sifive_e_aon",
             )),
-            regs: DeviceRefCell::new(SiFiveEAonRegs::new(wdogclk_freq)),
+            regs: DeviceRegs::new(SiFiveEAonRegs::new(wdogclk_freq)),
             irq: parking_lot::Mutex::new(None),
             clock,
         }

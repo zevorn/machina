@@ -1,3 +1,4 @@
+use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::mdev::MDeviceState;
 use machina_hw_storage::{BlockBackend, FlashMedia};
 use parking_lot::Mutex;
@@ -325,7 +326,7 @@ pub struct M25p80<B: BlockBackend> {
     cs_index: u8,
     jedec_id: [u8; 3],
     flash: FlashMedia<B>,
-    regs: Mutex<M25p80Regs>,
+    regs: DeviceRegs<M25p80Regs>,
 }
 
 impl<B: BlockBackend> M25p80<B> {
@@ -347,7 +348,7 @@ impl<B: BlockBackend> M25p80<B> {
             cs_index,
             jedec_id,
             flash,
-            regs: Mutex::new(M25p80Regs::new(jedec_id[0], flash_size)),
+            regs: DeviceRegs::new(M25p80Regs::new(jedec_id[0], flash_size)),
         }
     }
 

@@ -1,4 +1,4 @@
-// Interior-mutable cell types for device register state.
+// Interior-mutable cell types for device state.
 // Provides per-device locking granularity instead of
 // wrapping entire device in Mutex.
 
@@ -38,7 +38,7 @@ impl<T: Copy> DeviceCell<T> {
 
 // ---- DeviceRefCell<T>: for complex mutable state ----
 
-/// Lightweight mutex wrapper for device register state.
+/// Lightweight mutex wrapper for complex device state.
 /// Uses parking_lot::Mutex (no poisoning, 1 byte,
 /// zero-cost uncontended).
 pub struct DeviceRefCell<T> {
@@ -64,6 +64,48 @@ impl<T> DeviceRefCell<T> {
 }
 
 impl<T: Default> Default for DeviceRefCell<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+// ---- DeviceRegs<T>: for guest-visible register banks ----
+
+/// Interior-mutable container for guest-visible device registers.
+///
+/// Device models should keep register banks private and expose register
+/// behavior through MMIO or bus callbacks instead of returning raw register
+/// references to callers. This mirrors Rust-in-QEMU's BqlRefCell register
+/// pattern while using Machina's per-device locking primitive.
+pub struct DeviceRegs<T> {
+    inner: DeviceRefCell<T>,
+}
+
+impl<T> DeviceRegs<T> {
+    pub fn new(regs: T) -> Self {
+        Self {
+            inner: DeviceRefCell::new(regs),
+        }
+    }
+
+    pub fn borrow(&self) -> parking_lot::MutexGuard<'_, T> {
+        self.inner.borrow()
+    }
+
+    pub fn borrow_mut(&self) -> parking_lot::MutexGuard<'_, T> {
+        self.inner.borrow()
+    }
+
+    pub fn lock(&self) -> parking_lot::MutexGuard<'_, T> {
+        self.inner.borrow()
+    }
+
+    pub fn try_borrow(&self) -> Option<parking_lot::MutexGuard<'_, T>> {
+        self.inner.try_borrow()
+    }
+}
+
+impl<T: Default> Default for DeviceRegs<T> {
     fn default() -> Self {
         Self::new(T::default())
     }
