@@ -11,8 +11,9 @@ const FDT_END: u32 = 0x0000_0009;
 const FDT_VERSION: u32 = 17;
 const FDT_LAST_COMP_VERSION: u32 = 16;
 const FDT_HEADER_SIZE: u32 = 40;
-// One empty reservation entry: address(8) + size(8) = 16 bytes.
-const FDT_RSVMAP_SIZE: u32 = 16;
+// Each reservation entry is address(8) + size(8), followed by one empty
+// terminator entry.
+const FDT_RSVMAP_ENTRY_SIZE: u32 = 16;
 
 /// Builds a DTB (device tree blob) in memory.
 ///
@@ -26,6 +27,7 @@ const FDT_RSVMAP_SIZE: u32 = 16;
 /// let dtb = fdt.finish();
 /// ```
 pub struct FdtBuilder {
+    reservations: Vec<(u64, u64)>,
     strings: Vec<u8>,
     struct_buf: Vec<u8>,
     string_offsets: HashMap<String, u32>,
@@ -34,9 +36,17 @@ pub struct FdtBuilder {
 impl FdtBuilder {
     pub fn new() -> Self {
         Self {
+            reservations: Vec::new(),
             strings: Vec::new(),
             struct_buf: Vec::new(),
             string_offsets: HashMap::new(),
+        }
+    }
+
+    /// Add a memory reservation entry to the DTB reservation map.
+    pub fn reserve_memory(&mut self, address: u64, size: u64) {
+        if address != 0 || size != 0 {
+            self.reservations.push((address, size));
         }
     }
 
@@ -94,7 +104,9 @@ impl FdtBuilder {
         self.push_u32(FDT_END);
 
         let off_mem_rsvmap = FDT_HEADER_SIZE;
-        let off_dt_struct = off_mem_rsvmap + FDT_RSVMAP_SIZE;
+        let rsvmap_size =
+            (self.reservations.len() as u32 + 1) * FDT_RSVMAP_ENTRY_SIZE;
+        let off_dt_struct = off_mem_rsvmap + rsvmap_size;
         let off_dt_strings = off_dt_struct + self.struct_buf.len() as u32;
         let totalsize = off_dt_strings + self.strings.len() as u32;
 
@@ -115,8 +127,12 @@ impl FdtBuilder {
         // size_dt_struct
         blob.extend_from_slice(&(self.struct_buf.len() as u32).to_be_bytes());
 
-        // -- memory reservation map (one empty entry) --
-        blob.extend_from_slice(&[0u8; 16]);
+        // -- memory reservation map --
+        for (address, size) in &self.reservations {
+            blob.extend_from_slice(&address.to_be_bytes());
+            blob.extend_from_slice(&size.to_be_bytes());
+        }
+        blob.extend_from_slice(&[0u8; FDT_RSVMAP_ENTRY_SIZE as usize]);
 
         // -- structure block --
         blob.extend_from_slice(&self.struct_buf);

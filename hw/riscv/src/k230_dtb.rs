@@ -20,6 +20,12 @@ struct FdtNode {
     children: Vec<FdtNode>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FdtReservation {
+    pub address: u64,
+    pub size: u64,
+}
+
 struct FdtBlocks<'a> {
     structure: &'a [u8],
     strings: &'a [u8],
@@ -30,6 +36,7 @@ pub fn fixup_k230_dtb(
     initrd: Option<(u64, u64)>,
     cmdline: Option<&str>,
 ) -> Result<Vec<u8>, String> {
+    let reservations = dtb_mem_reservations(blob)?;
     let mut root = parse_dtb(blob)?;
 
     let chosen = ensure_child(&mut root, "chosen");
@@ -48,6 +55,9 @@ pub fn fixup_k230_dtb(
     }
 
     let mut builder = FdtBuilder::new();
+    for reservation in reservations {
+        builder.reserve_memory(reservation.address, reservation.size);
+    }
     emit_node(&mut builder, &root);
     Ok(builder.finish())
 }
@@ -79,6 +89,31 @@ pub fn dtb_chosen_bootargs(blob: &[u8]) -> Result<Option<String>, String> {
     Ok(Some(prop_as_string(&prop.data)?))
 }
 
+pub fn dtb_mem_reservations(
+    blob: &[u8],
+) -> Result<Vec<FdtReservation>, String> {
+    let off_mem_rsvmap = read_be32(blob, 16)? as usize;
+    let mut reservations = Vec::new();
+    let mut cursor = off_mem_rsvmap;
+
+    loop {
+        let address = read_be64(blob, cursor)?;
+        let size_offset = cursor
+            .checked_add(8)
+            .ok_or("DTB reservation map offset overflow")?;
+        let size = read_be64(blob, size_offset)?;
+        cursor = cursor
+            .checked_add(16)
+            .ok_or("DTB reservation map offset overflow")?;
+        if address == 0 && size == 0 {
+            break;
+        }
+        reservations.push(FdtReservation { address, size });
+    }
+
+    Ok(reservations)
+}
+
 pub fn test_fixture_dtb_with_sdhci_nodes() -> Vec<u8> {
     test_fixture_dtb_with_sdhci_nodes_and_bootargs("")
 }
@@ -86,7 +121,17 @@ pub fn test_fixture_dtb_with_sdhci_nodes() -> Vec<u8> {
 pub fn test_fixture_dtb_with_sdhci_nodes_and_bootargs(
     bootargs: &str,
 ) -> Vec<u8> {
+    test_fixture_dtb_with_sdhci_nodes_bootargs_and_reservations(bootargs, &[])
+}
+
+pub fn test_fixture_dtb_with_sdhci_nodes_bootargs_and_reservations(
+    bootargs: &str,
+    reservations: &[FdtReservation],
+) -> Vec<u8> {
     let mut fdt = FdtBuilder::new();
+    for reservation in reservations {
+        fdt.reserve_memory(reservation.address, reservation.size);
+    }
     fdt.begin_node("");
     fdt.property_u32("#address-cells", 2);
     fdt.property_u32("#size-cells", 2);
@@ -251,6 +296,11 @@ fn prop_as_string(data: &[u8]) -> Result<String, String> {
 fn read_be32(data: &[u8], offset: usize) -> Result<u32, String> {
     let bytes = checked_slice(data, offset, 4)?;
     Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_be64(data: &[u8], offset: usize) -> Result<u64, String> {
+    let bytes = checked_slice(data, offset, 8)?;
+    Ok(u64::from_be_bytes(bytes.try_into().unwrap()))
 }
 
 fn read_token(

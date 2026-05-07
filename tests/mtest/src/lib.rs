@@ -108,6 +108,36 @@ mod tests {
     }
 
     #[test]
+    fn k230_dtb_fixup_preserves_reservation_map() {
+        let reservations = [
+            machina_hw_riscv::k230_dtb::FdtReservation {
+                address: 0x8000_0000,
+                size: 0x20_0000,
+            },
+            machina_hw_riscv::k230_dtb::FdtReservation {
+                address: 0x0a10_0000,
+                size: 0x1000,
+            },
+        ];
+        let mut blob =
+            machina_hw_riscv::k230_dtb::test_fixture_dtb_with_sdhci_nodes_bootargs_and_reservations(
+                "console=ttyS0",
+                &reservations,
+            );
+        blob = machina_hw_riscv::k230_dtb::fixup_k230_dtb(
+            &blob,
+            Some((0x0a10_0000, 0x0a20_0000)),
+            Some("console=ttyS0,115200 earlycon=sbi cma=0"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            machina_hw_riscv::k230_dtb::dtb_mem_reservations(&blob).unwrap(),
+            reservations,
+        );
+    }
+
+    #[test]
     fn k230_loader_boot_places_sdk_payloads() {
         let dir = tempfile::tempdir().unwrap();
         let fw = dir.path().join("fw.uImage");
