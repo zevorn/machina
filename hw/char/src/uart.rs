@@ -19,18 +19,16 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use machina_core::address::GPA;
 use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::chardev::{
     ByteCb, CharFrontend, ChardevResolveError, ChardevResolver,
 };
 use machina_hw_core::irq::IrqLine;
-use machina_hw_core::mdev::{MDevice, MDeviceError};
+use machina_hw_core::mdev::MDeviceError;
 use machina_hw_core::property::{MPropertySpec, MPropertyType, MPropertyValue};
 use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 // IER bits
 const IER_RX_AVAIL: u8 = 1 << 0;
@@ -235,21 +233,10 @@ impl Uart16550 {
         }
     }
 
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
+    machina_hw_core::machina_parking_lot_sysbus_accessors!(
+        state,
+        lifecycle = manual
+    );
 
     pub fn attach_irq(&self, irq: IrqLine) -> Result<(), SysBusError> {
         self.state.lock().register_irq(irq)
@@ -346,17 +333,6 @@ impl Uart16550 {
         };
         let frontend = resolver.take_frontend(&path)?;
         Ok(Some((Some(path), frontend)))
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    /// Access the inner SysBusDeviceState as `&dyn MDevice`
-    /// through a closure (for MOM introspection).
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
     }
 
     pub fn reset_runtime(&self) {

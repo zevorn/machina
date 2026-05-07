@@ -1107,7 +1107,7 @@ LoongArch64 参考机器的用户可见名称是 `loongarch64-ref`，
 - UART、PLIC、ACLINT、virtio-mmio 的客户可见行为
 - sysbus unrealize / unmap 行为
 - machine 侧 migrated owner 集合
-- 防止回退到 direct root MMIO wiring 的源码级检查
+- 防止回退到 direct root MMIO wiring 和手写 MOM 设备 accessor 的源码级检查
 
 ### 7. 未来扩展点
 

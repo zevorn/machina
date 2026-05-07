@@ -73,6 +73,16 @@ const MOM_CORE_FILES: &[&str] = &[
 const QEMU_C_QOM_TERMS: &[&str] =
     &["ParentField", "ParentInit", "qom_isa", "ObjectType"];
 
+const HAND_WRITTEN_MOM_ACCESSORS: &[&str] = &[
+    "pub fn attach_to_bus",
+    "pub fn register_mmio",
+    "pub fn with_mdevice",
+    "pub fn object_info",
+    "pub fn realized",
+    "pub fn realize(self: &Arc<Self>)",
+    "pub fn unrealize(self: &Arc<Self>)",
+];
+
 #[test]
 fn translated_device_sources_do_not_use_unsafe() {
     let repo = repo_root();
@@ -159,6 +169,30 @@ fn ref_machine_mom_object_infos_use_object_tree_snapshot() {
     assert!(
         !body.contains("if let Some("),
         "RefMachine mom_object_infos must not hand-collect each optional device"
+    );
+}
+
+#[test]
+fn translated_devices_use_mom_accessor_helpers() {
+    let repo = repo_root();
+    let mut violations = Vec::new();
+
+    for file in DEVICE_SOURCE_FILES
+        .iter()
+        .copied()
+        .chain(["hw/virtio/src/mmio.rs"])
+    {
+        let content = std::fs::read_to_string(repo.join(file)).unwrap();
+        for accessor in HAND_WRITTEN_MOM_ACCESSORS {
+            if content.contains(accessor) {
+                violations.push(format!("{file}: {accessor}"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "translated device sources should use MOM accessor helper macros instead of hand-written forwarding: {violations:#?}"
     );
 }
 

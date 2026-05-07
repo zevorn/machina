@@ -1,14 +1,10 @@
 use std::sync::Arc;
 
 use machina_accel::timer::VirtualClock;
-use machina_core::address::GPA;
 use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 // Register offsets
 const AON_WDT_WDOGCFG: u64 = 0x00;
@@ -93,51 +89,11 @@ impl SiFiveEAon {
         *self.irq.lock() = Some(irq);
     }
 
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)?;
-        Ok(())
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.lower_irq();
-        self.state.lock().unrealize_from(bus, address_space)?;
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    #[must_use]
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
-    }
+    machina_hw_core::machina_parking_lot_sysbus_accessors!(
+        state,
+        irq = manual,
+        before_unrealize = lower_irq
+    );
 
     pub fn reset_runtime(&self) {
         self.regs.borrow().reset();

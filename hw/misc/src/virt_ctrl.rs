@@ -6,12 +6,8 @@
 
 use std::sync::Arc;
 
-use machina_core::address::GPA;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_hw_core::bus::SysBusDeviceState;
+use machina_memory::region::MmioOps;
 
 const REG_FEATURES: u64 = 0x00;
 const REG_CMD: u64 = 0x04;
@@ -58,52 +54,10 @@ impl VirtCtrl {
         *self.on_action.lock() = Some(handler);
     }
 
-    pub fn attach_to_bus(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        self: &Arc<Self>,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
+    machina_hw_core::machina_parking_lot_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         // No runtime state to reset.
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
     }
 
     pub fn do_read(&self, offset: u64, size: u32) -> u64 {

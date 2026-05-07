@@ -20,15 +20,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use machina_core::address::GPA;
 use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
 use machina_core::wfi::WfiWaker;
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::IrqLine;
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 const MSIP_BASE: u64 = 0x0000;
 const MTIMECMP_BASE: u64 = 0x4000;
@@ -102,56 +98,10 @@ impl Aclint {
         }
     }
 
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.cancel_timers();
-        self.lower_outputs();
-        {
-            let wk = self.wfi_waker.lock();
-            if let Some(ref w) = *wk {
-                w.clear_deadline();
-            }
-        }
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    /// Access the inner SysBusDeviceState as `&dyn MDevice`
-    /// through a closure (for MOM introspection).
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
-    }
+    machina_hw_core::machina_parking_lot_sysbus_accessors!(
+        state,
+        before_unrealize = [cancel_timers, lower_outputs, clear_wfi_deadline]
+    );
 
     pub fn connect_mti(&self, hart: u32, irq: IrqLine) {
         let mut outputs = self.mti_outputs.lock();
@@ -337,6 +287,13 @@ impl Aclint {
         let msi = self.msi_outputs.lock();
         for line in msi.iter().flatten() {
             line.lower();
+        }
+    }
+
+    fn clear_wfi_deadline(&self) {
+        let wk = self.wfi_waker.lock();
+        if let Some(ref w) = *wk {
+            w.clear_deadline();
         }
     }
 

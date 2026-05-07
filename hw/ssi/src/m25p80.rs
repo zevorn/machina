@@ -1,7 +1,4 @@
-use std::sync::Arc;
-
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::mdev::{MDeviceError, MDeviceState};
+use machina_hw_core::mdev::MDeviceState;
 use machina_hw_storage::{BlockBackend, FlashMedia};
 use parking_lot::Mutex;
 
@@ -352,26 +349,7 @@ impl<B: BlockBackend> M25p80<B> {
         }
     }
 
-    pub fn realize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().mark_realized()
-    }
-
-    pub fn unrealize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
-        let guard = self.state.lock();
-        f(&guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
+    machina_hw_core::machina_parking_lot_mdevice_accessors!(state);
 
     pub fn reset_runtime(&self) {
         self.regs

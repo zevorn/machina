@@ -1,8 +1,7 @@
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::mdev::{MDeviceError, MDeviceState};
+use machina_hw_core::mdev::MDeviceState;
 use machina_hw_i2c::{I2cError, I2cEvent, I2cSlave};
 
 const NVRAM_SIZE: usize = 64;
@@ -60,26 +59,7 @@ impl Ds1338 {
         }
     }
 
-    pub fn realize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().unwrap().mark_realized()
-    }
-
-    pub fn unrealize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().unwrap().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().unwrap().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
-        let guard = self.state.lock().unwrap();
-        f(&guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().unwrap().object_info()
-    }
+    machina_hw_core::machina_std_mutex_mdevice_accessors!(state);
 
     fn capture_current_time(&self) {
         // Simplified: set time registers from offset.

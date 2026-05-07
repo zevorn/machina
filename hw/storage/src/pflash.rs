@@ -1,11 +1,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use machina_core::address::GPA;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_hw_core::bus::SysBusDeviceState;
+use machina_memory::region::MmioOps;
 
 use crate::{BlockBackend, FlashMedia, StorageError};
 
@@ -127,46 +123,7 @@ impl<B: BlockBackend> PFlashCfi01<B> {
         })
     }
 
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        lock(&self.state).attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        lock(&self.state).register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        lock(&self.state).realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        lock(&self.state).unrealize_from(bus, address_space)
-    }
-
-    pub fn realized(&self) -> bool {
-        lock(&self.state).device().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = lock(&self.state);
-        f(&*guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        lock(&self.state).object_info()
-    }
+    machina_hw_core::machina_std_mutex_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         let mut regs = lock(&self.regs);
@@ -645,46 +602,7 @@ impl<B: BlockBackend> PFlashCfi02<B> {
         })
     }
 
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        lock(&self.state).attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        lock(&self.state).register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        lock(&self.state).realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        lock(&self.state).unrealize_from(bus, address_space)
-    }
-
-    pub fn realized(&self) -> bool {
-        lock(&self.state).device().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = lock(&self.state);
-        f(&*guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        lock(&self.state).object_info()
-    }
+    machina_hw_core::machina_std_mutex_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         let mut regs = lock(&self.regs);

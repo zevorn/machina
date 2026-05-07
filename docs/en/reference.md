@@ -1150,7 +1150,8 @@ The shared `tests` crate verifies:
 - UART, PLIC, ACLINT, and virtio-mmio guest-visible behavior
 - sysbus unrealize/unmap behavior
 - machine-visible migrated owner sets
-- source-level anti-regression checks against direct root MMIO wiring
+- source-level anti-regression checks against direct root MMIO wiring and
+  hand-written MOM device accessors
 
 ### 7. Future Extension Points
 

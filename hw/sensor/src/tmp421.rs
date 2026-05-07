@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::mdev::{MDeviceError, MDeviceState};
+use machina_hw_core::mdev::MDeviceState;
 use machina_hw_i2c::{I2cError, I2cEvent, I2cSlave};
 
 const MANUFACTURER_ID: u8 = 0x55;
@@ -136,26 +135,7 @@ impl Tmp421 {
         })
     }
 
-    pub fn realize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.mdevice.lock().mark_realized()
-    }
-
-    pub fn unrealize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.mdevice.lock().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.mdevice.lock().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
-        let guard = self.mdevice.lock();
-        f(&guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.mdevice.lock().object_info()
-    }
+    machina_hw_core::machina_parking_lot_mdevice_accessors!(mdevice);
 
     pub fn reset_runtime(&self) {
         *self.state.lock() = Tmp421State::new(self.model);

@@ -7,8 +7,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::mdev::{MDeviceError, MDeviceState};
+use machina_hw_core::mdev::MDeviceState;
 use machina_hw_ssi::{SpiCsPolarity, SpiSlave};
 
 use crate::{SdBus, SdRequest};
@@ -74,26 +73,7 @@ impl SsiSd {
         }
     }
 
-    pub fn realize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().unwrap().mark_realized()
-    }
-
-    pub fn unrealize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().unwrap().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().unwrap().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
-        let guard = self.state.lock().unwrap();
-        f(&guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().unwrap().object_info()
-    }
+    machina_hw_core::machina_std_mutex_mdevice_accessors!(state);
 
     pub fn connect_sd_bus(&self, bus: Arc<SdBus>) {
         *self.sd_bus.lock().unwrap() = Some(bus);
