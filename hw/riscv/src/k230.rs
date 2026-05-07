@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use machina_core::address::GPA;
-use machina_core::machine::{Machine, MachineOpts, MachineState};
+use machina_core::machine::{LoaderSpec, Machine, MachineOpts, MachineState};
 use machina_core::mobject::{MObject, MObjectInfo, MObjectTree};
 use machina_core::wfi::WfiWaker;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
@@ -399,6 +399,9 @@ pub struct K230Machine {
     pub(crate) bios_builtin: bool,
     pub(crate) kernel_path: Option<PathBuf>,
     pub(crate) initrd_path: Option<PathBuf>,
+    pub(crate) dtb_path: Option<PathBuf>,
+    pub(crate) loaders: Vec<LoaderSpec>,
+    dtb_blob: Option<Vec<u8>>,
     pub(crate) kernel_cmdline: Option<String>,
 }
 
@@ -429,6 +432,9 @@ impl K230Machine {
             bios_builtin: false,
             kernel_path: None,
             initrd_path: None,
+            dtb_path: None,
+            loaders: Vec::new(),
+            dtb_blob: None,
             kernel_cmdline: None,
         }
     }
@@ -489,6 +495,50 @@ impl K230Machine {
             .expect("machine not initialized")
     }
 
+    pub fn bios_path(&self) -> Option<&PathBuf> {
+        self.bios_path.as_ref()
+    }
+
+    pub fn kernel_path(&self) -> Option<&PathBuf> {
+        self.kernel_path.as_ref()
+    }
+
+    pub fn initrd_path(&self) -> Option<&PathBuf> {
+        self.initrd_path.as_ref()
+    }
+
+    pub fn dtb_path(&self) -> Option<&PathBuf> {
+        self.dtb_path.as_ref()
+    }
+
+    pub fn dtb_blob(&self) -> Option<&[u8]> {
+        self.dtb_blob.as_deref()
+    }
+
+    pub fn loaders(&self) -> &[LoaderSpec] {
+        &self.loaders
+    }
+
+    pub fn kernel_cmdline(&self) -> Option<&str> {
+        self.kernel_cmdline.as_deref()
+    }
+
+    pub fn set_dtb_blob(&mut self, blob: Vec<u8>) {
+        self.dtb_blob = Some(blob);
+    }
+
+    pub fn set_boot_cpu_pc(
+        &self,
+        pc: u64,
+        priv_level: machina_guest_riscv::riscv::csr::PrivLevel,
+    ) {
+        let mut cpus = self.cpus_lock();
+        if let Some(Some(cpu)) = cpus.get_mut(0) {
+            cpu.pc = pc;
+            cpu.set_priv(priv_level);
+        }
+    }
+
     pub fn ram_ptr(&self) -> *const u8 {
         self.ram_block().as_ptr() as *const u8
     }
@@ -513,6 +563,28 @@ impl K230Machine {
             std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
         }
         Ok(())
+    }
+
+    pub fn read_ram_bytes(
+        &self,
+        gpa: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let base = K230_MEMMAP[K230MemMap::Ddr as usize].base;
+        let offset = gpa.checked_sub(base).ok_or("address below K230 DDR")?;
+        let block = self.ram_block();
+        if offset + len as u64 > block.size() {
+            return Err("read exceeds K230 DDR".into());
+        }
+        let mut out = vec![0u8; len];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                block.as_ptr().add(offset as usize),
+                out.as_mut_ptr(),
+                len,
+            );
+        }
+        Ok(out)
     }
 
     pub fn mom_object_infos(&self) -> Vec<MObjectInfo> {
@@ -728,6 +800,9 @@ impl Machine for K230Machine {
         self.bios_builtin = opts.bios_builtin;
         self.kernel_path = opts.kernel.clone();
         self.initrd_path = opts.initrd.clone();
+        self.dtb_path = opts.dtb.clone();
+        self.loaders = opts.loaders.clone();
+        self.dtb_blob = None;
         self.kernel_cmdline = opts.append.clone();
 
         let mut cpus = Vec::with_capacity(opts.cpu_count as usize);
@@ -892,7 +967,7 @@ impl Machine for K230Machine {
     fn shutdown(&mut self) {}
 
     fn boot(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(())
+        crate::k230_boot::boot_k230(self)
     }
 
     fn cpu_count(&self) -> usize {
