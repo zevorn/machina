@@ -1,20 +1,20 @@
 [package]
-name = "machina-hw-sd"
+name = "machina-hw-watchdog"
 version.workspace = true
 edition.workspace = true
-description = "SD/MMC bus infrastructure for Machina device models"
+description = "Watchdog devices for Machina"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-keywords = ["riscv", "emulator", "sd", "mmc", "sdhci"]
+keywords = ["emulator", "watchdog"]
 categories = ["emulators", "hardware-support"]
 
 [dependencies]
 machina-core = { workspace = true }
 machina-hw-core = { workspace = true }
-machina-hw-ssi = { workspace = true }
-machina-hw-storage = { workspace = true }
+machina-hw-timer = { workspace = true }
 machina-memory = { workspace = true }
+parking_lot = { workspace = true }
 
 [lints]
 workspace = true

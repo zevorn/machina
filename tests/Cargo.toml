@@ -23,6 +23,9 @@ machina-hw-sd = { workspace = true }
 machina-hw-timer = { workspace = true }
 machina-hw-firmware = { workspace = true }
 machina-hw-storage = { workspace = true }
+machina-hw-dma = { workspace = true }
+machina-hw-sensor = { workspace = true }
+machina-hw-watchdog = { workspace = true }
 machina-hw-misc = { workspace = true }
 machina-hw-gpio = { workspace = true }
 machina-hw-rtc = { workspace = true }

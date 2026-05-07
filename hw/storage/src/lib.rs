@@ -12,6 +12,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+pub mod pflash;
+
 /// Typed storage error returned by all backend operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageError {

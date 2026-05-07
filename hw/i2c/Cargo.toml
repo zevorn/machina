@@ -12,6 +12,7 @@ categories = ["emulators", "hardware-support"]
 [dependencies]
 machina-core = { workspace = true }
 machina-hw-core = { workspace = true }
+machina-hw-storage = { workspace = true }
 
 [lints]
 workspace = true

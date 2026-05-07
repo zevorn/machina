@@ -8,6 +8,11 @@ use std::sync::{Arc, Mutex};
 
 use machina_core::device_cell::DeviceRefCell;
 
+pub mod card;
+pub mod pl181;
+pub mod sdhci;
+pub mod ssi_sd;
+
 /// Errors returned by SD bus operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SdError {

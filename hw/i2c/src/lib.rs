@@ -6,6 +6,9 @@
 
 use std::sync::{Arc, Mutex};
 
+pub mod eeprom_at24c;
+pub mod smbus_eeprom;
+
 /// I2C broadcast address.
 pub const I2C_BROADCAST: u8 = 0x00;
 

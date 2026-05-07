@@ -33,6 +33,9 @@ members = [
     "hw/timer",
     "hw/firmware",
     "hw/storage",
+    "hw/dma",
+    "hw/sensor",
+    "hw/watchdog",
     "hw/misc",
     "hw/gpio",
     "hw/rtc",
@@ -70,6 +73,9 @@ machina-hw-sd       = { version = "0.1.2", path = "hw/sd" }
 machina-hw-timer    = { version = "0.1.2", path = "hw/timer" }
 machina-hw-firmware = { version = "0.1.2", path = "hw/firmware" }
 machina-hw-storage  = { version = "0.1.2", path = "hw/storage" }
+machina-hw-dma      = { version = "0.1.2", path = "hw/dma" }
+machina-hw-sensor   = { version = "0.1.2", path = "hw/sensor" }
+machina-hw-watchdog = { version = "0.1.2", path = "hw/watchdog" }
 machina-hw-misc     = { version = "0.1.2", path = "hw/misc" }
 machina-hw-gpio     = { version = "0.1.2", path = "hw/gpio" }
 machina-hw-rtc      = { version = "0.1.2", path = "hw/rtc" }

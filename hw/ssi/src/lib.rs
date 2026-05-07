@@ -4,6 +4,7 @@
 //! the Synchronous Serial Interface bus model used by embedded
 //! peripherals (flash, sensors, SD card SPI mode).
 
+pub mod m25p80;
 pub mod pl022;
 pub mod sifive_spi;
 

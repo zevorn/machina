@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 machina-core = { workspace = true }
 machina-hw-core = { workspace = true }
+machina-memory = { workspace = true }
 libc = { workspace = true }
 
 [lints]
