@@ -62,6 +62,17 @@ const DEVICE_SOURCE_FILES: &[&str] = &[
     "hw/watchdog/src/lib.rs",
 ];
 
+const MOM_CORE_FILES: &[&str] = &[
+    "core/src/mobject.rs",
+    "hw/core/src/bus.rs",
+    "hw/core/src/mdev.rs",
+    "hw/core/src/reset.rs",
+    "hw/core/src/typeinfo.rs",
+];
+
+const QEMU_C_QOM_TERMS: &[&str] =
+    &["ParentField", "ParentInit", "qom_isa", "ObjectType"];
+
 #[test]
 fn translated_device_sources_do_not_use_unsafe() {
     let repo = repo_root();
@@ -100,6 +111,54 @@ fn translated_device_sources_do_not_embed_qemu_references() {
     assert!(
         violations.is_empty(),
         "translated device sources embed QEMU references: {violations:#?}"
+    );
+}
+
+#[test]
+fn mom_core_does_not_use_unsafe_or_qemu_c_qom_terms() {
+    let repo = repo_root();
+    let mut violations = Vec::new();
+
+    for file in MOM_CORE_FILES {
+        let content = std::fs::read_to_string(repo.join(file)).unwrap();
+        if contains_token(&content, "unsafe") {
+            violations.push(format!("{file}: unsafe"));
+        }
+        for term in QEMU_C_QOM_TERMS {
+            if content.contains(term) {
+                violations.push(format!("{file}: {term}"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "MOM core must stay safe Rust and avoid QEMU C QOM binding terms: {violations:#?}"
+    );
+}
+
+#[test]
+fn ref_machine_mom_object_infos_use_object_tree_snapshot() {
+    let repo = repo_root();
+    let content =
+        std::fs::read_to_string(repo.join("hw/riscv/src/ref_machine.rs"))
+            .unwrap();
+    let start = content
+        .find("fn mom_object_infos")
+        .expect("RefMachine has mom_object_infos");
+    let rest = &content[start..];
+    let end = rest
+        .find("\n    fn object_matches")
+        .expect("mom_object_infos is followed by object_matches");
+    let body = &rest[..end];
+
+    assert!(
+        body.contains("self.mom_tree.infos()"),
+        "RefMachine mom_object_infos must be generated from MObjectTree snapshot"
+    );
+    assert!(
+        !body.contains("if let Some("),
+        "RefMachine mom_object_infos must not hand-collect each optional device"
     );
 }
 

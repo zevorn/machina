@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts, MachineState};
-use machina_core::mobject::{MObject, MObjectInfo, MObjectNode};
+use machina_core::mobject::{MObject, MObjectInfo, MObjectNode, MObjectTree};
 use machina_core::wfi::WfiWaker;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_hw_char::uart::{Uart16550, Uart16550Mmio};
@@ -193,6 +193,7 @@ impl MmioOps for SifiveTestMmio {
 pub struct RefMachine {
     name: String,
     machine_state: MachineState,
+    mom_tree: MObjectTree,
     ram_size: u64,
     cpu_count: u32,
     chardev_root: Option<MObjectNode>,
@@ -232,9 +233,12 @@ pub struct RefMachine {
 
 impl RefMachine {
     pub fn new() -> Self {
+        let machine_state = MachineState::new_root("machine");
+        let mom_tree = Self::new_mom_tree(&machine_state);
         Self {
             name: "riscv64-ref".to_string(),
-            machine_state: MachineState::new_root("machine"),
+            machine_state,
+            mom_tree,
             ram_size: 0,
             cpu_count: 0,
             chardev_root: None,
@@ -297,6 +301,7 @@ impl RefMachine {
             sysbus,
             Some(as_),
         )?);
+        self.refresh_mom_tree();
         self.fdt_blob = Some(self.generate_fdt());
         Ok(())
     }
@@ -377,49 +382,80 @@ impl RefMachine {
     }
 
     fn mom_object_infos(&self) -> Vec<MObjectInfo> {
-        let mut infos = vec![self.machine_state.object().info()];
-        if let Some(chardev_root) = &self.chardev_root {
-            infos.push(chardev_root.object_info());
-        }
-        if let Some(sysbus) = &self.sysbus {
-            infos.push(sysbus.object_info());
-        }
-        if let Some(chardev) = &self.uart_chardev {
-            infos.push(chardev.lock().unwrap().object_info());
-        }
-        if let Some(plic) = &self.plic {
-            infos.push(plic.object_info());
-        }
-        if let Some(aclint) = &self.aclint {
-            infos.push(aclint.object_info());
-        }
-        if let Some(rtc) = &self.rtc {
-            infos.push(rtc.object_info());
-        }
-        if let Some(uart) = &self.uart {
-            infos.push(uart.object_info());
-        }
-        if let Some(fw_cfg) = &self.fw_cfg {
-            infos.push(fw_cfg.with_mdevice(|device| device.object_info()));
-        }
-        if let Some(sifive_test) = &self.sifive_test {
-            infos.push(sifive_test.with_mdevice(|device| device.object_info()));
-        }
-        if let Some(pflash0) = &self.pflash0 {
-            infos.push(pflash0.with_mdevice(|device| device.object_info()));
-        }
-        if let Some(virtio_mmio) = &self.virtio_mmio {
-            infos.push(virtio_mmio.object_info());
-        }
-        if let Some(ref net) = self.virtio_mmio_net {
-            infos.push(net.object_info());
-        }
-        infos
+        self.mom_tree.infos().cloned().collect()
     }
 
     fn object_matches(object_ref: &str, info: &MObjectInfo) -> bool {
         info.local_id == object_ref
             || info.object_path.as_deref() == Some(object_ref)
+    }
+
+    fn new_mom_tree(machine_state: &MachineState) -> MObjectTree {
+        let mut tree = MObjectTree::default();
+        tree.track_root(machine_state.object())
+            .expect("machine root must have an object path");
+        tree
+    }
+
+    fn refresh_mom_tree(&mut self) {
+        let mut tree = Self::new_mom_tree(&self.machine_state);
+        if let Some(chardev_root) = &self.chardev_root {
+            Self::track_mom_info(&mut tree, chardev_root.object_info());
+        }
+        if let Some(sysbus) = &self.sysbus {
+            Self::track_mom_info(&mut tree, sysbus.object_info());
+        }
+        if let Some(chardev) = &self.uart_chardev {
+            Self::track_mom_info(
+                &mut tree,
+                chardev.lock().unwrap().object_info(),
+            );
+        }
+        if let Some(plic) = &self.plic {
+            Self::track_mom_info(&mut tree, plic.object_info());
+        }
+        if let Some(aclint) = &self.aclint {
+            Self::track_mom_info(&mut tree, aclint.object_info());
+        }
+        if let Some(rtc) = &self.rtc {
+            Self::track_mom_info(&mut tree, rtc.object_info());
+        }
+        if let Some(uart) = &self.uart {
+            Self::track_mom_info(&mut tree, uart.object_info());
+        }
+        if let Some(fw_cfg) = &self.fw_cfg {
+            Self::track_mom_info(
+                &mut tree,
+                fw_cfg.with_mdevice(|device| device.object_info()),
+            );
+        }
+        if let Some(sifive_test) = &self.sifive_test {
+            Self::track_mom_info(
+                &mut tree,
+                sifive_test.with_mdevice(|device| device.object_info()),
+            );
+        }
+        if let Some(pflash0) = &self.pflash0 {
+            Self::track_mom_info(
+                &mut tree,
+                pflash0.with_mdevice(|device| device.object_info()),
+            );
+        }
+        if let Some(virtio_mmio) = &self.virtio_mmio {
+            Self::track_mom_info(&mut tree, virtio_mmio.object_info());
+        }
+        if let Some(ref net) = self.virtio_mmio_net {
+            Self::track_mom_info(&mut tree, net.object_info());
+        }
+        self.mom_tree = tree;
+    }
+
+    fn track_mom_info(tree: &mut MObjectTree, info: MObjectInfo) {
+        if info.object_path.is_none() {
+            return;
+        }
+        tree.track_info(info)
+            .expect("attached MOM object must have a path");
     }
 
     fn with_mdevice<T>(
@@ -1190,6 +1226,7 @@ impl Machine for RefMachine {
         }
 
         self.sysbus = Some(sysbus);
+        self.refresh_mom_tree();
 
         // Generate FDT.
         self.fdt_blob = Some(self.generate_fdt());

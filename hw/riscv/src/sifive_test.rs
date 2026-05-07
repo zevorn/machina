@@ -11,12 +11,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use machina_core::address::GPA;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_hw_core::bus::SysBusDeviceState;
+use machina_memory::region::MmioOps;
 
 const FINISHER_FAIL: u32 = 0x3333;
 const FINISHER_PASS: u32 = 0x5555;
@@ -52,52 +48,10 @@ impl SifiveTest {
         }
     }
 
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().unwrap().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().unwrap().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().unwrap().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state
-            .lock()
-            .unwrap()
-            .unrealize_from(bus, address_space)
-    }
+    machina_hw_core::machina_std_mutex_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         self.triggered.store(false, Ordering::SeqCst);
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().unwrap().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock().unwrap();
-        f(&*guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().unwrap().object_info()
     }
 
     /// Install a shutdown callback.
