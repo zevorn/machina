@@ -1,12 +1,85 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::Mutex;
 
+use machina_core::address::GPA;
+use machina_hw_core::bus::SysBus;
 use machina_hw_firmware::{
     dma_ctl, keys, FwCfg, FwCfgDataGenerator, FwCfgDmaAccess,
-    FwCfgDmaDescriptor,
+    FwCfgDmaDescriptor, FwCfgMmio,
 };
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
+
+fn make_test_aspace() -> (AddressSpace, SysBus) {
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let aspace = AddressSpace::new(root);
+    let bus = SysBus::new("sysbus");
+    (aspace, bus)
+}
 
 // -- Positive Tests --
+
+#[test]
+fn test_fw_cfg_lifecycle_and_mom_identity() {
+    let fw = FwCfg::new();
+    assert!(!fw.realized());
+    fw.with_mdevice(|device| assert_eq!(device.local_id(), "fw_cfg"));
+    assert_eq!(fw.object_info().local_id, "fw_cfg");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA::new(0x1010_0000);
+
+    fw.attach_to_bus(&mut bus).unwrap();
+    fw.register_mmio(
+        MemoryRegion::io(
+            "fw_cfg",
+            0x20,
+            Arc::new(FwCfgMmio::new(Arc::clone(&fw))),
+        ),
+        base,
+    )
+    .unwrap();
+
+    fw.realize_onto(&mut bus, &mut aspace).unwrap();
+    assert!(fw.realized());
+    aspace.write(GPA::new(base.0 + 0x08), 2, u64::from(keys::SIGNATURE));
+    assert_eq!(aspace.read(base, 4), 0x5145_4d55);
+
+    let err = fw.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(
+        err.to_string().contains("already realized"),
+        "unexpected second-realize error: {err}"
+    );
+
+    fw.unrealize_from(&mut bus, &mut aspace).unwrap();
+    assert!(!fw.realized());
+    assert_eq!(aspace.read(base, 4), 0);
+
+    let err = fw.unrealize_from(&mut bus, &mut aspace).unwrap_err();
+    assert!(
+        err.to_string().contains("not realized"),
+        "unexpected second-unrealize error: {err}"
+    );
+}
+
+#[test]
+fn test_fw_cfg_mmio_selector_and_data_window() {
+    let fw = FwCfg::new();
+    let mmio = FwCfgMmio::new(Arc::clone(&fw));
+
+    mmio.write(0x08, 2, u64::from(keys::SIGNATURE));
+
+    assert_eq!(mmio.read(0x00, 1), 0x51);
+    assert_eq!(mmio.read(0x00, 1), 0x45);
+    assert_eq!(mmio.read(0x00, 1), 0x4d);
+    assert_eq!(mmio.read(0x00, 1), 0x55);
+    assert_eq!(mmio.read(0x00, 1), 0);
+
+    mmio.write(0x08, 2, u64::from(keys::SIGNATURE));
+
+    assert_eq!(mmio.read(0x00, 4), 0x5145_4d55);
+}
 
 #[test]
 fn test_fw_cfg_new_has_signature() {
@@ -14,6 +87,28 @@ fn test_fw_cfg_new_has_signature() {
     assert!(fw.has_entry(keys::SIGNATURE));
     let entry = fw.get_entry(keys::SIGNATURE).unwrap();
     assert_eq!(entry.data, vec![0x51, 0x45, 0x4D, 0x55]);
+}
+
+#[test]
+fn test_fw_cfg_new_has_id_version_entry() {
+    let fw = FwCfg::new();
+
+    let entry = fw.get_entry(keys::ID).unwrap();
+
+    assert_eq!(entry.data, 1u32.to_le_bytes().to_vec());
+}
+
+#[test]
+fn test_fw_cfg_dma_enabled_updates_id_version_entry() {
+    let fw = FwCfg::new();
+
+    fw.set_dma_enabled(true);
+    let entry = fw.get_entry(keys::ID).unwrap();
+    assert_eq!(entry.data, 3u32.to_le_bytes().to_vec());
+
+    fw.set_dma_enabled(false);
+    let entry = fw.get_entry(keys::ID).unwrap();
+    assert_eq!(entry.data, 1u32.to_le_bytes().to_vec());
 }
 
 #[test]
@@ -560,6 +655,29 @@ impl FwCfgDmaAccess for DmaMem {
         data[start..end].copy_from_slice(&buf[..n]);
         Ok(n)
     }
+}
+
+#[test]
+fn test_fw_cfg_mmio_dma_address_write_triggers_dma() {
+    let fw = FwCfg::new();
+    fw.add_bytes(0x0042, vec![0xaa, 0xbb, 0xcc]);
+    fw.set_dma_enabled(true);
+
+    let mem = Arc::new(DmaMem::new(0x200));
+    let desc = FwCfgDmaDescriptor {
+        control: 0x0042_000A, // SELECT | READ, selector=0x0042
+        length: 3,
+        address: 0x100,
+    };
+    mem.put(0x20, &desc.encode());
+
+    let access: Arc<dyn FwCfgDmaAccess> = mem.clone();
+    let mmio = FwCfgMmio::with_dma_access(Arc::clone(&fw), access);
+
+    mmio.write(0x10, 8, 0x20);
+
+    assert_eq!(mem.bytes_at(0x100, 3), vec![0xaa, 0xbb, 0xcc]);
+    assert_eq!(mem.be32_at(0x20), 0);
 }
 
 #[test]

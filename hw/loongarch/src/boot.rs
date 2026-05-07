@@ -1,17 +1,25 @@
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 use flate2::read::GzDecoder;
 use machina_core::address::GPA;
 use machina_hw_core::fdt::FdtBuilder;
 use machina_hw_core::loader;
+use machina_hw_firmware::{keys, FwCfg};
 use machina_memory::AddressSpace;
 
-use crate::interrupt::{LOONGARCH_UART_PCH_IRQ, LOONGARCH_VIRTIO_PCH_IRQ_BASE};
+use crate::interrupt::{
+    LOONGARCH_RTC_PCH_IRQ, LOONGARCH_UART_PCH_IRQ,
+    LOONGARCH_VIRTIO_PCH_IRQ_BASE,
+};
 use crate::virt_machine::{
-    VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE, VIRT_IPI_BASE, VIRT_IPI_SIZE,
-    VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE, VIRT_RAM_BASE, VIRT_UART_BASE,
-    VIRT_UART_SIZE, VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE,
+    VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE, VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE,
+    VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE, VIRT_FWCFG_BASE, VIRT_FWCFG_SIZE,
+    VIRT_IPI_BASE, VIRT_IPI_SIZE, VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE,
+    VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE, VIRT_RAM_BASE, VIRT_RTC_BASE,
+    VIRT_RTC_SIZE, VIRT_UART_BASE, VIRT_UART_SIZE, VIRT_VIRTIO_BASE,
+    VIRT_VIRTIO_SIZE,
 };
 
 pub const KERNEL_ENTRY_DEFAULT: u64 = 0x9000_0000_0020_0000;
@@ -74,6 +82,7 @@ pub struct DirectKernelBootConfig<'a> {
     pub cmdline: Option<&'a str>,
     pub initrd_path: Option<&'a Path>,
     pub has_virtio_mmio: bool,
+    pub fw_cfg: Option<Arc<FwCfg>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -458,6 +467,10 @@ fn low_ram_reserved_ranges(ram_size: u64) -> Vec<(u64, u64)> {
         (VIRT_IPI_BASE, VIRT_IPI_SIZE),
         (VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE),
         (VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE),
+        (VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE),
+        (VIRT_RTC_BASE, VIRT_RTC_SIZE),
+        (VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE),
+        (VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE),
         (VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE),
         (VIRT_UART_BASE, VIRT_UART_SIZE),
     ];
@@ -597,6 +610,12 @@ fn build_fdt(
     property_reg(&mut fdt, &low_ram_usable_ranges(ram_size));
     fdt.end_node();
 
+    fdt.begin_node(&format!("fw_cfg@{VIRT_FWCFG_BASE:x}"));
+    fdt.property_string("compatible", "qemu,fw-cfg-mmio");
+    property_reg(&mut fdt, &[(VIRT_FWCFG_BASE, VIRT_FWCFG_SIZE)]);
+    fdt.property_bytes("dma-coherent", &[]);
+    fdt.end_node();
+
     fdt.begin_node(&format!("ipi@{VIRT_IPI_BASE:x}"));
     fdt.property_string("compatible", "loongson,ipi");
     property_reg(&mut fdt, &[(VIRT_IPI_BASE, VIRT_IPI_SIZE)]);
@@ -624,6 +643,32 @@ fn build_fdt(
     fdt.property_u32("#interrupt-cells", 2);
     fdt.property_u32("interrupt-parent", eiointc_phandle);
     fdt.property_u32("loongson,pic-base-vec", 0);
+    fdt.end_node();
+
+    fdt.begin_node(&format!("msi@{VIRT_PCH_MSI_BASE:x}"));
+    fdt.property_string("compatible", "loongson,pch-msi-1.0");
+    property_reg(&mut fdt, &[(VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE)]);
+    fdt.property_bytes("msi-controller", &[]);
+    fdt.property_u32("interrupt-parent", eiointc_phandle);
+    fdt.end_node();
+
+    fdt.begin_node(&format!("rtc@{VIRT_RTC_BASE:x}"));
+    fdt.property_string("compatible", "loongson,ls7a-rtc");
+    property_reg(&mut fdt, &[(VIRT_RTC_BASE, VIRT_RTC_SIZE)]);
+    fdt.property_u32_list("interrupts", &[LOONGARCH_RTC_PCH_IRQ, 4]);
+    fdt.property_u32("interrupt-parent", pch_pic_phandle);
+    fdt.end_node();
+
+    fdt.begin_node(&format!("flash@{VIRT_FLASH0_BASE:x}"));
+    fdt.property_string("compatible", "cfi-flash");
+    property_reg(
+        &mut fdt,
+        &[
+            (VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE),
+            (VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE),
+        ],
+    );
+    fdt.property_u32("bank-width", 4);
     fdt.end_node();
 
     fdt.begin_node(&format!("serial@{VIRT_UART_BASE:x}"));
@@ -696,6 +741,21 @@ fn build_initrd_table(initrd: (u64, u64)) -> Vec<u8> {
     push_le_u64(&mut table, 0, initrd.0);
     push_le_u64(&mut table, 8, initrd.1);
     table
+}
+
+fn fw_cfg_add_sized_bytes(
+    fw_cfg: &FwCfg,
+    size_key: u16,
+    data_key: u16,
+    data: Vec<u8>,
+    label: &str,
+) -> BootResult<()> {
+    let size = u32::try_from(data.len()).map_err(|_| {
+        format!("LoongArch fw_cfg {label} data exceeds 32-bit size field")
+    })?;
+    fw_cfg.add_i32(size_key, size);
+    fw_cfg.add_bytes(data_key, data);
+    Ok(())
 }
 
 fn plan_initrd(
@@ -845,6 +905,26 @@ fn write_boot_parameters(
     );
     let mut cmdline_bytes = cmdline.as_bytes().to_vec();
     cmdline_bytes.push(0);
+    if let Some(fw_cfg) = &config.fw_cfg {
+        if !cmdline.is_empty() {
+            fw_cfg_add_sized_bytes(
+                fw_cfg,
+                keys::CMDLINE_SIZE,
+                keys::CMDLINE_DATA,
+                cmdline_bytes.clone(),
+                "cmdline",
+            )?;
+        }
+        if let Some(plan) = &initrd_plan {
+            fw_cfg_add_sized_bytes(
+                fw_cfg,
+                keys::INITRD_SIZE,
+                keys::INITRD_DATA,
+                plan.data.clone(),
+                "initrd",
+            )?;
+        }
+    }
     load_binary_checked(
         &cmdline_bytes,
         cmdline_guest_addr,
@@ -886,6 +966,15 @@ pub fn load_direct_kernel(
 ) -> BootResult<DirectKernelBoot> {
     let kernel_file = std::fs::read(kernel_path)?;
     let kernel = unpack_efi_zboot_image(&kernel_file)?.unwrap_or(kernel_file);
+    if let Some(fw_cfg) = &config.fw_cfg {
+        fw_cfg_add_sized_bytes(
+            fw_cfg,
+            keys::KERNEL_SIZE,
+            keys::KERNEL_DATA,
+            kernel.clone(),
+            "kernel",
+        )?;
+    }
     let plan = if is_elf(&kernel) {
         analyze_elf_kernel(&kernel, VIRT_RAM_BASE, ram_size)?
     } else if let Some(header) = parse_linux_image_header(&kernel)? {

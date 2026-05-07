@@ -233,7 +233,7 @@ fn task39_translated_iocsr_routes_ipi_enable_mask_and_clear() {
 }
 
 #[test]
-fn task39_translated_iocsr_preserves_ipi_mailbox_widths() {
+fn task39_translated_iocsr_rejects_subword_ipi_mailbox_accesses() {
     let (ipi, _eiointc, bus) = make_bus(2);
     let mut cpu1 = cpu_with_id(1);
     bus.install_on(&mut cpu1);
@@ -243,8 +243,8 @@ fn task39_translated_iocsr_preserves_ipi_mailbox_widths() {
         iocsr_read(&mut cpu1, OP_IOCSRRD_D, 0x1020),
         0x1122_3344_5566_7788
     );
-    assert_eq!(iocsr_read(&mut cpu1, OP_IOCSRRD_B, 0x1021), 0x77);
-    assert_eq!(iocsr_read(&mut cpu1, OP_IOCSRRD_H, 0x1022), 0x5566);
+    assert_eq!(iocsr_read(&mut cpu1, OP_IOCSRRD_B, 0x1021), 0);
+    assert_eq!(iocsr_read(&mut cpu1, OP_IOCSRRD_H, 0x1022), 0);
     assert_eq!(iocsr_read(&mut cpu1, OP_IOCSRRD_W, 0x1024), 0x1122_3344);
 
     iocsr_write(&mut cpu1, OP_IOCSRWR_B, 0x1021, 0xaa);
@@ -253,9 +253,9 @@ fn task39_translated_iocsr_preserves_ipi_mailbox_widths() {
 
     assert_eq!(
         iocsr_read(&mut cpu1, OP_IOCSRRD_D, 0x1020),
-        0xdead_beef_bbcc_aa88
+        0xdead_beef_5566_7788
     );
-    assert_eq!(ipi.mmio_read_sized(1, 0x1020, 8), 0xdead_beef_bbcc_aa88);
+    assert_eq!(ipi.mmio_read_sized(1, 0x1020, 8), 0xdead_beef_5566_7788);
 }
 
 #[test]

@@ -8,7 +8,13 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use machina_core::address::GPA;
 use machina_core::device_cell::DeviceRefCell;
+use machina_core::mobject::{MObject, MObjectInfo};
+use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_hw_core::mdev::MDevice;
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
 
 /// Well-known fw_cfg selector keys.
 pub mod keys {
@@ -42,6 +48,15 @@ pub mod keys {
 
 /// Signature bytes returned for key 0x0000 (fw_cfg protocol).
 pub const FW_CFG_SIGNATURE: &[u8] = &[0x51, 0x45, 0x4D, 0x55];
+
+/// Base fw_cfg version reported through the ID entry.
+pub const FW_CFG_VERSION: u32 = 0x01;
+/// fw_cfg ID bit that reports DMA register support.
+pub const FW_CFG_VERSION_DMA: u32 = 0x02;
+
+const REG_DATA: u64 = 0x00;
+const REG_SELECTOR: u64 = 0x08;
+const REG_DMA_ADDR: u64 = 0x10;
 
 /// DMA control bits (fw_cfg ABI).
 pub mod dma_ctl {
@@ -95,7 +110,7 @@ impl FwCfgDmaDescriptor {
 }
 
 /// Trait for bounded memory access during DMA transfers.
-pub trait FwCfgDmaAccess {
+pub trait FwCfgDmaAccess: Send + Sync {
     /// Read `buf` from guest-physical `addr`.
     ///
     /// Returns the number of bytes read, or an error string.
@@ -138,6 +153,7 @@ pub trait FwCfgDataGenerator: Send + Sync {
 /// The fw_cfg interface — a registry of firmware configuration entries
 /// with IO-style selector/data access and DMA support.
 pub struct FwCfg {
+    state: Mutex<SysBusDeviceState>,
     entries: DeviceRefCell<BTreeMap<u16, FwCfgEntry>>,
     generators: DeviceRefCell<BTreeMap<u16, Box<dyn FwCfgDataGenerator>>>,
     cur_entry: Mutex<u16>,
@@ -149,11 +165,47 @@ pub struct FwCfg {
     selector_top: Mutex<bool>, // true = next write is hi byte
 }
 
+/// MMIO wrapper for the fw_cfg register window.
+pub struct FwCfgMmio {
+    fw: Arc<FwCfg>,
+    dma_access: Option<Arc<dyn FwCfgDmaAccess>>,
+}
+
+impl FwCfgMmio {
+    /// Create an MMIO wrapper without DMA backing.
+    #[must_use]
+    pub fn new(fw: Arc<FwCfg>) -> Self {
+        Self {
+            fw,
+            dma_access: None,
+        }
+    }
+
+    /// Create an MMIO wrapper with a DMA memory accessor.
+    #[must_use]
+    pub fn with_dma_access(
+        fw: Arc<FwCfg>,
+        dma_access: Arc<dyn FwCfgDmaAccess>,
+    ) -> Self {
+        Self {
+            fw,
+            dma_access: Some(dma_access),
+        }
+    }
+}
+
 impl FwCfg {
     /// Create a new fw_cfg instance.
     #[must_use]
     pub fn new() -> Arc<Self> {
+        Self::new_named("fw_cfg")
+    }
+
+    /// Create a new fw_cfg instance with a MOM local id.
+    #[must_use]
+    pub fn new_named(local_id: &str) -> Arc<Self> {
         let s = Arc::new(Self {
+            state: Mutex::new(SysBusDeviceState::new(local_id)),
             entries: DeviceRefCell::new(BTreeMap::new()),
             generators: DeviceRefCell::new(BTreeMap::new()),
             cur_entry: Mutex::new(0),
@@ -165,7 +217,62 @@ impl FwCfg {
         });
         // Signature entry is always present
         s.add_bytes(keys::SIGNATURE, FW_CFG_SIGNATURE.to_vec());
+        s.add_i32(keys::ID, FW_CFG_VERSION);
         s
+    }
+
+    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
+        self.state.lock().unwrap().attach_to_bus(bus)
+    }
+
+    pub fn register_mmio(
+        &self,
+        region: MemoryRegion,
+        base: GPA,
+    ) -> Result<(), SysBusError> {
+        self.state.lock().unwrap().register_mmio(region, base)
+    }
+
+    pub fn realize_onto(
+        &self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+    ) -> Result<(), SysBusError> {
+        self.state.lock().unwrap().realize_onto(bus, address_space)
+    }
+
+    pub fn unrealize_from(
+        &self,
+        bus: &mut SysBus,
+        address_space: &mut AddressSpace,
+    ) -> Result<(), SysBusError> {
+        self.state
+            .lock()
+            .unwrap()
+            .unrealize_from(bus, address_space)
+    }
+
+    #[must_use]
+    pub fn realized(&self) -> bool {
+        self.state.lock().unwrap().is_realized()
+    }
+
+    pub fn reset_runtime(&self) {
+        *self.cur_entry.lock().unwrap() = 0;
+        *self.cur_offset.lock().unwrap() = 0;
+        *self.selector_lo.lock().unwrap() = 0;
+        *self.selector_hi.lock().unwrap() = 0;
+        *self.selector_top.lock().unwrap() = false;
+    }
+
+    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
+        let guard = self.state.lock().unwrap();
+        f(&*guard)
+    }
+
+    #[must_use]
+    pub fn object_info(&self) -> MObjectInfo {
+        self.state.lock().unwrap().object_info()
     }
 
     /// Add a raw byte entry at the given key.
@@ -352,6 +459,9 @@ impl FwCfg {
     /// Enable or disable DMA.
     pub fn set_dma_enabled(&self, enabled: bool) {
         *self.dma_enabled.lock().unwrap() = enabled;
+        let version =
+            FW_CFG_VERSION | if enabled { FW_CFG_VERSION_DMA } else { 0 };
+        self.add_i32(keys::ID, version);
     }
 
     /// Return true if DMA is enabled.
@@ -496,5 +606,29 @@ impl FwCfg {
     #[must_use]
     pub fn entry_count(&self) -> usize {
         self.entries.borrow().len()
+    }
+}
+
+impl MmioOps for FwCfgMmio {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        match (offset, size) {
+            (REG_DATA, 1) => u64::from(self.fw.read_data_byte()),
+            (REG_DATA, 2) => u64::from(self.fw.read_data_word()),
+            (REG_DATA, 4) => u64::from(self.fw.read_data_dword()),
+            _ => 0,
+        }
+    }
+
+    fn write(&self, offset: u64, size: u32, value: u64) {
+        match (offset, size) {
+            (REG_SELECTOR, 1) => self.fw.write_selector_byte(value as u8),
+            (REG_SELECTOR, 2) => self.fw.set_selector(value as u16),
+            (REG_DMA_ADDR, 8) => {
+                if let Some(access) = &self.dma_access {
+                    let _ = self.fw.do_dma(value, access.as_ref());
+                }
+            }
+            _ => {}
+        }
     }
 }

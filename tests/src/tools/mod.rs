@@ -399,7 +399,7 @@ fn sifive_test_pass_clean_exit() {
     );
 }
 
-/// SiFive Test RESET: bare-metal kernel writes 0x3333,
+/// SiFive Test RESET: bare-metal kernel writes 0x7777,
 /// machina should reboot and re-enter execution loop.
 #[test]
 fn sifive_test_reset_reboots() {
