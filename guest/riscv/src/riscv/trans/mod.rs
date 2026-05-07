@@ -61,14 +61,65 @@ macro_rules! require_cfg {
 
 pub(super) fn decode_vendor_thead(
     ctx: &mut RiscvDisasContext,
-    _ir: &mut Context,
+    ir: &mut Context,
     insn: u32,
 ) -> bool {
     if !crate::riscv::vendor::thead::has_xthead(ctx.cfg) {
         return false;
     }
-    let _ = insn;
+
+    if is_xthead_cmo_hint(ctx, insn) {
+        return true;
+    }
+    if is_xthead_sync_hint(ctx, insn) {
+        let next = ctx.base.pc_next + ctx.cur_insn_len as u64;
+        let pc = ir.new_const(Type::I64, next);
+        ir.gen_mov(Type::I64, ctx.pc, pc);
+        ir.gen_exit_tb(TB_EXIT_NOCHAIN);
+        ctx.base.is_jmp = DisasJumpType::NoReturn;
+        return true;
+    }
+
     false
+}
+
+fn is_xthead_custom0_base(insn: u32) -> bool {
+    let opcode = insn & 0x7f;
+    let rd = (insn >> 7) & 0x1f;
+    let funct3 = (insn >> 12) & 0x7;
+    opcode == 0x0b && rd == 0 && funct3 == 0
+}
+
+fn is_xthead_cmo_hint(ctx: &RiscvDisasContext, insn: u32) -> bool {
+    if !ctx.cfg.ext_xtheadcmo || !is_xthead_custom0_base(insn) {
+        return false;
+    }
+
+    let rs1 = (insn >> 15) & 0x1f;
+    let rs2 = (insn >> 20) & 0x1f;
+    let funct7 = (insn >> 25) & 0x7f;
+    match funct7 {
+        0 => rs1 == 0 && matches!(rs2, 1 | 2 | 3 | 16 | 17 | 21 | 22 | 23),
+        1 => {
+            matches!(rs2, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 16 | 24)
+        }
+        _ => false,
+    }
+}
+
+fn is_xthead_sync_hint(ctx: &RiscvDisasContext, insn: u32) -> bool {
+    if !ctx.cfg.ext_xtheadsync || !is_xthead_custom0_base(insn) {
+        return false;
+    }
+
+    let rs1 = (insn >> 15) & 0x1f;
+    let rs2 = (insn >> 20) & 0x1f;
+    let funct7 = (insn >> 25) & 0x7f;
+    match funct7 {
+        0 => rs1 == 0 && matches!(rs2, 24..=27),
+        2 => true,
+        _ => false,
+    }
 }
 
 // ── Decode trait implementation ──────────────────────

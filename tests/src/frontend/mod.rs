@@ -12,7 +12,7 @@ mod riscv_zbs;
 use machina_accel::code_buffer::CodeBuffer;
 use machina_accel::ir::tb::{
     EXCP_EBREAK, EXCP_ECALL, EXCP_MRET, EXCP_SFENCE_VMA, EXCP_SRET, EXCP_UNDEF,
-    EXCP_WFI,
+    EXCP_WFI, TB_EXIT_NOCHAIN,
 };
 use machina_accel::ir::Context;
 use machina_accel::translate::translate_and_execute;
@@ -1682,6 +1682,36 @@ fn test_ext_c_insn_rejected_without_c() {
     };
     // C.LI x1, 42 — should fail without C extension
     let exit = run_rvc_with_cfg(&mut cpu, c_li(1, 42), cfg);
+    assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+#[test]
+fn test_thead_cmo_hint_accepted_with_xtheadcmo() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x0100_000b, RiscvCfg::THEAD_C908);
+    assert_ne!(exit, EXCP_UNDEF as usize);
+    assert_eq!(cpu.pc, 4);
+}
+
+#[test]
+fn test_thead_cmo_hint_rejected_without_xtheadcmo() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x0100_000b, cfg_rv64i_only());
+    assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+#[test]
+fn test_thead_sync_hint_exits_tb_with_xtheadsync() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x01b0_000b, RiscvCfg::THEAD_C908);
+    assert_eq!(exit, TB_EXIT_NOCHAIN as usize);
+    assert_eq!(cpu.pc, 4);
+}
+
+#[test]
+fn test_thead_sync_hint_rejected_without_xtheadsync() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x01b0_000b, cfg_rv64i_only());
     assert_eq!(exit, EXCP_UNDEF as usize);
 }
 
