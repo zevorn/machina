@@ -262,6 +262,10 @@ impl VirtioMmio {
     }
 
     fn read_locked(state: &VirtioMmioState, offset: u64, size: u32) -> u64 {
+        if offset < CONFIG_BASE && size != 4 {
+            return 0;
+        }
+
         match offset {
             MAGIC_VALUE => VIRTIO_MAGIC as u64,
             VERSION => VIRTIO_VERSION as u64,
@@ -316,7 +320,16 @@ impl VirtioMmio {
         }
     }
 
-    fn write_locked(state: &mut VirtioMmioState, offset: u64, val: u64) {
+    fn write_locked(
+        state: &mut VirtioMmioState,
+        offset: u64,
+        size: u32,
+        val: u64,
+    ) {
+        if offset < CONFIG_BASE && size != 4 {
+            return;
+        }
+
         let v32 = val as u32;
         match offset {
             DEVICE_FEATURES_SEL => {
@@ -437,7 +450,7 @@ impl VirtioMmio {
             }
             LEGACY_QUEUE_ALIGN => {}
             value if value >= CONFIG_BASE => {
-                state.device.config_write(value - CONFIG_BASE, 4, val);
+                state.device.config_write(value - CONFIG_BASE, size, val);
             }
             _ => {}
         }
@@ -450,9 +463,9 @@ impl MmioOps for VirtioMmio {
         Self::read_locked(&state, offset, size)
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
         let mut state = self.state.lock().unwrap();
-        Self::write_locked(&mut state, offset, val);
+        Self::write_locked(&mut state, offset, size, val);
     }
 }
 
@@ -464,9 +477,9 @@ impl MmioOps for VirtioMmioRegion {
         VirtioMmio::read_locked(&state, offset, size)
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
         let mut state = self.0.lock().unwrap();
-        VirtioMmio::write_locked(&mut state, offset, val);
+        VirtioMmio::write_locked(&mut state, offset, size, val);
     }
 }
 

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use memmap2::MmapMut;
 
-use crate::queue::{Desc, VirtQueue, VRING_DESC_F_WRITE};
+use crate::queue::{Desc, VirtQueue, MAX_QUEUE_SIZE, VRING_DESC_F_WRITE};
 use crate::VirtioDevice;
 
 const SECTOR_SIZE: u64 = 512;
@@ -22,6 +22,10 @@ const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
 // Feature bit.
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
+const VIRTIO_BLK_F_SEG_MAX: u64 = 1 << 2;
+const VIRTIO_BLK_F_BLK_SIZE: u64 = 1 << 6;
+const VIRTIO_BLK_F_TOPOLOGY: u64 = 1 << 10;
+const VIRTIO_BLK_SEG_MAX: u32 = MAX_QUEUE_SIZE - 2;
 
 /// VirtIO block device backed by a raw file.
 pub struct VirtioBlk {
@@ -227,6 +231,9 @@ impl VirtioDevice for VirtioBlk {
 
     fn features(&self) -> u64 {
         VIRTIO_F_VERSION_1
+            | VIRTIO_BLK_F_SEG_MAX
+            | VIRTIO_BLK_F_BLK_SIZE
+            | VIRTIO_BLK_F_TOPOLOGY
     }
 
     fn ack_features(&mut self, _features: u64) {}
@@ -241,6 +248,11 @@ impl VirtioDevice for VirtioBlk {
             0..=7 => {
                 let bytes = self.capacity.to_le_bytes();
                 read_sub(&bytes, offset as usize, size)
+            }
+            // seg_max (u32 at offset 12)
+            12..=15 => {
+                let bytes = VIRTIO_BLK_SEG_MAX.to_le_bytes();
+                read_sub(&bytes, (offset - 12) as usize, size)
             }
             // blk_size (u32 at offset 20)
             20..=23 => {

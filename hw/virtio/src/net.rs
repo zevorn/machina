@@ -12,6 +12,7 @@ use crate::VirtioDevice;
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
 const VIRTIO_NET_F_MRG_RXBUF: u64 = 1 << 15;
 const VIRTIO_NET_F_STATUS: u64 = 1 << 16;
+const VIRTIO_NET_F_MQ: u64 = 1 << 22;
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
 // VirtIO net header sizes (bytes).
@@ -302,13 +303,18 @@ impl VirtioDevice for VirtioNet {
         // Config space layout:
         //   0-5   : mac[6]
         //   6-7   : status (u16, 1 = link up)
-        //   8-9   : max_virtqueue_pairs (u16, 1)
+        //   8-9   : max_virtqueue_pairs (u16, 1) if MQ is advertised
         let mut buf = [0u8; 10];
         buf[..6].copy_from_slice(&self.mac);
         buf[6..8].copy_from_slice(&1u16.to_le_bytes());
         buf[8..10].copy_from_slice(&1u16.to_le_bytes());
 
-        read_sub(&buf, offset as usize, size)
+        let config_size = if self.features & VIRTIO_NET_F_MQ != 0 {
+            10
+        } else {
+            8
+        };
+        read_sub(&buf[..config_size], offset as usize, size)
     }
 
     fn reset(&mut self) {

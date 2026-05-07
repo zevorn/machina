@@ -96,10 +96,11 @@ fn test_net_config_status() {
 }
 
 #[test]
-fn test_net_config_max_vq_pairs() {
+fn test_net_config_max_vq_pairs_hidden_without_mq_feature() {
     let net = make_net();
+    assert_eq!(net.features() & (1 << 22), 0); // MQ not advertised
     let pairs = net.config_read(8, 2) as u16;
-    assert_eq!(pairs, 1);
+    assert_eq!(pairs, 0);
 }
 
 #[test]
