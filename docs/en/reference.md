@@ -948,10 +948,15 @@ temporary qdev bridge already used inside the codebase.
 The current first-cut MOM scope covers:
 
 - the root object layer (`mobject`)
+- object-tree lookup and metadata snapshots
 - the device layer (`mdev`)
 - executable sysbus realization and unrealize
 - a lightweight property surface
-- migrated platform devices: UART, PLIC, ACLINT, and virtio-mmio
+- type metadata and factory registration for MOM-managed devices
+- reset phase orchestration (`enter` / `hold` / `exit`)
+- ergonomic macros for common object/device/sysbus boilerplate
+- migrated platform devices: UART, PLIC, ACLINT, virtio-mmio, and
+  representative vertical slices for SiFive Test and TMP105
 
 ### 2. Layering
 
@@ -963,6 +968,9 @@ The current first-cut MOM scope covers:
 - It gives managed objects a local ID and object path
 - It enforces a strict parent/child tree
 - It is the reason `Machine` now participates in the object tree
+- `MObjectTree` keeps path lookup separate from the objects
+  themselves, so machine assembly can inspect identity without owning
+  device internals
 
 #### 2.2 `mdev`
 
@@ -978,7 +986,11 @@ The current first-cut MOM scope covers:
 `sysbus` is an executable assembly layer, not metadata only.
 
 - Devices must attach to a bus before realization
-- Devices must register MMIO regions before realization
+- Devices declare MMIO and IRQ resources before realization
+- Board code maps declared MMIO slots and connects declared IRQ slots
+  before realization
+- `register_mmio` and `register_irq` remain convenience wrappers for
+  simple devices that declare and wire in one call
 - Realization validates overlaps and maps regions into `AddressSpace`
 - Unrealize removes realized mappings from `AddressSpace` and the
   bus record
@@ -992,17 +1004,69 @@ The first MOM increment uses a small typed property layer.
 - Static-vs-dynamic mutability is explicit
 - UART uses a standard `chardev` link property on this surface
 
+#### 2.5 Type Metadata
+
+`typeinfo` is the Rust-side equivalent of QEMU's type metadata layer
+for the current MOM scope.
+
+- `MTypeInfo` records the type name, kind, parent type, property
+  schema, and optional factory
+- `MTypeRegistry` rejects duplicate types and can enforce that parent
+  types are registered before children
+- Device factories return `Box<dyn MDevice>` so tests and future
+  machine assembly can instantiate devices through metadata
+- Machina does not import QEMU C QOM layout mechanisms: no
+  `ParentField`, `ParentInit`, `Opaque`, `ObjectType`, C ABI layout
+  inheritance, unsafe upcast/downcast, or BQL synchronization premise
+
+#### 2.6 Reset
+
+`reset` models reset as a phase sequence, not as ad hoc per-device
+helpers.
+
+- `ResetType` distinguishes cold and warm reset
+- `MResetController` runs `reset_enter`, then `reset_hold`, then
+  `reset_exit` across all resettable devices
+- Reset remains a runtime-state operation; it does not rebuild sysbus
+  topology or object-tree membership
+
+#### 2.7 Ergonomic Macros
+
+The current macro layer follows the same intent as Rust-in-QEMU's
+attribute-heavy QOM work: device authors should not have to repeat
+trait forwarding and standard accessor glue.
+
+- `machina_impl_mobject!` implements `MObject` for direct
+  `MObjectState` fields
+- `machina_impl_mdevice!` implements `MObject` and `MDevice` for
+  direct `MDeviceState` fields
+- `machina_impl_sysbus_device!` implements the object/device traits
+  for direct `SysBusDeviceState` fields
+- `machina_std_mutex_sysbus_accessors!` covers the common
+  `std::sync::Mutex<SysBusDeviceState>` wrapper pattern
+- `machina_parking_lot_mdevice_accessors!` covers the common
+  `parking_lot::Mutex<MDeviceState>` wrapper pattern
+- `machina_property_specs!` declares typed property schema entries
+  with `default`, `required`, and `dynamic` semantics without hiding
+  the underlying `MPropertySpec`
+
+These are declarative macros for the first vertical slice. A later
+proc-macro or `#[derive]` layer can build on the same API once the
+object/type/reset boundaries are stable.
+
 ### 3. Device Lifecycle
 
 The migrated-device lifecycle is:
 
 1. Create the device object
 2. Attach to `sysbus`
-3. Register MMIO and any device-specific runtime wiring inputs
+3. Declare MMIO/IRQ resources and any device-specific runtime wiring
+   inputs
 4. Apply pre-realize properties
-5. Realize onto `AddressSpace`
-6. Reset runtime state without rebuilding topology
-7. Unrealize by tearing down runtime state and removing realized
+5. Board code maps MMIO slots and connects IRQ slots
+6. Realize onto `AddressSpace`
+7. Reset runtime state without rebuilding topology
+8. Unrealize by tearing down runtime state and removing realized
    mappings
 
 The key rule is that structural topology is created once and then
@@ -1041,6 +1105,15 @@ This keeps the transport/proxy boundary explicit and leaves room for
 future backend relationships without conflating them with machine
 assembly.
 
+#### 4.5 SiFive Test and TMP105
+
+- SiFive Test uses the standard mutex sysbus accessor macro while
+  keeping shutdown/reset behavior local to the device
+- TMP105 uses the parking-lot mdevice accessor macro while keeping I2C
+  register behavior local to the device
+- Both devices exercise MOM identity and lifecycle without requiring
+  each device file to hand-write the same forwarding methods
+
 ### 5. Reference Machine Assembly Rule
 
 `RefMachine` is the RISC-V reference machine that follows the MOM
@@ -1068,7 +1141,12 @@ machine-side topology source of truth.
 The shared `tests` crate verifies:
 
 - object attachment and lifecycle sequencing
+- type metadata registration and factory creation
+- object-tree path lookup
 - MMIO visibility only after realization
+- sysbus declare/map/connect behavior
+- reset phase ordering
+- object/device/sysbus macro ergonomics
 - UART, PLIC, ACLINT, and virtio-mmio guest-visible behavior
 - sysbus unrealize/unmap behavior
 - machine-visible migrated owner sets
@@ -1818,7 +1896,8 @@ for smoke/integration tests against the machina binary.
 | hw_aclint | 13 | ACLINT timer MMIO, IPI, mtime/mtimecmp |
 | hw_plic | 9 | PLIC priority, pending, enable, claim/complete |
 | hw_qdev | 8 | QDev object lifecycle, property, realize |
-| hw_sysbus | 7 | SysBus MMIO mapping, device attachment |
+| hw_mom | 9 | MOM type registry, reset phases, property/schema and ergonomic macros |
+| hw_sysbus | 11 | SysBus MMIO mapping, device attachment, declare/map/connect |
 | hw_irq | 7 | IRQ line raise/lower, sink/source wiring |
 | hw_chardev | 7 | Character device backend interface |
 | hw_clock | 6 | Clock frequency, scaling |
