@@ -15,6 +15,7 @@ pub enum MObjectError {
     EmptyLocalId,
     ParentDetached,
     ChildAlreadyAttached,
+    ChildHasChildren,
     DuplicateChildId(String),
     ChildPathMismatch,
 }
@@ -33,6 +34,9 @@ impl fmt::Display for MObjectError {
             }
             Self::ChildAlreadyAttached => {
                 write!(f, "child mobject is already attached to a parent")
+            }
+            Self::ChildHasChildren => {
+                write!(f, "child mobject has attached children")
             }
             Self::DuplicateChildId(id) => {
                 write!(
@@ -221,6 +225,9 @@ impl MObjectState {
         };
         if !self.child_paths.iter().any(|path| path == &child_path) {
             return Err(MObjectError::ChildPathMismatch);
+        }
+        if !child.child_paths.is_empty() {
+            return Err(MObjectError::ChildHasChildren);
         }
 
         self.child_paths.retain(|path| path != &child_path);

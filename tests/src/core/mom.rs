@@ -157,7 +157,7 @@ fn test_mobject_tree_tracks_attach_lookup_and_detach() {
 }
 
 #[test]
-fn test_mobject_tree_detach_removes_descendant_indexes() {
+fn test_mobject_tree_rejects_non_leaf_detach() {
     let mut root = TestObject::new_root("machine");
     let mut bus = TestObject::new_detached("bus0");
     let mut device = TestObject::new_detached("dev0");
@@ -173,10 +173,23 @@ fn test_mobject_tree_detach_removes_descendant_indexes() {
     assert!(tree.lookup("/machine/bus0").is_some());
     assert!(tree.lookup("/machine/bus0/dev0").is_some());
 
-    tree.detach_child(root.mobject_state_mut(), bus.mobject_state_mut())
-        .expect("detach bus through tree");
+    let err = tree
+        .detach_child(root.mobject_state_mut(), bus.mobject_state_mut())
+        .expect_err("non-leaf detach must fail");
+    assert_eq!(err, machina_core::mobject::MObjectError::ChildHasChildren);
+    assert_eq!(bus.object_path(), Some("/machine/bus0"));
+    assert_eq!(device.object_path(), Some("/machine/bus0/dev0"));
+    assert!(tree.lookup("/machine/bus0").is_some());
+    assert!(tree.lookup("/machine/bus0/dev0").is_some());
 
-    assert!(tree.lookup("/machine/bus0").is_none());
+    tree.detach_child(bus.mobject_state_mut(), device.mobject_state_mut())
+        .expect("detach leaf device through tree");
     assert!(tree.lookup("/machine/bus0/dev0").is_none());
+    assert!(device.object_path().is_none());
+
+    tree.detach_child(root.mobject_state_mut(), bus.mobject_state_mut())
+        .expect("detach leaf bus through tree");
+    assert!(tree.lookup("/machine/bus0").is_none());
     assert!(tree.lookup("/machine").unwrap().child_paths.is_empty());
+    assert!(bus.object_path().is_none());
 }
