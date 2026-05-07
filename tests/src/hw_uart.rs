@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
-use machina_hw_char::uart::{Uart16550, Uart16550Mmio};
+use machina_hw_char::uart::{Uart16550, Uart16550Mmio, Uart16550ShiftedMmio};
 use machina_hw_core::bus::SysBus;
 use machina_hw_core::chardev::{CharFrontend, Chardev};
 use machina_hw_core::irq::{IrqLine, IrqSink};
@@ -134,6 +134,22 @@ fn test_uart16550_mmio_rejects_accesses_larger_than_8_bytes() {
     mmio.write(7, 16, 0xa5);
 
     assert_eq!(uart.read(7), 0x5a);
+}
+
+#[test]
+fn test_uart16550_shifted_mmio_uses_register_stride() {
+    let uart = Arc::new(Uart16550::new());
+    let mmio = Uart16550ShiftedMmio::new(Arc::clone(&uart), 2);
+
+    assert_eq!(mmio.read(5 << 2, 4) & 0x60, 0x60);
+
+    mmio.write(3 << 2, 4, 0x80);
+    mmio.write(0, 4, 0x34);
+    mmio.write(1 << 2, 4, 0x12);
+
+    assert_eq!(uart.read(0), 0x34);
+    assert_eq!(uart.read(1), 0x12);
+    assert_eq!(mmio.read(3, 4), 0);
 }
 
 #[test]

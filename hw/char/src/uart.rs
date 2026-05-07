@@ -511,3 +511,44 @@ impl MmioOps for Uart16550Mmio {
         self.0.write(offset, val as u8);
     }
 }
+
+pub struct Uart16550ShiftedMmio {
+    uart: Arc<Uart16550>,
+    reg_shift: u8,
+}
+
+impl Uart16550ShiftedMmio {
+    pub fn new(uart: Arc<Uart16550>, reg_shift: u8) -> Self {
+        Self { uart, reg_shift }
+    }
+
+    fn reg_offset(&self, offset: u64) -> Option<u64> {
+        let stride = 1u64.checked_shl(self.reg_shift.into())?;
+        if stride == 0 || !offset.is_multiple_of(stride) {
+            return None;
+        }
+        let reg = offset / stride;
+        (reg < 8).then_some(reg)
+    }
+}
+
+impl MmioOps for Uart16550ShiftedMmio {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size > 8 {
+            return 0;
+        }
+        let Some(reg) = self.reg_offset(offset) else {
+            return 0;
+        };
+        self.uart.read(reg) as u64
+    }
+
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size > 8 {
+            return;
+        }
+        if let Some(reg) = self.reg_offset(offset) {
+            self.uart.write(reg, val as u8);
+        }
+    }
+}
