@@ -14,6 +14,10 @@ pub const K230_BOOTROM_SIZE: u64 =
 pub fn boot_k230(
     machine: &mut K230Machine,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if machine.bios_builtin {
+        return boot_k230_builtin(machine);
+    }
+
     if machine.initrd_path().is_some() && machine.dtb_path().is_none() {
         return Err("-initrd requires -dtb for the k230 machine".into());
     }
@@ -27,33 +31,66 @@ pub fn boot_k230(
     Ok(())
 }
 
+fn boot_k230_builtin(
+    machine: &mut K230Machine,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if machine.initrd_path().is_some() && machine.dtb_path().is_none() {
+        return Err("-initrd requires -dtb for the k230 machine".into());
+    }
+
+    let entry = load_kernel_at_ddr(machine)?;
+    let initrd_range = load_initrd(machine)?;
+    let fdt_addr = load_and_fix_user_dtb(machine, initrd_range)?;
+    apply_loaders(machine)?;
+    write_k230_halt(machine);
+    configure_builtin_sbi_entry(machine, entry, fdt_addr);
+    Ok(())
+}
+
+fn load_kernel_at_ddr(
+    machine: &K230Machine,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let Some(path) = machine.kernel_path() else {
+        return Err("builtin K230 boot requires -kernel".into());
+    };
+    load_image_at_ddr(machine, path)
+}
+
+fn load_image_at_ddr(
+    machine: &K230Machine,
+    path: &std::path::Path,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
+    let data = std::fs::read(path)?;
+    if data.starts_with(b"\x7fELF") {
+        let info = loader::load_elf(&data, ddr.base, machine.address_space())
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        Ok(info.entry.0)
+    } else {
+        loader::load_binary(
+            &data,
+            GPA::new(ddr.base),
+            machine.address_space(),
+        )?;
+        Ok(ddr.base)
+    }
+}
+
 fn load_bios_or_kernel(
     machine: &K230Machine,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
     if let Some(path) = machine
         .bios_path()
         .filter(|path| path.to_str() != Some("none"))
     {
-        let data = std::fs::read(path)?;
-        loader::load_binary(
-            &data,
-            GPA::new(ddr.base),
-            machine.address_space(),
-        )?;
-        return Ok(ddr.base);
+        return load_image_at_ddr(machine, path);
     }
 
     if let Some(path) = machine.kernel_path() {
-        let data = std::fs::read(path)?;
-        loader::load_binary(
-            &data,
-            GPA::new(ddr.base),
-            machine.address_space(),
-        )?;
-        return Ok(ddr.base);
+        return load_image_at_ddr(machine, path);
     }
 
+    let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
     Ok(ddr.base)
 }
 
@@ -156,5 +193,34 @@ fn write_k230_reset_vec(machine: &K230Machine, start_addr: u64, fdt_addr: u64) {
             let dst = ptr.add(index * 4);
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, 4);
         }
+    }
+}
+
+fn write_k230_halt(machine: &K230Machine) {
+    let halt: u32 = 0x0000_006f;
+    let bytes = halt.to_le_bytes();
+    let bootrom = machine.bootrom_block();
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), bootrom.as_ptr(), 4);
+    }
+}
+
+fn configure_builtin_sbi_entry(
+    machine: &K230Machine,
+    entry: u64,
+    fdt_addr: u64,
+) {
+    let mut cpus = machine.cpus_lock();
+    if let Some(Some(cpu)) = cpus.get_mut(0) {
+        cpu.pc = entry;
+        cpu.set_priv(PrivLevel::Supervisor);
+        cpu.gpr[10] = 0;
+        cpu.gpr[11] = fdt_addr;
+        cpu.csr.mideleg = 0x0222;
+        cpu.csr.medeleg = 0xb1ff;
+        cpu.csr.mie = 1 << 7;
+        cpu.csr.pmpaddr[0] = u64::MAX;
+        cpu.csr.pmpcfg[0] = 0x1f;
+        cpu.pmp.sync_from_csr(&cpu.csr.pmpcfg, &cpu.csr.pmpaddr);
     }
 }

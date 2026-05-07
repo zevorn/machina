@@ -476,6 +476,17 @@ impl RiscvRuntimeMachine for K230Machine {
     fn aclint_for_sbi(&self) -> Option<Arc<Aclint>> {
         Some(self.aclint().clone())
     }
+
+    fn set_quit_cb_if_supported(&mut self, cb: Arc<dyn Fn() + Send + Sync>) {
+        self.set_quit_cb(cb);
+    }
+
+    fn set_monitor_cb_if_supported(
+        &mut self,
+        cb: Arc<std::sync::Mutex<dyn FnMut(u8) + Send>>,
+    ) {
+        self.set_monitor_cb(cb);
+    }
 }
 
 /// Install a SIGSEGV handler that prints the last TB PC
@@ -916,13 +927,16 @@ fn main() {
         cli.ram_mib
     };
     let ram_size = ram_mib * 1024 * 1024;
+    let k230_default_sbi_boot =
+        cli.machine == "k230" && cli.bios.is_none() && cli.dtb.is_some();
+    let bios_builtin = cli.bios_builtin || k230_default_sbi_boot;
     let opts = MachineOpts {
         ram_size,
         cpu_count: 1,
         kernel: cli.kernel.clone(),
         dtb: cli.dtb.clone(),
         bios: cli.bios.clone(),
-        bios_builtin: cli.bios_builtin,
+        bios_builtin,
         append: cli.append.clone(),
         nographic: cli.nographic,
         drive: cli.drive.clone(),
@@ -981,7 +995,7 @@ fn main() {
             machina_hw_core::chardev::restore_terminal();
             process::exit(1);
         }
-        if cli.bios_builtin {
+        if bios_builtin {
             eprintln!(
                 "machina: --difftest is incompatible \
                  with -bios builtin"

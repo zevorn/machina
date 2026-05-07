@@ -10,9 +10,11 @@ use machina_core::mobject::{MObject, MObjectInfo, MObjectTree};
 use machina_core::wfi::WfiWaker;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::cpu_model::RiscvCpuModel;
-use machina_hw_char::uart::{Uart16550, Uart16550Mmio};
+use machina_hw_char::uart::{Uart16550, Uart16550ShiftedMmio};
 use machina_hw_core::bus::SysBus;
-use machina_hw_core::chardev::{CharFrontend, NullChardev};
+use machina_hw_core::chardev::{
+    ByteCb, CharFrontend, Chardev, NullChardev, StdioChardev,
+};
 use machina_hw_core::irq::{InterruptSource, IrqLine, IrqSink};
 use machina_hw_intc::aclint::{Aclint, AclintMmio};
 use machina_hw_intc::plic::{Plic, PlicIrqSink, PlicMmio};
@@ -403,6 +405,8 @@ pub struct K230Machine {
     pub(crate) loaders: Vec<LoaderSpec>,
     dtb_blob: Option<Vec<u8>>,
     pub(crate) kernel_cmdline: Option<String>,
+    quit_cb: Option<Arc<dyn Fn() + Send + Sync>>,
+    monitor_cb: Option<ByteCb>,
 }
 
 impl K230Machine {
@@ -436,6 +440,8 @@ impl K230Machine {
             loaders: Vec::new(),
             dtb_blob: None,
             kernel_cmdline: None,
+            quit_cb: None,
+            monitor_cb: None,
         }
     }
 
@@ -466,6 +472,14 @@ impl K230Machine {
             K230WdtIndex::Wdt0 => self.wdts.first(),
             K230WdtIndex::Wdt1 => self.wdts.get(1),
         }
+    }
+
+    pub fn set_quit_cb(&mut self, cb: Arc<dyn Fn() + Send + Sync>) {
+        self.quit_cb = Some(cb);
+    }
+
+    pub fn set_monitor_cb(&mut self, cb: ByteCb) {
+        self.monitor_cb = Some(cb);
     }
 
     pub fn cpus_lock(&self) -> MutexGuard<'_, Vec<Option<RiscvCpu>>> {
@@ -868,7 +882,7 @@ impl Machine for K230Machine {
             let region = MemoryRegion::io(
                 &name,
                 entry.size,
-                Arc::new(Uart16550Mmio(Arc::clone(&uart))),
+                Arc::new(Uart16550ShiftedMmio::new(Arc::clone(&uart), 2)),
             );
             uart.register_mmio(region, GPA::new(entry.base))?;
             uarts.push(uart);
@@ -912,7 +926,20 @@ impl Machine for K230Machine {
                     &plic,
                     K230IrqMap::UART0 + index as u32,
                 ))?;
-                uart.attach_chardev(CharFrontend::new(Box::new(NullChardev)))?;
+                let backend: Box<dyn Chardev + Send> =
+                    if index == 0 && opts.nographic {
+                        let mut sc = StdioChardev::new();
+                        if let Some(ref qcb) = self.quit_cb {
+                            sc.set_quit_cb(Arc::clone(qcb));
+                        }
+                        if let Some(ref mcb) = self.monitor_cb {
+                            sc.set_monitor_cb(Arc::clone(mcb));
+                        }
+                        Box::new(sc)
+                    } else {
+                        Box::new(NullChardev)
+                    };
+                uart.attach_chardev(CharFrontend::new(backend))?;
                 let uart_for_rx = Arc::clone(uart);
                 let rx_cb: Arc<Mutex<dyn FnMut(u8) + Send>> =
                     Arc::new(Mutex::new(move |byte: u8| {

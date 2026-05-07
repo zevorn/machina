@@ -224,5 +224,7 @@ mod tests {
         assert!(sdk.join("images/little-core/Image").is_file());
         assert!(sdk.join("images/little-core/k230.dtb").is_file());
         assert!(sdk.join("images/little-core/rootfs.cpio.gz").is_file());
+        assert!(sdk.join("images/little-core/fw_jump.bin").is_file());
+        assert!(sdk.join("little/uboot/u-boot").is_file());
     }
 }

@@ -1,5 +1,7 @@
+use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts};
 use machina_guest_riscv::riscv::cpu_model::RiscvVendor;
+use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_hw_riscv::k230::{
     K230IrqMap, K230Machine, K230MemMap, K230WdtIndex, K230_MEMMAP,
     K230_PLIC_NUM_SOURCES,
@@ -67,4 +69,46 @@ fn k230_machine_uses_thead_c908_cpu_profile() {
     let profile = cpu.profile();
     assert_eq!(profile.name, "thead-c908");
     assert_eq!(profile.vendor, RiscvVendor::Thead);
+}
+
+#[test]
+fn k230_boot_writes_reset_vector_and_sets_cpu_pc() {
+    let mut machine = K230Machine::new();
+    machine.init(&opts()).unwrap();
+    machine.boot().unwrap();
+
+    let bootrom = K230_MEMMAP[K230MemMap::Bootrom as usize];
+    let cpus = machine.cpus_lock();
+    let cpu = cpus[0].as_ref().unwrap();
+    assert_eq!(cpu.pc, bootrom.base);
+
+    let first_word =
+        machine.address_space().read(GPA::new(bootrom.base), 4) as u32;
+    assert_eq!(first_word, 0x0000_0297);
+}
+
+#[test]
+fn k230_builtin_boot_enters_kernel_in_supervisor_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = dir.path().join("Image");
+    std::fs::write(&kernel, [0x6f, 0x00, 0x00, 0x00]).unwrap();
+
+    let mut machine = K230Machine::new();
+    machine
+        .init(&MachineOpts {
+            kernel: Some(kernel),
+            bios: None,
+            bios_builtin: true,
+            ..opts()
+        })
+        .unwrap();
+    machine.boot().unwrap();
+
+    let cpus = machine.cpus_lock();
+    let cpu = cpus[0].as_ref().unwrap();
+    assert_eq!(cpu.pc, K230_MEMMAP[K230MemMap::Ddr as usize].base);
+    assert_eq!(cpu.priv_level, PrivLevel::Supervisor);
+    assert_eq!(cpu.gpr[10], 0);
+    assert_eq!(cpu.csr.medeleg, 0xb1ff);
+    assert_eq!(cpu.csr.mideleg, 0x0222);
 }
