@@ -272,14 +272,8 @@ impl QemuProbe {
         std::thread::sleep(settle_delay);
 
         // QEMU does not exit on stdin EOF alone — send SIGTERM.
-        if let Some(ref child) = self.child {
-            let pid = child.id() as libc::pid_t;
-            // SAFETY: kill(2) is async-signal-safe, pid is valid.
-            let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-            if rc != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(format!("send SIGTERM to {pid}: {err}"));
-            }
+        if let Some(child) = self.child.as_mut() {
+            terminate_qemu(child)?;
         }
 
         // Wait for QEMU to exit (SIGTERM triggers graceful shutdown /
@@ -320,12 +314,29 @@ impl Drop for QemuProbe {
     fn drop(&mut self) {
         self.stdin.take();
         if let Some(mut child) = self.child.take() {
-            let pid = child.id() as libc::pid_t;
-            // SAFETY: kill(2) is async-signal-safe, pid is valid.
-            let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
+            let _ = terminate_qemu(&mut child);
             let _ = child.wait();
         }
     }
+}
+
+#[cfg(unix)]
+fn terminate_qemu(child: &mut Child) -> Result<(), String> {
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: kill(2) is async-signal-safe, pid is valid while Child is alive.
+    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!("send SIGTERM to {pid}: {err}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_qemu(child: &mut Child) -> Result<(), String> {
+    child
+        .kill()
+        .map_err(|e| format!("terminate qemu process {}: {e}", child.id()))
 }
 
 /// Resolve the QEMU binary path for a given arch hint.

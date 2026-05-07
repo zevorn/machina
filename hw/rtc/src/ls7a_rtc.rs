@@ -349,31 +349,13 @@ impl MmioOps for Ls7aRtcMmio {
 
         let regs = self.0.regs.borrow();
         match offset {
-            SYS_TOYREAD0 => {
-                if regs.toy_enabled() {
-                    u64::from(regs.encode_toy())
-                } else {
-                    0
-                }
-            }
-            SYS_TOYREAD1 => {
-                if regs.toy_enabled() {
-                    u64::from(regs.toy_year)
-                } else {
-                    0
-                }
-            }
+            SYS_TOYREAD0 if regs.toy_enabled() => u64::from(regs.encode_toy()),
+            SYS_TOYREAD1 if regs.toy_enabled() => u64::from(regs.toy_year),
             SYS_TOYMATCH0 => u64::from(regs.toymatch[0]),
             SYS_TOYMATCH1 => u64::from(regs.toymatch[1]),
             SYS_TOYMATCH2 => u64::from(regs.toymatch[2]),
             SYS_RTCCTRL => u64::from(regs.cntrctl),
-            SYS_RTCREAD0 => {
-                if regs.rtc_enabled() {
-                    u64::from(regs.rtc_ticks())
-                } else {
-                    0
-                }
-            }
+            SYS_RTCREAD0 if regs.rtc_enabled() => u64::from(regs.rtc_ticks()),
             SYS_RTCMATCH0 => u64::from(regs.rtcmatch[0]),
             SYS_RTCMATCH1 => u64::from(regs.rtcmatch[1]),
             SYS_RTCMATCH2 => u64::from(regs.rtcmatch[2]),

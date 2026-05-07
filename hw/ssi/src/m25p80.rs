@@ -1138,10 +1138,8 @@ impl<B: BlockBackend> M25p80<B> {
                         bytes[1] & CONFIG_4BYTE_ADDR != 0;
                 }
             }
-            JEDEC_WINBOND => {
-                if len > 1 {
-                    regs.quad_enable = bytes[1] & STATUS2_QUAD_ENABLE != 0;
-                }
+            JEDEC_WINBOND if len > 1 => {
+                regs.quad_enable = bytes[1] & STATUS2_QUAD_ENABLE != 0;
             }
             JEDEC_ISSI => {
                 regs.quad_enable = bytes[0] & STATUS_QUAD_ENABLE != 0;

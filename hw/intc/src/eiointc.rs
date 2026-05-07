@@ -140,6 +140,7 @@ impl Eiointc {
         if irq >= NUM_IRQS as u32 {
             return;
         }
+        let route_cpu_count = self.route_cpu_count_for(0);
         {
             let mut regs = self.regs.borrow();
             let idx = (irq / 32) as usize;
@@ -149,7 +150,6 @@ impl Eiointc {
             } else {
                 regs.isr[idx] &= !bit;
             }
-            let route_cpu_count = self.hwi_outputs.lock().len().max(1) as u32;
             rebuild_core_isr(&mut regs, route_cpu_count);
         }
         self.update_outputs();
@@ -174,8 +174,9 @@ impl Eiointc {
 
     #[must_use]
     pub fn pending_for_cpu(&self, cpu_id: u32) -> u8 {
+        let route_cpu_count = self.route_cpu_count_for(cpu_id);
         let regs = self.regs.borrow();
-        hwi_bits_for_cpu(&regs, cpu_id, self.route_cpu_count_for(cpu_id))
+        hwi_bits_for_cpu(&regs, cpu_id, route_cpu_count)
     }
 
     #[must_use]

@@ -270,35 +270,33 @@ impl RiscvAplic {
         let mut update = false;
 
         match sc & APLIC_SOURCECFG_SM_MASK {
-            APLIC_SOURCECFG_SM_EDGE_RISE => {
+            APLIC_SOURCECFG_SM_EDGE_RISE
                 if level_int > 0
                     && (state & APLIC_ISTATE_INPUT) == 0
-                    && (state & APLIC_ISTATE_PENDING) == 0
-                {
-                    self.set_pending_raw(irq, true);
-                    update = true;
-                }
+                    && (state & APLIC_ISTATE_PENDING) == 0 =>
+            {
+                self.set_pending_raw(irq, true);
+                update = true;
             }
-            APLIC_SOURCECFG_SM_EDGE_FALL => {
+            APLIC_SOURCECFG_SM_EDGE_FALL
                 if level_int <= 0
                     && (state & APLIC_ISTATE_INPUT) != 0
-                    && (state & APLIC_ISTATE_PENDING) == 0
-                {
-                    self.set_pending_raw(irq, true);
-                    update = true;
-                }
+                    && (state & APLIC_ISTATE_PENDING) == 0 =>
+            {
+                self.set_pending_raw(irq, true);
+                update = true;
             }
-            APLIC_SOURCECFG_SM_LEVEL_HIGH => {
-                if level_int > 0 && (state & APLIC_ISTATE_PENDING) == 0 {
-                    self.set_pending_raw(irq, true);
-                    update = true;
-                }
+            APLIC_SOURCECFG_SM_LEVEL_HIGH
+                if level_int > 0 && (state & APLIC_ISTATE_PENDING) == 0 =>
+            {
+                self.set_pending_raw(irq, true);
+                update = true;
             }
-            APLIC_SOURCECFG_SM_LEVEL_LOW => {
-                if level_int <= 0 && (state & APLIC_ISTATE_PENDING) == 0 {
-                    self.set_pending_raw(irq, true);
-                    update = true;
-                }
+            APLIC_SOURCECFG_SM_LEVEL_LOW
+                if level_int <= 0 && (state & APLIC_ISTATE_PENDING) == 0 =>
+            {
+                self.set_pending_raw(irq, true);
+                update = true;
             }
             _ => {}
         }

@@ -866,13 +866,10 @@ impl<B: BlockBackend> PFlashCfi02<B> {
         cmd: u8,
     ) {
         match regs.cmd {
-            0x80 => {
-                if boff == u64::from(self.config.unlock_addr0) && cmd == 0xaa {
-                    regs.wcycle = 4;
-                } else {
-                    regs.bypass = false;
-                    Self::cfi02_reset(regs);
-                }
+            0x80 if boff == u64::from(self.config.unlock_addr0)
+                && cmd == 0xaa =>
+            {
+                regs.wcycle = 4;
             }
             0xa0 => {
                 if regs.erase_suspended
@@ -900,14 +897,9 @@ impl<B: BlockBackend> PFlashCfi02<B> {
                     Self::cfi02_reset(regs);
                 }
             }
-            0x90 => {
-                if boff == 0x55 && cmd == 0x98 {
-                    regs.wcycle = CFI02_WCYCLE_AUTOSELECT_CFI;
-                    regs.cmd = 0x98;
-                } else {
-                    regs.bypass = false;
-                    Self::cfi02_reset(regs);
-                }
+            0x90 if boff == 0x55 && cmd == 0x98 => {
+                regs.wcycle = CFI02_WCYCLE_AUTOSELECT_CFI;
+                regs.cmd = 0x98;
             }
             _ => {
                 regs.bypass = false;
@@ -1164,11 +1156,12 @@ fn validate_common(
 
 fn cfi01_table(config: &PFlashCfi01Config) -> [u8; CFI01_TABLE_LEN] {
     let mut table = [0; CFI01_TABLE_LEN];
-    let num_devices = if config.device_width == 0 {
-        1
-    } else {
-        u64::from(config.bank_width / config.device_width)
-    };
+    let num_devices = u64::from(
+        config
+            .bank_width
+            .checked_div(config.device_width)
+            .unwrap_or(1),
+    );
     let blocks_per_device = u64::from(config.num_blocks);
     let sector_len_per_device = config.sector_len / num_devices;
     let device_len = sector_len_per_device * blocks_per_device;
@@ -1204,11 +1197,12 @@ fn cfi01_table(config: &PFlashCfi01Config) -> [u8; CFI01_TABLE_LEN] {
 }
 
 fn cfi01_writeblock_size(config: &PFlashCfi01Config) -> u64 {
-    let num_devices = if config.device_width == 0 {
-        1
-    } else {
-        u64::from(config.bank_width / config.device_width)
-    };
+    let num_devices = u64::from(
+        config
+            .bank_width
+            .checked_div(config.device_width)
+            .unwrap_or(1),
+    );
     let base = if config.bank_width == 1 {
         1 << 8
     } else {
