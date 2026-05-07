@@ -222,26 +222,80 @@ fn write_probe_script_text_with_mode(
     dir: &std::path::Path,
     name: &str,
     script: &str,
-    mode: u32,
+    _mode: u32,
 ) -> std::path::PathBuf {
-    let path = dir.join(name);
-    let tmp_path = dir.join(format!("{name}.tmp"));
+    #[cfg(windows)]
     {
-        let mut f = std::fs::File::create(&tmp_path).unwrap();
-        f.write_all(script.as_bytes()).unwrap();
-        f.sync_all().unwrap();
+        let script_path = dir.join(format!("{name}.sh"));
+        let tmp_script_path = dir.join(format!("{name}.sh.tmp"));
+        {
+            let mut f = std::fs::File::create(&tmp_script_path).unwrap();
+            f.write_all(script.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::rename(&tmp_script_path, &script_path).unwrap();
+
+        let path = dir.join(format!("{name}.cmd"));
+        let tmp_path = dir.join(format!("{name}.cmd.tmp"));
+        let wrapper = format!(
+            "@echo off\r\nsh \"%~dp0{name}.sh\" %*\r\nexit /b %ERRORLEVEL%\r\n"
+        );
+        {
+            let mut f = std::fs::File::create(&tmp_path).unwrap();
+            f.write_all(wrapper.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::rename(&tmp_path, &path).unwrap();
+        path
     }
-    #[cfg(unix)]
+
+    #[cfg(not(windows))]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            &tmp_path,
-            std::fs::Permissions::from_mode(mode),
-        )
-        .unwrap();
+        let path = dir.join(name);
+        let tmp_path = dir.join(format!("{name}.tmp"));
+        {
+            let mut f = std::fs::File::create(&tmp_path).unwrap();
+            f.write_all(script.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &tmp_path,
+                std::fs::Permissions::from_mode(_mode),
+            )
+            .unwrap();
+        }
+        std::fs::rename(&tmp_path, &path).unwrap();
+        path
     }
-    std::fs::rename(&tmp_path, &path).unwrap();
-    path
+}
+
+fn shell_script_path(path: &std::path::Path) -> String {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy().replace('\\', "/");
+        let bytes = raw.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' {
+            let drive = (bytes[0] as char).to_ascii_lowercase();
+            return format!("/{drive}{}", &raw[2..]);
+        }
+        raw
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
+}
+
+fn shell_single_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn shell_script_arg(path: &std::path::Path) -> String {
+    shell_single_quote(&shell_script_path(path))
 }
 
 fn write_probe_script(
@@ -483,7 +537,7 @@ fn write_argv_logging_probe(
     let log_path = dir.join("argv.log");
     let script = format!(
         "#!/bin/sh\nprintf '%s\\0' \"$@\" >> {log}\n",
-        log = log_path.to_str().unwrap()
+        log = shell_script_arg(&log_path)
     );
     let script = script + "echo '{\"registers\":{},\"irqs\":{}}'\n";
     write_probe_script_text(dir, name, &script)
@@ -526,6 +580,7 @@ fn test_runtime_oracle_scenario_argv_separate() {
     assert_eq!(args, vec!["--probe", "scenario", "write LCR"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn test_runtime_oracle_perm_denied_returns_error() {
     let fixture = sample_fixture();
@@ -1171,7 +1226,7 @@ fn test_batch1_oracle_probe_argv_includes_device_name() {
     let log_path = dir.path().join("argv.log");
     let script = format!(
         "#!/bin/sh\nprintf '%s\\0' \"$@\" >> {log}\n",
-        log = log_path.to_str().unwrap()
+        log = shell_script_arg(&log_path)
     );
     let script = script + "echo '{\"registers\":{},\"irqs\":{}}'\n";
     let probe_path = write_probe_script_text(dir.path(), "probe", &script);
@@ -1217,7 +1272,7 @@ fn test_batch1_oracle_probe_argv_includes_device_name() {
 fn test_batch1_oracle_fake_probe_scenario_mismatch() {
     let dir = tempfile::TempDir::new().unwrap();
     let log_path = dir.path().join("argv.log");
-    let log = log_path.to_str().unwrap();
+    let log = shell_script_arg(&log_path);
     let script = format!(
         "#!/bin/sh
 printf '%s\\0' \"$@\" >> {log}
@@ -1776,7 +1831,7 @@ fn test_oracle_batch2_riscv_imsic() {
 fn test_batch2_oracle_fake_probe_scenario_mismatch() {
     let dir = tempfile::TempDir::new().unwrap();
     let log_path = dir.path().join("argv.log");
-    let log = log_path.to_str().unwrap();
+    let log = shell_script_arg(&log_path);
     let script = format!(
         "#!/bin/sh
 printf '%s\\0' \"$@\" >> {log}
