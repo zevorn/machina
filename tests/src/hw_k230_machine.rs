@@ -60,6 +60,29 @@ fn k230_machine_maps_real_devices_and_unimp_windows() {
 }
 
 #[test]
+fn k230_machine_rejects_ram_outside_fixed_ddr_window() {
+    let mut small = K230Machine::new();
+    let err = small
+        .init(&MachineOpts {
+            ram_size: 0x4000_0000,
+            ..opts()
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("K230 RAM size must be exactly 0x80000000 bytes"));
+
+    let mut large = K230Machine::new();
+    let err = large
+        .init(&MachineOpts {
+            ram_size: 0x8000_0000 + 1,
+            ..opts()
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("K230 RAM size must be exactly 0x80000000 bytes"));
+}
+
+#[test]
 fn k230_machine_uses_thead_c908_cpu_profile() {
     let mut machine = K230Machine::new();
     machine.init(&opts()).unwrap();

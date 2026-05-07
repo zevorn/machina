@@ -800,9 +800,9 @@ impl Machine for K230Machine {
         opts: &MachineOpts,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
-        if opts.ram_size < ddr.size {
+        if opts.ram_size != ddr.size {
             return Err(format!(
-                "K230 RAM size must be at least {:#x} bytes",
+                "K230 RAM size must be exactly {:#x} bytes",
                 ddr.size
             )
             .into());
