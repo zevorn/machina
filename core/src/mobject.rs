@@ -123,7 +123,10 @@ impl MObjectTree {
 
         parent.detach_child(child)?;
         self.objects.insert(parent_path, parent.info());
-        self.objects.remove(&child_path);
+        let child_path_prefix = format!("{child_path}/");
+        self.objects.retain(|path, _| {
+            path != &child_path && !path.starts_with(&child_path_prefix)
+        });
         Ok(())
     }
 

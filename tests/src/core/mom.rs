@@ -155,3 +155,28 @@ fn test_mobject_tree_tracks_attach_lookup_and_detach() {
     assert!(tree.lookup("/machine/uart0").is_none());
     assert!(tree.lookup("/machine").unwrap().child_paths.is_empty());
 }
+
+#[test]
+fn test_mobject_tree_detach_removes_descendant_indexes() {
+    let mut root = TestObject::new_root("machine");
+    let mut bus = TestObject::new_detached("bus0");
+    let mut device = TestObject::new_detached("dev0");
+    let mut tree = MObjectTree::default();
+
+    tree.track_root(root.mobject_state())
+        .expect("track root object");
+    tree.attach_child(root.mobject_state_mut(), bus.mobject_state_mut())
+        .expect("attach bus through tree");
+    tree.attach_child(bus.mobject_state_mut(), device.mobject_state_mut())
+        .expect("attach device through tree");
+
+    assert!(tree.lookup("/machine/bus0").is_some());
+    assert!(tree.lookup("/machine/bus0/dev0").is_some());
+
+    tree.detach_child(root.mobject_state_mut(), bus.mobject_state_mut())
+        .expect("detach bus through tree");
+
+    assert!(tree.lookup("/machine/bus0").is_none());
+    assert!(tree.lookup("/machine/bus0/dev0").is_none());
+    assert!(tree.lookup("/machine").unwrap().child_paths.is_empty());
+}

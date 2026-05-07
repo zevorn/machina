@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
 use machina_core::address::GPA;
@@ -382,6 +383,31 @@ fn test_reset_controller_rejects_reentrant_reset() {
         *observed.lock().unwrap(),
         Some("reset is already in progress".to_string())
     );
+}
+
+struct PanickingReset;
+
+impl Resettable for PanickingReset {
+    fn reset_hold(&self, _phase: ResetPhase) {
+        panic!("reset failed");
+    }
+}
+
+#[test]
+fn test_reset_controller_clears_reentrant_flag_after_panic() {
+    let controller = MResetController::default();
+    let device = PanickingReset;
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        controller
+            .reset([&device as &dyn Resettable], ResetType::Cold)
+            .expect("reset starts");
+    }));
+
+    assert!(result.is_err());
+    controller
+        .reset(std::iter::empty::<&dyn Resettable>(), ResetType::Warm)
+        .expect("reset controller must recover after panic");
 }
 
 struct TopologyMutationReset {

@@ -1806,7 +1806,7 @@ x3 不能作为测试寄存器，因为 QEMU 侧的 `la gp, save_area`
 | hw_aclint | 13 | ACLINT 定时器 MMIO、IPI、mtime/mtimecmp |
 | hw_plic | 9 | PLIC 优先级、pending、enable、claim/complete |
 | hw_qdev | 8 | QDev 对象生命周期、属性、realize |
-| hw_mom | 9 | MOM type registry、reset phase、property/schema 和易用性宏 |
+| hw_mom | 10 | MOM type registry、reset phase、property/schema 和易用性宏 |
 | hw_sysbus | 11 | SysBus MMIO 映射、设备挂载、declare/map/connect |
 | hw_irq | 7 | IRQ 线 raise/lower、sink/source 接线 |
 | hw_chardev | 7 | 字符设备后端接口 |

@@ -44,6 +44,16 @@ pub struct MResetController {
     in_reset: AtomicBool,
 }
 
+struct ResetGuard<'a> {
+    in_reset: &'a AtomicBool,
+}
+
+impl Drop for ResetGuard<'_> {
+    fn drop(&mut self) {
+        self.in_reset.store(false, Ordering::Release);
+    }
+}
+
 impl MResetController {
     pub fn reset<'a, I>(
         &self,
@@ -60,6 +70,9 @@ impl MResetController {
         {
             return Err(ResetError::Reentrant);
         }
+        let _guard = ResetGuard {
+            in_reset: &self.in_reset,
+        };
 
         let devices: Vec<&dyn Resettable> = devices.into_iter().collect();
         let phase = ResetPhase { reset_type };
@@ -73,7 +86,6 @@ impl MResetController {
         for device in &devices {
             device.reset_exit(phase);
         }
-        self.in_reset.store(false, Ordering::Release);
 
         Ok(())
     }
