@@ -80,12 +80,17 @@ pub struct GdbState {
     connected: AtomicBool,
     /// Per-CPU register snapshots (valid when paused).
     snapshots: Mutex<Vec<GdbCpuSnapshot>>,
+    /// Whether at least one real CPU snapshot has been
+    /// published by the exec loop.
+    snapshot_valid: AtomicBool,
     /// Number of vCPUs.
     cpu_count: AtomicUsize,
     /// Host pointer to guest RAM for memory access.
     ram_ptr: AtomicU64,
     /// Guest RAM size in bytes.
     ram_size: AtomicU64,
+    /// Guest RAM base address.
+    ram_base: AtomicU64,
     /// Guest RAM end (base + size).
     ram_end: AtomicU64,
     /// Host pointer to AddressSpace for MMIO.
@@ -133,9 +138,11 @@ impl GdbState {
             resume_cv: Condvar::new(),
             connected: AtomicBool::new(false),
             snapshots: Mutex::new(vec![GdbCpuSnapshot::default()]),
+            snapshot_valid: AtomicBool::new(false),
             cpu_count: AtomicUsize::new(1),
             ram_ptr: AtomicU64::new(0),
             ram_size: AtomicU64::new(0),
+            ram_base: AtomicU64::new(0),
             ram_end: AtomicU64::new(0),
             as_ptr: AtomicU64::new(0),
             watchpoint_count: AtomicUsize::new(0),
@@ -215,20 +222,26 @@ impl GdbState {
     ) {
         self.ram_ptr.store(ram_ptr as u64, Ordering::SeqCst);
         self.ram_size.store(ram_size, Ordering::SeqCst);
-        self.ram_end.store(ram_base + ram_size, Ordering::SeqCst);
+        self.ram_base.store(ram_base, Ordering::SeqCst);
+        self.ram_end
+            .store(ram_base.saturating_add(ram_size), Ordering::SeqCst);
         self.as_ptr.store(as_ptr, Ordering::SeqCst);
     }
 
     /// Read guest memory at physical address.
     pub fn read_memory(&self, addr: u64, len: usize) -> Vec<u8> {
         let ram_ptr = self.ram_ptr.load(Ordering::SeqCst);
+        let ram_base = self.ram_base.load(Ordering::SeqCst);
         let ram_end = self.ram_end.load(Ordering::SeqCst);
         let as_ptr = self.as_ptr.load(Ordering::SeqCst);
         if ram_ptr == 0 || len == 0 {
             return vec![0; len];
         }
-        let ram_base = 0x8000_0000u64; // RAM_BASE
-        if addr >= ram_base && addr + len as u64 <= ram_end {
+        if addr >= ram_base
+            && addr
+                .checked_add(len as u64)
+                .is_some_and(|end| end <= ram_end)
+        {
             let off = (addr - ram_base) as usize;
             let ptr = unsafe { (ram_ptr as *const u8).add(off) };
             let mut buf = vec![0u8; len];
@@ -243,7 +256,9 @@ impl GdbState {
             use machina_memory::address_space::AddressSpace;
             let as_ = unsafe { &*(as_ptr as *const AddressSpace) };
             for (i, byte) in buf.iter_mut().enumerate() {
-                *byte = as_.read(GPA::new(addr + i as u64), 1) as u8;
+                if let Some(pa) = addr.checked_add(i as u64) {
+                    *byte = as_.read(GPA::new(pa), 1) as u8;
+                }
             }
             buf
         } else {
@@ -254,13 +269,17 @@ impl GdbState {
     /// Write guest memory at physical address.
     pub fn write_memory(&self, addr: u64, data: &[u8]) -> bool {
         let ram_ptr = self.ram_ptr.load(Ordering::SeqCst);
+        let ram_base = self.ram_base.load(Ordering::SeqCst);
         let ram_end = self.ram_end.load(Ordering::SeqCst);
         let as_ptr = self.as_ptr.load(Ordering::SeqCst);
         if ram_ptr == 0 || data.is_empty() {
             return false;
         }
-        let ram_base = 0x8000_0000u64;
-        if addr >= ram_base && addr + data.len() as u64 <= ram_end {
+        if addr >= ram_base
+            && addr
+                .checked_add(data.len() as u64)
+                .is_some_and(|end| end <= ram_end)
+        {
             let off = (addr - ram_base) as usize;
             let ptr = unsafe { (ram_ptr as *mut u8).add(off) };
             unsafe {
@@ -272,7 +291,10 @@ impl GdbState {
             use machina_memory::address_space::AddressSpace;
             let as_ = unsafe { &*(as_ptr as *const AddressSpace) };
             for (i, &byte) in data.iter().enumerate() {
-                as_.write(GPA::new(addr + i as u64), 1, byte as u64);
+                let Some(pa) = addr.checked_add(i as u64) else {
+                    return false;
+                };
+                as_.write(GPA::new(pa), 1, byte as u64);
             }
             true
         } else {
@@ -303,6 +325,7 @@ impl GdbState {
         snap.priv_level = priv_level;
         snap.csr = csr.to_vec();
         snap.dirty = false;
+        self.snapshot_valid.store(true, Ordering::SeqCst);
     }
 
     /// Read the snapshot for the current "g" CPU.
@@ -471,9 +494,9 @@ impl GdbState {
             return None;
         }
         let inner = self.inner.lock().unwrap();
-        let access_end = addr + size as u64;
+        let access_end = addr.checked_add(size as u64)?;
         for (&wp_addr, &(wp_len, wtype)) in &inner.watchpoints {
-            let wp_end = wp_addr + wp_len as u64;
+            let wp_end = wp_addr.checked_add(wp_len as u64)?;
             if addr < wp_end && access_end > wp_addr {
                 let hit = match wtype {
                     WatchType::Write => is_write,
@@ -533,6 +556,20 @@ impl GdbState {
         if inner.state == GdbRunState::Paused {
             return;
         }
+        inner.state = GdbRunState::PauseRequested;
+    }
+
+    /// Force an attach-time pause handshake even when the
+    /// initial stub state is already Paused. This makes the
+    /// exec loop publish a real CPU snapshot before the GDB
+    /// server sends the initial stop reply.
+    fn request_attach_pause(&self) {
+        if self.snapshot_valid.load(Ordering::SeqCst)
+            && self.run_state() == GdbRunState::Paused
+        {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
         inner.state = GdbRunState::PauseRequested;
     }
 
@@ -899,7 +936,7 @@ pub fn serve(
     stream.set_nodelay(true)?;
 
     // Wait for CPU to be paused.
-    gs.request_pause();
+    gs.request_attach_pause();
     gs.wait_paused();
 
     let mut target = GdbStateTarget::new(gs);

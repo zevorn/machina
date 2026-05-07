@@ -1491,7 +1491,9 @@ fn gdb_read_phys(
         let mut buf = vec![0u8; len];
         let as_ = unsafe { &*(as_ptr as *const AddressSpace) };
         for (i, byte) in buf.iter_mut().enumerate() {
-            *byte = as_.read(GPA::new(pa + i as u64), 1) as u8;
+            if let Some(addr) = pa.checked_add(i as u64) {
+                *byte = as_.read(GPA::new(addr), 1) as u8;
+            }
         }
         buf
     } else {
@@ -1522,7 +1524,10 @@ fn gdb_write_phys(
     } else if as_ptr != 0 {
         let as_ = unsafe { &*(as_ptr as *const AddressSpace) };
         for (i, &byte) in data.iter().enumerate() {
-            as_.write(GPA::new(pa + i as u64), 1, byte as u64);
+            let Some(addr) = pa.checked_add(i as u64) else {
+                return false;
+            };
+            as_.write(GPA::new(addr), 1, byte as u64);
         }
         true
     } else {
