@@ -53,6 +53,8 @@ impl SmbusEepromState {
 }
 
 /// Byte-wide SMBus EEPROM.
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = mdevice, lock = "std")]
 pub struct SmbusEeprom<B: BlockBackend> {
     mdevice: Mutex<MDeviceState>,
     address: u8,
@@ -88,8 +90,6 @@ impl<B: BlockBackend> SmbusEeprom<B> {
             state: Mutex::new(SmbusEepromState::new()),
         })
     }
-
-    machina_hw_core::machina_std_mutex_mdevice_accessors!(mdevice);
 
     fn offset(&self, command: u8) -> u64 {
         u64::from(u16::from(command) % self.visible_size)

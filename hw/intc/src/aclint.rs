@@ -47,6 +47,8 @@ pub struct AclintRegs {
     msip: Vec<u32>,
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = [cancel_timers, lower_outputs, clear_wfi_deadline])]
 pub struct Aclint {
     // Setup-only state behind parking_lot::Mutex so that
     // attach_to_bus / register_mmio / realize_onto can be
@@ -97,11 +99,6 @@ impl Aclint {
             exit_requests: parking_lot::Mutex::new(vec![None; n]),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = [cancel_timers, lower_outputs, clear_wfi_deadline]
-    );
 
     pub fn connect_mti(&self, hart: u32, irq: IrqLine) {
         let mut outputs = self.mti_outputs.lock();

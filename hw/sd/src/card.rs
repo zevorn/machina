@@ -57,6 +57,8 @@ struct SdCardRegs {
     data_offset: usize,
 }
 
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = state, lock = "std")]
 pub struct SdMemoryCard<B: BlockBackend> {
     state: Mutex<MDeviceState>,
     media: BlockMedia<B>,
@@ -99,8 +101,6 @@ impl<B: BlockBackend> SdMemoryCard<B> {
             }),
         })
     }
-
-    machina_hw_core::machina_std_mutex_mdevice_accessors!(state);
 
     pub fn reset_runtime(&self) {
         let mut regs = self.regs.lock().unwrap();

@@ -50,6 +50,8 @@ struct SsiSdRegs {
     write_state: WriteState,
 }
 
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = state, lock = "std")]
 pub struct SsiSd {
     state: Mutex<MDeviceState>,
     regs: Mutex<SsiSdRegs>,
@@ -72,8 +74,6 @@ impl SsiSd {
             cs_index,
         }
     }
-
-    machina_hw_core::machina_std_mutex_mdevice_accessors!(state);
 
     pub fn connect_sd_bus(&self, bus: Arc<SdBus>) {
         *self.sd_bus.lock().unwrap() = Some(bus);

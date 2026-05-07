@@ -29,6 +29,8 @@ const PLLOUTDIV_DIV1: u32 = 1 << 8;
 
 pub const SIFIVE_E_PRCI_REG_SIZE: u64 = 0x1000;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct SifiveEPRCI {
     state: parking_lot::Mutex<SysBusDeviceState>,
     hfrosccfg: DeviceCell<u32>,
@@ -63,8 +65,6 @@ impl SifiveEPRCI {
             plloutdiv: DeviceCell::new(PLLOUTDIV_DIV1),
         })
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         self.hfrosccfg.set(HFROSCCFG_RDY | HFROSCCFG_EN);

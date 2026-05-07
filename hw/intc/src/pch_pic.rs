@@ -45,6 +45,8 @@ impl PchPicRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct PchPic {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<PchPicRegs>,
@@ -67,11 +69,6 @@ impl PchPic {
             irq_num: (irq_num as usize).clamp(1, NUM_IRQS),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_output(&self, output_irq: u32, irq: InterruptSource) {
         if output_irq as usize >= NUM_OUTPUTS {

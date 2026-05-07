@@ -17,6 +17,8 @@ pub enum GpioPwrAction {
 type ActionHandler =
     parking_lot::Mutex<Option<Box<dyn Fn(GpioPwrAction) + Send>>>;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot_child")]
 pub struct GpioPwr {
     state: parking_lot::Mutex<SysBusDeviceState>,
     on_action: ActionHandler,
@@ -62,6 +64,4 @@ impl GpioPwr {
     pub fn reset_runtime(&self) {
         // No runtime state to reset.
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_child_accessors!(state);
 }

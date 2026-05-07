@@ -98,6 +98,8 @@ impl Tmp421State {
     }
 }
 
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = mdevice, lock = "parking_lot")]
 pub struct Tmp421 {
     mdevice: parking_lot::Mutex<MDeviceState>,
     address: u8,
@@ -134,8 +136,6 @@ impl Tmp421 {
             state: parking_lot::Mutex::new(Tmp421State::new(model)),
         })
     }
-
-    machina_hw_core::machina_parking_lot_mdevice_accessors!(mdevice);
 
     pub fn reset_runtime(&self) {
         *self.state.lock() = Tmp421State::new(self.model);

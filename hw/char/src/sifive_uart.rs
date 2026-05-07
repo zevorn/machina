@@ -131,6 +131,8 @@ impl SiFiveUartRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", lifecycle = "manual")]
 pub struct SiFiveUart {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<SiFiveUartRegs>,
@@ -155,11 +157,6 @@ impl SiFiveUart {
             configured_chardev: parking_lot::Mutex::new(None),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        lifecycle = manual
-    );
 
     pub fn realize_onto(
         &self,

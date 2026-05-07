@@ -954,9 +954,10 @@ The current first-cut MOM scope covers:
 - a lightweight property surface
 - type metadata and factory registration for MOM-managed devices
 - reset phase orchestration (`enter` / `hold` / `exit`)
-- ergonomic macros for common object/device/sysbus boilerplate
-- migrated platform devices: UART, PLIC, ACLINT, virtio-mmio, and
-  representative vertical slices for SiFive Test and TMP105
+- ergonomic derive/attribute wrappers for common object/device/sysbus
+  boilerplate
+- migrated platform devices: all translated `hw` device sources use the
+  MOM derive/attribute entry points for standard accessors
 
 ### 2. Layering
 
@@ -1042,10 +1043,10 @@ trait forwarding and standard accessor glue.
   direct `MDeviceState` fields
 - `machina_impl_sysbus_device!` implements the object/device traits
   for direct `SysBusDeviceState` fields
-- `machina_std_mutex_sysbus_accessors!` covers the common
-  `std::sync::Mutex<SysBusDeviceState>` wrapper pattern
-- `machina_parking_lot_mdevice_accessors!` covers the common
-  `parking_lot::Mutex<MDeviceState>` wrapper pattern
+- The low-level sysbus and mdevice accessor helper macros cover the
+  standard `std::sync::Mutex`, `parking_lot::Mutex`, direct-state, and
+  sysbus-child wrapper patterns. They remain available as implementation
+  details for the derive layer.
 - `machina_property_specs!` declares typed property schema entries
   with `default`, `required`, and `dynamic` semantics without hiding
   the underlying `MPropertySpec`
@@ -1059,8 +1060,9 @@ trait forwarding and standard accessor glue.
   connects reset phases to device-local reset methods
 
 The derive layer is intentionally thin: it expands to the same
-declarative helper macros and typed schema builders, so existing devices
-can migrate incrementally without changing the underlying MOM semantics.
+declarative helper macros and typed schema builders. Device sources use
+the derive/attribute entry points, while the low-level helper macros stay
+inside `hw/core` as compatibility and implementation detail.
 
 ### 3. Device Lifecycle
 
@@ -1115,7 +1117,7 @@ assembly.
 
 #### 4.5 SiFive Test and TMP105
 
-- SiFive Test uses the standard mutex sysbus accessor macro while
+- SiFive Test uses the sysbus derive wrapper while
   keeping shutdown/reset behavior local to the device
 - TMP105 uses the mdevice derive wrapper while keeping I2C register
   behavior local to the device
@@ -1159,7 +1161,7 @@ The shared `tests` crate verifies:
 - sysbus unrealize/unmap behavior
 - machine-visible migrated owner sets
 - source-level anti-regression checks against direct root MMIO wiring and
-  hand-written MOM device accessors
+  hand-written or low-level-helper MOM device accessors
 
 ### 7. Future Extension Points
 

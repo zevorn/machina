@@ -52,6 +52,8 @@ impl CpcRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct Cpc {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<CpcRegs>,
@@ -111,8 +113,6 @@ impl Cpc {
     pub fn set_vp_action_cb(&self, cb: CpcVpActionCb) {
         *self.vp_action_cb.lock().unwrap() = Some(cb);
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         let mut regs = self.regs.borrow();

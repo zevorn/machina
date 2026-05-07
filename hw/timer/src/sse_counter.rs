@@ -111,6 +111,8 @@ impl SseCounterRegs {
 
 pub type CounterCallback = Box<dyn Fn() + Send + Sync>;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct SseCounter {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<SseCounterRegs>,
@@ -133,8 +135,6 @@ impl SseCounter {
             callbacks: parking_lot::Mutex::new(Vec::new()),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         let mut regs = self.regs.borrow();

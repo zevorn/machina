@@ -62,6 +62,8 @@ impl HtifRegs {
 
 pub type ExitCallback = Box<dyn Fn(i32) + Send + Sync>;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", lifecycle = "manual")]
 pub struct Htif {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<HtifRegs>,
@@ -86,11 +88,6 @@ impl Htif {
             exit_cb: parking_lot::Mutex::new(None),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        lifecycle = manual
-    );
 
     pub fn realize_onto(
         &self,

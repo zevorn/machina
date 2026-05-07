@@ -24,6 +24,8 @@ fn from_bcd(val: u8) -> u8 {
     ((val >> 4) & 0x0F) * 10 + (val & 0x0F)
 }
 
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = state, lock = "std")]
 pub struct Ds1338 {
     state: Mutex<MDeviceState>,
     /// Time offset from real time in seconds.
@@ -58,8 +60,6 @@ impl Ds1338 {
             i2c_address: address,
         }
     }
-
-    machina_hw_core::machina_std_mutex_mdevice_accessors!(state);
 
     fn capture_current_time(&self) {
         // Simplified: set time registers from offset.

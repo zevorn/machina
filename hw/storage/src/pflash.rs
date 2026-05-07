@@ -60,6 +60,8 @@ struct PFlashCfi01Buffer {
     bytes: Vec<u8>,
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "std", lock_fn = lock)]
 pub struct PFlashCfi01<B: BlockBackend> {
     state: Mutex<SysBusDeviceState>,
     flash: FlashMedia<B>,
@@ -122,8 +124,6 @@ impl<B: BlockBackend> PFlashCfi01<B> {
             }),
         })
     }
-
-    machina_hw_core::machina_std_mutex_sysbus_accessors!(state, lock = lock);
 
     pub fn reset_runtime(&self) {
         let mut regs = lock(&self.regs);
@@ -547,6 +547,8 @@ struct PFlashCfi02Regs {
     cfi_table: [u8; CFI02_TABLE_LEN],
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "std", lock_fn = lock)]
 pub struct PFlashCfi02<B: BlockBackend> {
     state: Mutex<SysBusDeviceState>,
     flash: FlashMedia<B>,
@@ -601,8 +603,6 @@ impl<B: BlockBackend> PFlashCfi02<B> {
             }),
         })
     }
-
-    machina_hw_core::machina_std_mutex_sysbus_accessors!(state, lock = lock);
 
     pub fn reset_runtime(&self) {
         let mut regs = lock(&self.regs);

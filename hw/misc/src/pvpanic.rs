@@ -27,6 +27,8 @@ pub const PVPANIC_MMIO_SIZE: u64 = 0x2;
 type EventHandler = parking_lot::Mutex<Option<Box<dyn Fn(u8) + Send>>>;
 
 /// Core pvpanic device — handles event dispatch and lifecycle.
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct Pvpanic {
     state: parking_lot::Mutex<SysBusDeviceState>,
     events: u8,
@@ -49,8 +51,6 @@ impl Pvpanic {
     pub fn set_event_handler(&self, handler: Box<dyn Fn(u8) + Send>) {
         *self.on_event.lock() = Some(handler);
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         // Runtime reset: no mutable runtime state to clear.

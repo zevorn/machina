@@ -32,6 +32,8 @@ impl IpiCore {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct LoongArchIpi {
     state: parking_lot::Mutex<SysBusDeviceState>,
     cores: DeviceRefCell<Vec<IpiCore>>,
@@ -53,11 +55,6 @@ impl LoongArchIpi {
             outputs: parking_lot::Mutex::new(empty_outputs(count)),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_output(&self, cpu_id: u32, irq: InterruptSource) {
         let cpu_id = cpu_id as usize;

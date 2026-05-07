@@ -83,6 +83,15 @@ const HAND_WRITTEN_MOM_ACCESSORS: &[&str] = &[
     "pub fn unrealize(self: &Arc<Self>)",
 ];
 
+const LOW_LEVEL_MOM_ACCESSOR_HELPERS: &[&str] = &[
+    "machina_std_mutex_sysbus_accessors!(",
+    "machina_parking_lot_sysbus_accessors!(",
+    "machina_direct_sysbus_accessors!(",
+    "machina_parking_lot_sysbus_child_accessors!(",
+    "machina_std_mutex_mdevice_accessors!(",
+    "machina_parking_lot_mdevice_accessors!(",
+];
+
 #[test]
 fn translated_device_sources_do_not_use_unsafe() {
     let repo = repo_root();
@@ -188,11 +197,16 @@ fn translated_devices_use_mom_accessor_helpers() {
                 violations.push(format!("{file}: {accessor}"));
             }
         }
+        for helper in LOW_LEVEL_MOM_ACCESSOR_HELPERS {
+            if content.contains(helper) {
+                violations.push(format!("{file}: {helper}"));
+            }
+        }
     }
 
     assert!(
         violations.is_empty(),
-        "translated device sources should use MOM accessor helper macros instead of hand-written forwarding: {violations:#?}"
+        "translated device sources should use MOM derive/attribute wrappers instead of hand-written forwarding or low-level accessor helpers: {violations:#?}"
     );
 }
 

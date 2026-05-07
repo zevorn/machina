@@ -336,6 +336,34 @@ impl DerivedSysBusFixture {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = device, lock = "direct", lifecycle = "manual")]
+struct DerivedDirectSysBusFixture {
+    device: SysBusDeviceState,
+}
+
+impl DerivedDirectSysBusFixture {
+    fn new(local_id: &str) -> Self {
+        Self {
+            device: SysBusDeviceState::new(local_id),
+        }
+    }
+}
+
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot_child")]
+struct DerivedSysBusChildFixture {
+    state: parking_lot::Mutex<SysBusDeviceState>,
+}
+
+impl DerivedSysBusChildFixture {
+    fn new(local_id: &str) -> Self {
+        Self {
+            state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
+        }
+    }
+}
+
 #[derive(machina_hw_core::MDevice)]
 #[mom(state = mdevice, lock = "parking_lot")]
 struct DerivedMDeviceFixture {
@@ -408,6 +436,27 @@ fn test_derive_macros_cover_common_device_wrappers() {
         .expect("map MMIO");
     sysbus.with_mdevice(|dev| assert_eq!(dev.local_id(), "uart0"));
     assert_eq!(sysbus.object_info().local_id, "uart0");
+
+    let mut direct = DerivedDirectSysBusFixture::new("virtio-mmio");
+    let slot = direct
+        .declare_mmio(MemoryRegion::io(
+            "virtio-mmio",
+            0x100,
+            Arc::new(NoopMmio),
+        ))
+        .expect("declare direct MMIO");
+    direct
+        .map_mmio(slot, GPA::new(0x1000_1000))
+        .expect("map direct MMIO");
+    assert!(!direct.realized());
+
+    let child = DerivedSysBusChildFixture::new("gpio-key");
+    let mut bus = SysBus::new("sysbus0");
+    child.attach_to_bus(&mut bus).expect("attach child");
+    child.realize().expect("realize child");
+    assert!(child.realized());
+    child.with_mdevice(|dev| assert_eq!(dev.local_id(), "gpio-key"));
+    assert_eq!(child.object_info().local_id, "gpio-key");
 
     let dev = DerivedMDeviceFixture::new("tmp105");
     assert!(!dev.realized());

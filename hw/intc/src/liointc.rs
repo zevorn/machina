@@ -45,6 +45,8 @@ fn parent_index(core: usize, ip: usize) -> usize {
     NUM_IPS * core + ip
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct Liointc {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<LiointcRegs>,
@@ -69,11 +71,6 @@ impl Liointc {
             }),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_output(&self, parent_idx: u32, irq: InterruptSource) {
         let mut outputs = self.outputs.lock();

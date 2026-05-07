@@ -76,6 +76,8 @@ impl Pl031Regs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct Pl031 {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<Pl031Regs>,
@@ -96,11 +98,6 @@ impl Pl031 {
             output: parking_lot::Mutex::new(None),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_output(&self, irq: InterruptSource) {
         *self.output.lock() = Some(irq);

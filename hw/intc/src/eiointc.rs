@@ -48,6 +48,8 @@ impl EiointcRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct Eiointc {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<EiointcRegs>,
@@ -69,11 +71,6 @@ impl Eiointc {
             hwi_outputs: parking_lot::Mutex::new(empty_hwi_outputs(num_cpus)),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_hwi_output(
         &self,

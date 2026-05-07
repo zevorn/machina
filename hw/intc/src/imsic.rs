@@ -43,6 +43,8 @@ fn aia_ireg_xlen(ireg: u64) -> u32 {
     ((ireg >> 24) & 0xff) as u32
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct RiscvImsic {
     state: parking_lot::Mutex<SysBusDeviceState>,
     #[allow(dead_code)]
@@ -90,11 +92,6 @@ impl RiscvImsic {
             hartid,
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_output(&self, page: u32, irq: InterruptSource) {
         let mut outputs = self.outputs.lock();

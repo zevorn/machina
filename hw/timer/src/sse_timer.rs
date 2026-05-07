@@ -86,6 +86,8 @@ impl SseTimerRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct SseTimer {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<SseTimerRegs>,
@@ -103,11 +105,6 @@ impl SseTimer {
             output: parking_lot::Mutex::new(None),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_output(&self, irq: InterruptSource) {
         *self.output.lock() = Some(irq);

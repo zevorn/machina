@@ -180,6 +180,8 @@ impl Uart16550Regs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", lifecycle = "manual")]
 pub struct Uart16550 {
     // Setup-only state behind parking_lot::Mutex so that
     // attach_to_bus / register_mmio / realize_onto can be
@@ -232,11 +234,6 @@ impl Uart16550 {
             _ => None,
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        lifecycle = manual
-    );
 
     pub fn attach_irq(&self, irq: IrqLine) -> Result<(), SysBusError> {
         self.state.lock().register_irq(irq)

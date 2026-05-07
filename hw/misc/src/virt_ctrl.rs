@@ -30,6 +30,8 @@ pub enum VirtCtrlAction {
 type ActionHandler =
     parking_lot::Mutex<Option<Box<dyn Fn(VirtCtrlAction) + Send>>>;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct VirtCtrl {
     state: parking_lot::Mutex<SysBusDeviceState>,
     on_action: ActionHandler,
@@ -53,8 +55,6 @@ impl VirtCtrl {
     ) {
         *self.on_action.lock() = Some(handler);
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         // No runtime state to reset.

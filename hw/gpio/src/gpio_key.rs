@@ -13,6 +13,8 @@ use machina_hw_core::irq::IrqLine;
 
 const GPIO_KEY_LATENCY_NS: i64 = 100_000_000; // 100ms
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot_child")]
 pub struct GpioKey {
     state: parking_lot::Mutex<SysBusDeviceState>,
     irq: IrqLine,
@@ -60,8 +62,6 @@ impl GpioKey {
     pub fn reset_runtime(&self) {
         self.cancel_timer();
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_child_accessors!(state);
 
     fn cancel_timer(&self) {
         let mut tid = self.timer_id.lock();

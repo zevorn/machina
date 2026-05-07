@@ -39,6 +39,8 @@ impl LedColor {
     }
 }
 
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct Led {
     state: parking_lot::Mutex<MDeviceState>,
     intensity: parking_lot::Mutex<u8>,
@@ -104,8 +106,6 @@ impl Led {
     pub fn gpio_active_high(&self) -> bool {
         self.gpio_active_high
     }
-
-    machina_hw_core::machina_parking_lot_mdevice_accessors!(state);
 
     pub fn reset_runtime(&self) {
         let initial = if self.gpio_active_high {

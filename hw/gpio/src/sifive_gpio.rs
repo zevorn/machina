@@ -222,6 +222,8 @@ impl SiFiveGpioRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct SiFiveGpio {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<SiFiveGpioRegs>,
@@ -241,11 +243,6 @@ impl SiFiveGpio {
             ),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_output(&self, pin: usize, irq: InterruptSource) {
         self.outputs.lock()[pin] = Some(irq);

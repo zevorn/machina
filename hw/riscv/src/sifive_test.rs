@@ -29,6 +29,8 @@ pub enum ShutdownReason {
 type ShutdownFn = Mutex<Option<Box<dyn Fn(ShutdownReason) + Send>>>;
 
 /// SiFive Test device state.
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "std")]
 pub struct SifiveTest {
     state: Mutex<SysBusDeviceState>,
     triggered: Arc<AtomicBool>,
@@ -47,8 +49,6 @@ impl SifiveTest {
             on_shutdown: Mutex::new(None),
         }
     }
-
-    machina_hw_core::machina_std_mutex_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         self.triggered.store(false, Ordering::SeqCst);

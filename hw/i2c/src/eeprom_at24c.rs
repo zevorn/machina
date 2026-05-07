@@ -77,6 +77,8 @@ impl At24cState {
 }
 
 /// Byte-addressed AT24C-compatible EEPROM.
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = mdevice, lock = "std")]
 pub struct At24cEeprom<B: BlockBackend> {
     mdevice: Mutex<MDeviceState>,
     backend: B,
@@ -107,8 +109,6 @@ impl<B: BlockBackend> At24cEeprom<B> {
             state: Mutex::new(At24cState::new()),
         })
     }
-
-    machina_hw_core::machina_std_mutex_mdevice_accessors!(mdevice);
 
     fn read_byte(&self, offset: u32) -> u8 {
         let mut byte = [0xff];

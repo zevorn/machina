@@ -40,6 +40,8 @@ pub fn derive_resettable(input: TokenStream) -> TokenStream {
 
 fn expand_sysbus_device(input: &DeriveInput) -> Result<TokenStream2> {
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) =
+        input.generics.split_for_impl();
     let args = MomArgs::parse(&input.attrs)?;
     let state = args.state_ident()?;
     let lock_kind = args.lock_kind()?;
@@ -49,6 +51,35 @@ fn expand_sysbus_device(input: &DeriveInput) -> Result<TokenStream2> {
             "lock_fn is only supported with lock = \"std\"",
         ));
     }
+    if lock_kind == LockKind::Direct {
+        if !args.lifecycle_manual || args.has_sysbus_hooks_or_irq_mode() {
+            return Err(Error::new(
+                state.span(),
+                "lock = \"direct\" requires lifecycle = \"manual\" and no sysbus hooks",
+            ));
+        }
+        return Ok(quote! {
+            impl #impl_generics #name #ty_generics #where_clause {
+                ::machina_hw_core::machina_direct_sysbus_accessors!(
+                    #state,
+                    lifecycle = manual
+                );
+            }
+        });
+    }
+    if lock_kind == LockKind::ParkingLotChild {
+        if args.has_sysbus_hooks_or_modes() || args.lock_fn.is_some() {
+            return Err(Error::new(
+                state.span(),
+                "lock = \"parking_lot_child\" supports only #[mom(state = ..., lock = ...)]",
+            ));
+        }
+        return Ok(quote! {
+            impl #impl_generics #name #ty_generics #where_clause {
+                ::machina_hw_core::machina_parking_lot_sysbus_child_accessors!(#state);
+            }
+        });
+    }
     let macro_name = match lock_kind {
         LockKind::ParkingLot => quote! {
             ::machina_hw_core::machina_parking_lot_sysbus_accessors
@@ -56,11 +87,12 @@ fn expand_sysbus_device(input: &DeriveInput) -> Result<TokenStream2> {
         LockKind::Std => quote! {
             ::machina_hw_core::machina_std_mutex_sysbus_accessors
         },
+        LockKind::Direct | LockKind::ParkingLotChild => unreachable!(),
     };
     let accessor = sysbus_accessor_invocation(&macro_name, state, &args)?;
 
     Ok(quote! {
-        impl #name {
+        impl #impl_generics #name #ty_generics #where_clause {
             #accessor
         }
     })
@@ -68,15 +100,25 @@ fn expand_sysbus_device(input: &DeriveInput) -> Result<TokenStream2> {
 
 fn expand_mdevice(input: &DeriveInput) -> Result<TokenStream2> {
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) =
+        input.generics.split_for_impl();
     let args = MomArgs::parse(&input.attrs)?;
     let state = args.state_ident()?;
-    let accessor = match args.lock_kind()? {
+    let lock_kind = args.lock_kind()?;
+    if matches!(lock_kind, LockKind::Direct | LockKind::ParkingLotChild) {
+        return Err(Error::new(
+            state.span(),
+            "MDevice derive supports only lock = \"std\" or lock = \"parking_lot\"",
+        ));
+    }
+    let accessor = match lock_kind {
         LockKind::ParkingLot => quote! {
             ::machina_hw_core::machina_parking_lot_mdevice_accessors!(#state);
         },
         LockKind::Std => quote! {
             ::machina_hw_core::machina_std_mutex_mdevice_accessors!(#state);
         },
+        LockKind::Direct | LockKind::ParkingLotChild => unreachable!(),
     };
 
     if args.has_sysbus_only_options() {
@@ -87,7 +129,7 @@ fn expand_mdevice(input: &DeriveInput) -> Result<TokenStream2> {
     }
 
     Ok(quote! {
-        impl #name {
+        impl #impl_generics #name #ty_generics #where_clause {
             #accessor
         }
     })
@@ -95,6 +137,8 @@ fn expand_mdevice(input: &DeriveInput) -> Result<TokenStream2> {
 
 fn expand_mproperties(input: &DeriveInput) -> Result<TokenStream2> {
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) =
+        input.generics.split_for_impl();
     let Data::Struct(data) = &input.data else {
         return Err(Error::new(
             input.span(),
@@ -115,7 +159,7 @@ fn expand_mproperties(input: &DeriveInput) -> Result<TokenStream2> {
         .collect::<Result<Vec<_>>>()?;
 
     Ok(quote! {
-        impl #name {
+        impl #impl_generics #name #ty_generics #where_clause {
             pub fn property_specs() -> ::std::vec::Vec<
                 ::machina_hw_core::property::MPropertySpec
             > {
@@ -127,13 +171,17 @@ fn expand_mproperties(input: &DeriveInput) -> Result<TokenStream2> {
 
 fn expand_resettable(input: &DeriveInput) -> Result<TokenStream2> {
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) =
+        input.generics.split_for_impl();
     let args = ResetArgs::parse(&input.attrs)?;
     let enter = reset_method("reset_enter", &args.enter);
     let hold = reset_method("reset_hold", &args.hold);
     let exit = reset_method("reset_exit", &args.exit);
 
     Ok(quote! {
-        impl ::machina_hw_core::reset::Resettable for #name {
+        impl #impl_generics ::machina_hw_core::reset::Resettable
+            for #name #ty_generics #where_clause
+        {
             #enter
             #hold
             #exit
@@ -510,14 +558,18 @@ impl MomArgs {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LockKind {
+    Direct,
     ParkingLot,
+    ParkingLotChild,
     Std,
 }
 
 impl LockKind {
     fn parse(value: &str, span: proc_macro2::Span) -> Result<Self> {
         match value {
+            "direct" => Ok(Self::Direct),
             "parking_lot" => Ok(Self::ParkingLot),
+            "parking_lot_child" => Ok(Self::ParkingLotChild),
             "std" => Ok(Self::Std),
             other => Err(Error::new(
                 span,

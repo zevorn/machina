@@ -39,6 +39,8 @@ const PLLCFG0_DEFAULT: u32 =
 
 pub const SIFIVE_U_PRCI_REG_SIZE: u64 = 0x1000;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct SifiveUPRCI {
     state: parking_lot::Mutex<SysBusDeviceState>,
     hfxosccfg: DeviceCell<u32>,
@@ -71,8 +73,6 @@ impl SifiveUPRCI {
             clkmuxstatus: DeviceCell::new(0),
         })
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         // Reference reset only assigns these five registers;

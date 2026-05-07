@@ -148,6 +148,8 @@ pub trait FwCfgDataGenerator: Send + Sync {
 
 /// The fw_cfg interface — a registry of firmware configuration entries
 /// with IO-style selector/data access and DMA support.
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "std")]
 pub struct FwCfg {
     state: Mutex<SysBusDeviceState>,
     entries: DeviceRefCell<BTreeMap<u16, FwCfgEntry>>,
@@ -216,8 +218,6 @@ impl FwCfg {
         s.add_i32(keys::ID, FW_CFG_VERSION);
         s
     }
-
-    machina_hw_core::machina_std_mutex_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         *self.cur_entry.lock().unwrap() = 0;

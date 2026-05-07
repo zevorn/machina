@@ -66,6 +66,8 @@ impl CmgcrRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct Cmgcr {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<CmgcrRegs>,
@@ -119,8 +121,6 @@ impl Cmgcr {
     pub fn set_vp_reset_base_cb(&self, cb: CpuResetBaseCb) {
         *self.vp_reset_base_cb.lock().unwrap() = Some(cb);
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(state);
 
     pub fn set_cpc_connected(&self, connected: bool) {
         self.regs.borrow().has_cpc = connected;

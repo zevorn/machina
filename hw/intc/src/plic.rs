@@ -32,6 +32,8 @@ pub struct PlicContexts {
     claim: Vec<u32>,
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct Plic {
     // Setup-only state behind parking_lot::Mutex so that
     // attach_to_bus / register_mmio / realize_onto can be
@@ -102,11 +104,6 @@ impl Plic {
             context_outputs: parking_lot::Mutex::new(outputs),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     /// Connect an output IRQ line for `ctx`.
     pub fn connect_context_output(&self, ctx: u32, irq: InterruptSource) {

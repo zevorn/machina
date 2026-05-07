@@ -131,6 +131,8 @@ fn is_bad_reg(addr: u64, allow_reserved: bool) -> bool {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_outputs)]
 pub struct SiFiveSpi {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<SiFiveSpiRegs>,
@@ -178,12 +180,6 @@ impl SiFiveSpi {
             lines[idx] = Some(irq);
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        irq = manual,
-        before_unrealize = lower_outputs
-    );
 
     pub fn reset_runtime(&self) {
         self.lower_outputs();

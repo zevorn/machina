@@ -61,6 +61,8 @@ impl Default for Pl080Regs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_outputs)]
 pub struct Pl080 {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: parking_lot::Mutex<Pl080Regs>,
@@ -83,12 +85,6 @@ impl Pl080 {
             ),
         })
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        irq = manual,
-        before_unrealize = lower_outputs
-    );
 
     pub fn reset_runtime(&self) {
         *self.regs.lock() = Pl080Regs::default();

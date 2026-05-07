@@ -7,6 +7,8 @@ use machina_memory::region::MmioOps;
 const VIRT_DINTC_BASE: u64 = 0x2FE0_0000;
 const NUM_MSGIS_WORDS: usize = 4;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct Dintc {
     state: parking_lot::Mutex<SysBusDeviceState>,
     #[allow(dead_code)]
@@ -39,11 +41,6 @@ impl Dintc {
             ]),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_output(&self, cpu_id: u32, irq: InterruptSource) {
         let mut outputs = self.outputs.lock();

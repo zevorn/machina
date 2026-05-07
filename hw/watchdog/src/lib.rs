@@ -55,6 +55,8 @@ impl Default for SbsaGwdtRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = [lower_irq, stop_timer])]
 pub struct SbsaGwdt {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: parking_lot::Mutex<SbsaGwdtRegs>,
@@ -98,12 +100,6 @@ impl SbsaGwdt {
             }
         })
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        irq = manual,
-        before_unrealize = [lower_irq, stop_timer]
-    );
 
     pub fn reset_runtime(&self) {
         *self.regs.lock() = SbsaGwdtRegs::default();

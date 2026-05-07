@@ -239,6 +239,8 @@ impl Pl011Regs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = drop_chardev)]
 pub struct Pl011 {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<Pl011Regs>,
@@ -267,11 +269,6 @@ impl Pl011 {
             configured_chardev: parking_lot::Mutex::new(None),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = drop_chardev
-    );
 
     pub fn attach_chardev(&self, fe: CharFrontend) -> Result<(), MDeviceError> {
         if self.state.lock().device().is_realized() {

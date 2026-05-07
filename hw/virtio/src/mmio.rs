@@ -152,6 +152,8 @@ impl VirtioMmioState {
 }
 
 /// VirtIO MMIO device wrapper implementing MmioOps.
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = device, lock = "direct", lifecycle = "manual")]
 pub struct VirtioMmio {
     device: SysBusDeviceState,
     state: Arc<Mutex<VirtioMmioState>>,
@@ -211,11 +213,6 @@ impl VirtioMmio {
     pub fn shared_state(&self) -> Arc<Mutex<VirtioMmioState>> {
         Arc::clone(&self.state)
     }
-
-    machina_hw_core::machina_direct_sysbus_accessors!(
-        device,
-        lifecycle = manual
-    );
 
     pub fn make_mmio_region(&self, name: &str, size: u64) -> MemoryRegion {
         MemoryRegion::io(

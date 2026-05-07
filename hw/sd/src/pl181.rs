@@ -119,6 +119,8 @@ impl Pl181Regs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "std")]
 pub struct Pl181 {
     state: Mutex<SysBusDeviceState>,
     regs: Mutex<Pl181Regs>,
@@ -145,8 +147,6 @@ impl Pl181 {
             }),
         }
     }
-
-    machina_hw_core::machina_std_mutex_sysbus_accessors!(state);
 
     pub fn connect_bus(&self, bus: Arc<SdBus>) {
         *self.bus.lock().unwrap() = Some(bus);

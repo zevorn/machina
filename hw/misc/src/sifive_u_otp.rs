@@ -101,6 +101,8 @@ impl SiFiveUOtpRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct SiFiveUOtp {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<SiFiveUOtpRegs>,
@@ -121,8 +123,6 @@ impl SiFiveUOtp {
             regs: DeviceRefCell::new(SiFiveUOtpRegs::new(serial)),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(state);
 
     pub fn reset_runtime(&self) {
         // OTP has no runtime reset state

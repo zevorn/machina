@@ -104,6 +104,8 @@ impl Pl022Regs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_irq)]
 pub struct Pl022 {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<Pl022Regs>,
@@ -137,12 +139,6 @@ impl Pl022 {
     pub fn connect_irq(&self, irq: InterruptSource) {
         *self.irq.lock() = Some(irq);
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        irq = manual,
-        before_unrealize = lower_irq
-    );
 
     pub fn reset_runtime(&self) {
         self.regs.borrow().reset();

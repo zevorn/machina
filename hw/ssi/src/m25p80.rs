@@ -318,6 +318,8 @@ impl M25p80Regs {
 }
 
 /// SPI NOR flash model for the m25p80-compatible command set.
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct M25p80<B: BlockBackend> {
     state: Mutex<MDeviceState>,
     cs_index: u8,
@@ -348,8 +350,6 @@ impl<B: BlockBackend> M25p80<B> {
             regs: Mutex::new(M25p80Regs::new(jedec_id[0], flash_size)),
         }
     }
-
-    machina_hw_core::machina_parking_lot_mdevice_accessors!(state);
 
     pub fn reset_runtime(&self) {
         self.regs

@@ -68,6 +68,8 @@ impl Default for SifivePdmaRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = lower_outputs)]
 pub struct SifivePdma {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: parking_lot::Mutex<SifivePdmaRegs>,
@@ -90,12 +92,6 @@ impl SifivePdma {
             dma_address_space: parking_lot::Mutex::new(None),
         })
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        irq = manual,
-        before_unrealize = lower_outputs
-    );
 
     pub fn reset_runtime(&self) {
         *self.regs.lock() = SifivePdmaRegs::default();

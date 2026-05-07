@@ -27,6 +27,8 @@ impl PchMsiRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct PchMsi {
     state: parking_lot::Mutex<SysBusDeviceState>,
     regs: DeviceRefCell<PchMsiRegs>,
@@ -56,11 +58,6 @@ impl PchMsi {
     pub fn validate_properties(&self) -> Result<(), String> {
         self.regs.borrow().validate()
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn connect_output(&self, irq: u32, line: InterruptSource) {
         let mut outputs = self.outputs.lock();

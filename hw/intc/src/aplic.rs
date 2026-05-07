@@ -117,6 +117,8 @@ struct IdcRegs {
     ithreshold: u32,
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct RiscvAplic {
     state: parking_lot::Mutex<SysBusDeviceState>,
     num_irqs: u32,
@@ -194,11 +196,6 @@ impl RiscvAplic {
             }),
         }
     }
-
-    machina_hw_core::machina_parking_lot_sysbus_accessors!(
-        state,
-        before_unrealize = lower_outputs
-    );
 
     pub fn set_msi_delivery(&self, cb: MsiDelivery) {
         *self.msi_delivery.lock() = Some(cb);
