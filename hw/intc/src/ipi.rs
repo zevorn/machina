@@ -124,7 +124,9 @@ impl LoongArchIpi {
 
     #[must_use]
     pub fn mmio_read_sized(&self, cpu_id: u32, offset: u64, size: u32) -> u64 {
-        let size = normalize_mmio_size(size);
+        if !valid_iocsr_size(size) {
+            return 0;
+        }
         let cores = self.cores.borrow();
         let Some(core) = cores.get(cpu_id as usize) else {
             return 0;
@@ -145,17 +147,20 @@ impl LoongArchIpi {
         size: u32,
         val: u64,
     ) {
-        let size = normalize_mmio_size(size);
+        if !valid_iocsr_size(size) {
+            return;
+        }
         let offset = normalize_iocsr_offset(offset);
         let mut needs_update = false;
         {
             let mut cores = self.cores.borrow();
-            // QEMU exposes these as 8-byte write-only regions.
-            if (offset == IOCSR_IPI_SEND
-                || offset == IOCSR_MAIL_SEND
+            // IPI_SEND works with 4/8-byte access;
+            // MAIL_SEND and ANY_SEND are 8-byte only.
+            let send_access = ((offset == IOCSR_MAIL_SEND
                 || offset == IOCSR_ANY_SEND)
-                && size == 8
-            {
+                && size == 8)
+                || (offset == IOCSR_IPI_SEND && (size == 4 || size == 8));
+            if send_access {
                 needs_update |= write_send_register(&mut cores, offset, val);
             } else if let Some(core) = cores.get_mut(cpu_id as usize) {
                 for byte in 0..size {
@@ -236,8 +241,8 @@ fn write_core_byte(core: &mut IpiCore, offset: u64, val: u8) -> bool {
                 (offset - CORE_EN_OFF) as usize,
                 val,
             );
-            // QEMU: enable writes just store the value
-            // without triggering immediate output recomputation.
+            // Enable writes just store the value without
+            // triggering immediate output recomputation.
             false
         }
         CORE_SET_OFF..=0x00b => {
@@ -337,7 +342,7 @@ fn write_core_word(
         CORE_STATUS_OFF => false,
         CORE_EN_OFF => {
             cores[target].enable = val;
-            // QEMU: enable writes just store, don't trigger recalc.
+            // Enable writes just store, without triggering recalc.
             false
         }
         CORE_SET_OFF => {
@@ -387,11 +392,8 @@ fn write_u32_byte(word: &mut u32, byte: usize, val: u8) {
     *word = (*word & !mask) | (u32::from(val) << shift);
 }
 
-fn normalize_mmio_size(size: u32) -> u32 {
-    match size {
-        1 | 2 | 4 | 8 => size,
-        _ => 4,
-    }
+fn valid_iocsr_size(size: u32) -> bool {
+    matches!(size, 4 | 8)
 }
 
 fn empty_outputs(num_cpus: usize) -> Vec<Option<InterruptSource>> {

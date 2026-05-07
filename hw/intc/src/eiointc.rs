@@ -12,6 +12,7 @@ use machina_memory::region::{MemoryRegion, MmioOps};
 const NUM_IRQS: usize = 256;
 const NUM_U32: usize = NUM_IRQS / 32;
 const NUM_HWI: usize = 8;
+const NUM_IPMAP_HWI: u32 = 4;
 const NODEMAP_BASE: u64 = 0x00A0;
 const IPMAP_BASE: u64 = 0x00C0;
 const ENABLE_BASE: u64 = 0x0200;
@@ -25,7 +26,7 @@ struct EiointcRegs {
     enable: [u32; NUM_U32],
     isr: [u32; NUM_U32],
     /// Per-CPU core ISR — cleared on CORE_ISR write (ack) without
-    /// affecting global ISR (QEMU semantics).
+    /// affecting global ISR.
     core_isr: Vec<[u32; NUM_U32]>,
     coremap: [u8; NUM_IRQS],
     ipmap: [u8; 8],
@@ -163,7 +164,7 @@ impl Eiointc {
             let idx = (irq / 32) as usize;
             let bit = 1u32 << (irq % 32);
             // Clear per-CPU core_isr; global ISR tracks source
-            // assertion state (QEMU semantics).
+            // assertion state.
             for core in &mut regs.core_isr {
                 core[idx] &= !bit;
             }
@@ -455,15 +456,15 @@ fn clear_core_isr_byte(
         if decoded_cpu_for_irq(regs, irq, route_cpu_count) != cpu_id {
             continue;
         }
-        // Clear per-CPU core_isr only — global ISR preserves
-        // source-asserted state (QEMU semantics).
+        // Clear per-CPU core_isr only; global ISR preserves
+        // source-asserted state.
         regs.core_isr[cpu][irq / 32] &= !(1u32 << (irq % 32));
     }
 }
 
 fn decoded_hwi_for_irq(regs: &EiointcRegs, irq: usize) -> u8 {
     let group = irq / 32;
-    decode_one_hot(regs.ipmap.get(group).copied().unwrap_or(0), NUM_HWI as u32)
+    decode_one_hot(regs.ipmap.get(group).copied().unwrap_or(0), NUM_IPMAP_HWI)
         as u8
 }
 

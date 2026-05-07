@@ -15,7 +15,6 @@ const APLIC_DOMAINCFG_IE: u32 = 1 << 8;
 const APLIC_DOMAINCFG_DM: u32 = 1 << 2;
 const APLIC_SOURCECFG_BASE: u64 = 0x0004;
 const APLIC_SOURCECFG_D: u32 = 1 << 10;
-const APLIC_SOURCECFG_CHILDIDX_MASK: u32 = 0x0000_03ff;
 const APLIC_SOURCECFG_SM_MASK: u32 = 0x0000_0007;
 const APLIC_SOURCECFG_SM_INACTIVE: u32 = 0x0;
 const APLIC_SOURCECFG_SM_EDGE_RISE: u32 = 0x4;
@@ -34,6 +33,7 @@ const APLIC_XMSICFGADDRH_LHXS_SHIFT: u32 = 20;
 const APLIC_XMSICFGADDRH_HHXW_SHIFT: u32 = 16;
 const APLIC_XMSICFGADDRH_LHXW_SHIFT: u32 = 12;
 const APLIC_XMSICFGADDRH_BAPPN_MASK: u32 = 0xfff;
+const APLIC_XMSICFGADDR_PPN_SHIFT: u32 = 12;
 
 const APLIC_MMSICFGADDRH_VALID_MASK: u32 = APLIC_XMSICFGADDRH_L
     | (0x1f << APLIC_XMSICFGADDRH_HHXS_SHIFT)
@@ -41,9 +41,6 @@ const APLIC_MMSICFGADDRH_VALID_MASK: u32 = APLIC_XMSICFGADDRH_L
     | (0x7 << APLIC_XMSICFGADDRH_HHXW_SHIFT)
     | (0xf << APLIC_XMSICFGADDRH_LHXW_SHIFT)
     | APLIC_XMSICFGADDRH_BAPPN_MASK;
-
-const APLIC_SMSICFGADDRH_VALID_MASK: u32 =
-    (0x7 << APLIC_XMSICFGADDRH_LHXS_SHIFT) | APLIC_XMSICFGADDRH_BAPPN_MASK;
 
 const APLIC_SETIP_BASE: u64 = 0x1c00;
 const APLIC_SETIPNUM: u64 = 0x1cdc;
@@ -86,6 +83,37 @@ const APLIC_IDC_TOPI_ID_SHIFT: u32 = 16;
 const APLIC_IDC_TOPI_ID_MASK: u32 = 0x3ff;
 const APLIC_IDC_CLAIMI: u64 = 0x1c;
 
+type MsiDelivery = Box<dyn Fn(u64, u32) + Send>;
+
+fn bit_mask(width: u32) -> u32 {
+    if width >= u32::BITS {
+        u32::MAX
+    } else {
+        (1u32 << width) - 1
+    }
+}
+
+fn msi_address(
+    msicfgaddr: u32,
+    msicfgaddr_h: u32,
+    hart_idx: u32,
+    guest_idx: u32,
+) -> u64 {
+    let lhxs = (msicfgaddr_h >> APLIC_XMSICFGADDRH_LHXS_SHIFT) & 0x7;
+    let lhxw = (msicfgaddr_h >> APLIC_XMSICFGADDRH_LHXW_SHIFT) & 0xf;
+    let hhxs = (msicfgaddr_h >> APLIC_XMSICFGADDRH_HHXS_SHIFT) & 0x1f;
+    let hhxw = (msicfgaddr_h >> APLIC_XMSICFGADDRH_HHXW_SHIFT) & 0x7;
+    let group_idx = hart_idx >> lhxw;
+
+    let mut ppn = u64::from(msicfgaddr);
+    ppn |= u64::from(msicfgaddr_h & APLIC_XMSICFGADDRH_BAPPN_MASK) << 32;
+    ppn |= u64::from(group_idx & bit_mask(hhxw))
+        << (hhxs + APLIC_XMSICFGADDR_PPN_SHIFT);
+    ppn |= u64::from(hart_idx & bit_mask(lhxw)) << lhxs;
+    ppn |= u64::from(guest_idx & bit_mask(lhxs));
+    ppn << APLIC_XMSICFGADDR_PPN_SHIFT
+}
+
 #[derive(Clone, Copy, Default)]
 struct IdcRegs {
     idelivery: u32,
@@ -112,7 +140,7 @@ pub struct RiscvAplic {
     smsicfgaddr_h: DeviceRefCell<u32>,
     genmsi: DeviceRefCell<u32>,
     /// MSI delivery callback — (address, data).
-    msi_delivery: parking_lot::Mutex<Option<Box<dyn Fn(u64, u32) + Send>>>,
+    msi_delivery: parking_lot::Mutex<Option<MsiDelivery>>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
 
@@ -215,7 +243,7 @@ impl RiscvAplic {
         f(&*guard)
     }
 
-    pub fn set_msi_delivery(&self, cb: Box<dyn Fn(u64, u32) + Send>) {
+    pub fn set_msi_delivery(&self, cb: MsiDelivery) {
         *self.msi_delivery.lock() = Some(cb);
     }
 
@@ -524,16 +552,14 @@ impl RiscvAplic {
         drop(genmsi);
 
         // Deliver the MSI write into the IMSIC address space.
-        // QEMU APLIC MSI mode: compute address from MM/SMSICFGADDR
-        // registers, write eiid as data.
+        // Compute address from MM/SMSICFGADDR registers,
+        // writing eiid as data.
         let (addr_lo, addr_hi) = if self.mmode {
             (*self.mmsicfgaddr.borrow(), *self.mmsicfgaddr_h.borrow())
         } else {
             (*self.smsicfgaddr.borrow(), *self.smsicfgaddr_h.borrow())
         };
-        let base_addr = (u64::from(addr_hi) << 32) | u64::from(addr_lo);
-        // IMSIC page size is 0x1000 (4 KiB) per the AIA spec.
-        let msi_addr = base_addr + u64::from(hart_idx) * 0x1000;
+        let msi_addr = msi_address(addr_lo, addr_hi, hart_idx, guest_idx);
         if let Some(ref cb) = *self.msi_delivery.lock() {
             cb(msi_addr, eiid);
         }
@@ -639,8 +665,11 @@ impl Default for RiscvAplic {
 pub struct RiscvAplicMmio(pub Arc<RiscvAplic>);
 
 impl MmioOps for RiscvAplicMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
         let a = &self.0;
+        if size != 4 {
+            return 0;
+        }
         if (offset & 0x3) != 0 {
             return 0;
         }
@@ -663,10 +692,10 @@ impl MmioOps for RiscvAplicMmio {
             return a.mmsicfgaddr_h.borrow().to_owned() as u64;
         }
         if a.mmode && a.msimode && offset == APLIC_SMSICFGADDR {
-            return a.smsicfgaddr.borrow().to_owned() as u64;
+            return 0;
         }
         if a.mmode && a.msimode && offset == APLIC_SMSICFGADDRH {
-            return a.smsicfgaddr_h.borrow().to_owned() as u64;
+            return 0;
         }
         if (APLIC_SETIP_BASE..APLIC_SETIP_BASE + a.bitfield_words as u64 * 4)
             .contains(&offset)
@@ -746,8 +775,11 @@ impl MmioOps for RiscvAplicMmio {
         0
     }
 
-    fn write(&self, offset: u64, _size: u32, value: u64) {
+    fn write(&self, offset: u64, size: u32, value: u64) {
         let a = &self.0;
+        if size != 4 {
+            return;
+        }
         if (offset & 0x3) != 0 {
             return;
         }
@@ -763,9 +795,9 @@ impl MmioOps for RiscvAplicMmio {
             let irq = (((offset - APLIC_SOURCECFG_BASE) >> 2) + 1) as u32;
             let mut v = val;
             if v & APLIC_SOURCECFG_D != 0 {
-                v &= APLIC_SOURCECFG_D | APLIC_SOURCECFG_CHILDIDX_MASK;
+                v = 0;
             } else {
-                v &= APLIC_SOURCECFG_D | APLIC_SOURCECFG_SM_MASK;
+                v &= APLIC_SOURCECFG_SM_MASK;
             }
             a.sourcecfg.borrow()[irq as usize] = v;
             let new_sc = v;
@@ -785,14 +817,11 @@ impl MmioOps for RiscvAplicMmio {
             if a.mmsicfgaddr_h.borrow().to_owned() & APLIC_XMSICFGADDRH_L == 0 {
                 *a.mmsicfgaddr_h.borrow() = val & APLIC_MMSICFGADDRH_VALID_MASK;
             }
-        } else if a.mmode && a.msimode && offset == APLIC_SMSICFGADDR {
-            if a.mmsicfgaddr_h.borrow().to_owned() & APLIC_XMSICFGADDRH_L == 0 {
-                *a.smsicfgaddr.borrow() = val;
-            }
-        } else if a.mmode && a.msimode && offset == APLIC_SMSICFGADDRH {
-            if a.mmsicfgaddr_h.borrow().to_owned() & APLIC_XMSICFGADDRH_L == 0 {
-                *a.smsicfgaddr_h.borrow() = val & APLIC_SMSICFGADDRH_VALID_MASK;
-            }
+        } else if a.mmode
+            && a.msimode
+            && matches!(offset, APLIC_SMSICFGADDR | APLIC_SMSICFGADDRH)
+        {
+            // Hidden until child supervisor domains are modelled.
         } else if (APLIC_SETIP_BASE
             ..APLIC_SETIP_BASE + a.bitfield_words as u64 * 4)
             .contains(&offset)
@@ -840,6 +869,16 @@ impl MmioOps for RiscvAplicMmio {
                 let eiid = val & APLIC_TARGET_EIID_MASK;
                 let mut genmsi = a.genmsi.borrow();
                 *genmsi = (hart_idx << APLIC_TARGET_HART_IDX_SHIFT) | eiid;
+                drop(genmsi);
+                let (addr_lo, addr_hi) = if a.mmode {
+                    (*a.mmsicfgaddr.borrow(), *a.mmsicfgaddr_h.borrow())
+                } else {
+                    (*a.smsicfgaddr.borrow(), *a.smsicfgaddr_h.borrow())
+                };
+                let msi_addr = msi_address(addr_lo, addr_hi, hart_idx, 0);
+                if let Some(ref cb) = *a.msi_delivery.lock() {
+                    cb(msi_addr, eiid);
+                }
             }
         } else if (APLIC_TARGET_BASE
             ..APLIC_TARGET_BASE + (a.num_irqs as u64 - 1) * 4)

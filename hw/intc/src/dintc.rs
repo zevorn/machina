@@ -9,13 +9,14 @@ use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
 const VIRT_DINTC_BASE: u64 = 0x2FE0_0000;
+const NUM_MSGIS_WORDS: usize = 4;
 
 pub struct Dintc {
     state: parking_lot::Mutex<SysBusDeviceState>,
     #[allow(dead_code)]
     num_cpus: u32,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
-    pending_vectors: parking_lot::Mutex<Vec<u64>>,
+    pending_vectors: parking_lot::Mutex<Vec<[u64; NUM_MSGIS_WORDS]>>,
 }
 
 impl Dintc {
@@ -35,7 +36,11 @@ impl Dintc {
                 v.resize_with(count, || None);
                 v
             }),
-            pending_vectors: parking_lot::Mutex::new(vec![0u64; count]),
+            pending_vectors: parking_lot::Mutex::new(vec![
+                [0u64;
+                    NUM_MSGIS_WORDS];
+                count
+            ]),
         }
     }
 
@@ -95,9 +100,15 @@ impl Dintc {
     // given CPU so tests can verify which IRQ vectors were delivered.
     #[must_use]
     pub fn pending_vector(&self, cpu_id: u32) -> u64 {
+        self.pending_vector_word(cpu_id, 0)
+    }
+
+    #[must_use]
+    pub fn pending_vector_word(&self, cpu_id: u32, word: usize) -> u64 {
         self.pending_vectors
             .lock()
             .get(cpu_id as usize)
+            .and_then(|words| words.get(word))
             .copied()
             .unwrap_or(0)
     }
@@ -105,8 +116,8 @@ impl Dintc {
     pub fn reset_runtime(&self) {
         self.lower_outputs();
         let mut pending = self.pending_vectors.lock();
-        for v in pending.iter_mut() {
-            *v = 0;
+        for words in pending.iter_mut() {
+            *words = [0; NUM_MSGIS_WORDS];
         }
     }
 
@@ -138,8 +149,12 @@ impl MmioOps for DintcMmio {
         // Set the pending vector bit for this CPU.
         {
             let mut pending = self.0.pending_vectors.lock();
-            if (cpu_num as usize) < pending.len() {
-                pending[cpu_num as usize] |= 1u64 << irq_num;
+            if let Some(words) = pending.get_mut(cpu_num as usize) {
+                let word = (irq_num / 64) as usize;
+                let bit = irq_num % 64;
+                if let Some(slot) = words.get_mut(word) {
+                    *slot |= 1u64 << bit;
+                }
             }
         }
         let outputs = self.0.outputs.lock();

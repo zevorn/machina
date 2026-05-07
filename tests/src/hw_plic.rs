@@ -52,6 +52,46 @@ fn test_plic_set_priority() {
 }
 
 #[test]
+fn test_plic_ignores_reserved_priority_zero_write() {
+    let plic = Plic::new(64, 2);
+
+    plic.write(0x00, 4, 7);
+
+    assert_eq!(plic.read(0x00, 4), 0);
+}
+
+#[test]
+fn test_plic_rejects_non_32_bit_mmio_accesses() {
+    let plic = Plic::new(64, 2);
+
+    plic.write(0x04, 4, 7);
+    assert_eq!(plic.read(0x04, 4), 7);
+
+    assert_eq!(plic.read(0x04, 1), 0);
+    assert_eq!(plic.read(0x04, 2), 0);
+    assert_eq!(plic.read(0x04, 8), 0);
+
+    plic.write(0x04, 1, 0x55);
+    plic.write(0x04, 2, 0x6666);
+    plic.write(0x04, 8, 0x7777_7777);
+
+    assert_eq!(plic.read(0x04, 4), 7);
+}
+
+#[test]
+fn test_plic_rejects_unaligned_mmio_accesses() {
+    let plic = Plic::new(64, 2);
+
+    plic.write(0x14, 4, 7);
+    assert_eq!(plic.read(0x14, 4), 7);
+
+    assert_eq!(plic.read(0x15, 4), 0);
+
+    plic.write(0x15, 4, 3);
+    assert_eq!(plic.read(0x14, 4), 7);
+}
+
+#[test]
 fn test_plic_claim_highest() {
     let plic = Plic::new(64, 2);
 
@@ -87,6 +127,26 @@ fn test_plic_complete() {
 
     // After completion, claim register should be 0.
     assert_eq!(plic.read(0x200004, 4), 0);
+}
+
+#[test]
+fn test_plic_completion_clears_claimed_bitmap_for_valid_irq() {
+    let plic = Plic::new(64, 2);
+
+    plic.write(0x04, 4, 1);
+    plic.write(0x2000, 4, 0x02);
+    plic.set_pending(1, true);
+
+    assert_eq!(plic.read(0x200004, 4), 1);
+
+    plic.write(0x201004, 4, 1);
+    plic.set_pending(1, true);
+
+    assert_eq!(
+        plic.read(0x200004, 4),
+        1,
+        "valid completion must clear claimed state even from another context"
+    );
 }
 
 #[test]
@@ -225,9 +285,13 @@ fn test_plic_edge_triggered_no_resample() {
 }
 
 #[test]
-fn test_plic_realize_via_sysbus_maps_mmio() {
+fn test_plic_lifecycle_and_mom_identity() {
     let mut bus = SysBus::new("sysbus0");
     let plic = Arc::new(Plic::new_named("plic0", 64, 2));
+    assert!(!plic.realized());
+    plic.with_mdevice(|device| assert_eq!(device.local_id(), "plic0"));
+    assert_eq!(plic.object_info().local_id, "plic0");
+
     plic.attach_to_bus(&mut bus).unwrap();
     plic.register_mmio(
         MemoryRegion::io(
@@ -242,9 +306,21 @@ fn test_plic_realize_via_sysbus_maps_mmio() {
     let mut address_space = make_address_space();
     plic.realize_onto(&mut bus, &mut address_space).unwrap();
 
+    assert!(plic.realized());
     assert!(address_space.is_mapped(GPA::new(0x0C00_0000), 4));
     address_space.write(GPA::new(0x0C00_0004), 4, 7);
     assert_eq!(address_space.read(GPA::new(0x0C00_0004), 4), 7);
     assert_eq!(bus.mappings().len(), 1);
     assert_eq!(bus.mappings()[0].owner, "plic0");
+
+    let err = plic.realize_onto(&mut bus, &mut address_space).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+
+    plic.unrealize_from(&mut bus, &mut address_space).unwrap();
+    assert!(!plic.realized());
+
+    let err = plic
+        .unrealize_from(&mut bus, &mut address_space)
+        .unwrap_err();
+    assert!(err.to_string().contains("not realized"));
 }

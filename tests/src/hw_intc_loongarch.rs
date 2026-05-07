@@ -99,6 +99,18 @@ fn test_pch_msi_mmio_write_with_irq_base() {
 }
 
 #[test]
+fn test_pch_msi_vector_below_irq_base_is_noop() {
+    let msi = Arc::new(PchMsi::new_named("pch_msi", 32, 64));
+    let sink = RecordingSink::new(64);
+    msi.connect_output(0, recording_line(&sink, 0));
+
+    let mmio = PchMsiMmio(Arc::clone(&msi));
+
+    mmio.write(0x00, 4, 31);
+    assert!(!sink.level(0));
+}
+
+#[test]
 fn test_pch_msi_mmio_write_out_of_range_is_noop() {
     let msi = Arc::new(PchMsi::new_named("pch_msi", 0, 8));
     let sink = RecordingSink::new(8);
@@ -112,18 +124,22 @@ fn test_pch_msi_mmio_write_out_of_range_is_noop() {
 }
 
 #[test]
-fn test_pch_msi_mmio_write_non_4byte_ignored() {
+fn test_pch_msi_mmio_write_accepts_sub_4byte_accesses() {
     let msi = Arc::new(PchMsi::new_named("pch_msi", 0, 8));
     let sink = RecordingSink::new(8);
     msi.connect_output(1, recording_line(&sink, 1));
+    msi.connect_output(2, recording_line(&sink, 2));
 
     let mmio = PchMsiMmio(Arc::clone(&msi));
 
     mmio.write(0x00, 1, 1);
-    assert!(!sink.level(1));
+    assert!(sink.level(1));
 
-    mmio.write(0x00, 8, 1);
-    assert!(!sink.level(1));
+    mmio.write(0x00, 2, 2);
+    assert!(sink.level(2));
+
+    mmio.write(0x00, 8, 3);
+    assert!(!sink.level(3));
 }
 
 #[test]
@@ -137,6 +153,21 @@ fn test_pch_msi_mmio_write_offset_4_accepted() {
     // offset 0x04 within the 0x8 region — must fire output[1]
     mmio.write(0x04, 4, 1);
     assert!(sink.level(1));
+}
+
+#[test]
+fn test_pch_msi_wide_mmio_write_splits_into_32bit_callbacks() {
+    let msi = Arc::new(PchMsi::new_named("pch_msi", 0, 8));
+    let sink = RecordingSink::new(8);
+    msi.connect_output(3, recording_line(&sink, 3));
+    msi.connect_output(4, recording_line(&sink, 4));
+
+    let mmio = PchMsiMmio(Arc::clone(&msi));
+
+    mmio.write(0x00, 8, 0x0000_0004_0000_0003);
+
+    assert!(sink.level(3));
+    assert!(sink.level(4));
 }
 
 #[test]
@@ -173,13 +204,15 @@ fn test_pch_msi_validate_irq_num_ok() {
 }
 
 #[test]
-fn test_pch_msi_lifecycle() {
+fn test_pch_msi_lifecycle_and_mom_identity() {
     let msi = Arc::new(PchMsi::new_named("pch_msi", 0, 32));
     let mut bus = SysBus::new("sysbus");
     let mut aspace = make_address_space();
     let base = GPA(0x1000_0000);
 
     assert!(!msi.realized());
+    msi.with_mdevice(|device| assert_eq!(device.local_id(), "pch_msi"));
+    assert_eq!(msi.object_info().local_id, "pch_msi");
 
     // Pre-realize: unmapped
     assert_eq!(aspace.read(base, 4), 0);
@@ -301,13 +334,32 @@ fn test_dintc_mmio_write_invalid_cpu_is_noop() {
 }
 
 #[test]
-fn test_dintc_lifecycle() {
+fn test_dintc_mmio_write_high_vector_does_not_panic_and_raises_cpu() {
+    let dintc = Arc::new(Dintc::new_named("dintc", 1));
+    let sink = RecordingSink::new(1);
+    dintc.connect_output(0, recording_line(&sink, 0));
+
+    let mmio = DintcMmio(Arc::clone(&dintc));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // CPU0 vector 70: the interrupt number field is 8 bits wide.
+        mmio.write(0x0460, 4, 0);
+    }));
+
+    assert!(result.is_ok());
+    assert_eq!(dintc.pending_vector_word(0, 1), 1 << 6);
+    assert!(sink.level(0));
+}
+
+#[test]
+fn test_dintc_lifecycle_and_mom_identity() {
     let dintc = Arc::new(Dintc::new_named("dintc", 4));
     let mut bus = SysBus::new("sysbus");
     let mut aspace = make_address_space();
     let base = GPA(0x2FE0_0000);
 
     assert!(!dintc.realized());
+    dintc.with_mdevice(|device| assert_eq!(device.local_id(), "dintc"));
+    assert_eq!(dintc.object_info().local_id, "dintc");
 
     dintc.attach_to_bus(&mut bus).unwrap();
     let region = MemoryRegion::io(
@@ -548,13 +600,15 @@ fn test_liointc_non_4byte_aligned_access_returns_zero() {
 }
 
 #[test]
-fn test_liointc_lifecycle() {
+fn test_liointc_lifecycle_and_mom_identity() {
     let lio = Arc::new(Liointc::new_named("liointc"));
     let mut bus = SysBus::new("sysbus");
     let mut aspace = make_address_space();
     let base = GPA(0x1000_0000);
 
     assert!(!lio.realized());
+    lio.with_mdevice(|device| assert_eq!(device.local_id(), "liointc"));
+    assert_eq!(lio.object_info().local_id, "liointc");
 
     lio.attach_to_bus(&mut bus).unwrap();
     let region = MemoryRegion::io(

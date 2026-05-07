@@ -115,11 +115,14 @@ fn coremap_routes_to_specific_cpu() {
 }
 
 #[test]
-fn task36_eiointc_realizes_as_sysbus_mmio_device() {
+fn test_eiointc_lifecycle_and_mom_identity() {
     let e = Arc::new(Eiointc::new_named("eiointc0", 2));
     let mut bus = SysBus::new("sysbus0");
     let mut address_space = make_address_space();
     let base = GPA::new(0x1fe0_0000);
+    assert!(!e.realized());
+    e.with_mdevice(|device| assert_eq!(device.local_id(), "eiointc0"));
+    assert_eq!(e.object_info().local_id, "eiointc0");
 
     e.register_mmio(
         MemoryRegion::io(
@@ -149,6 +152,15 @@ fn task36_eiointc_realizes_as_sysbus_mmio_device() {
     assert_eq!(bus.mappings()[0].owner, "eiointc0");
     assert_eq!(bus.mappings()[0].name, "eiointc0-mmio");
     assert_eq!(bus.mappings()[0].base, base);
+
+    let err = e.realize_onto(&mut bus, &mut address_space).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+
+    e.unrealize_from(&mut bus, &mut address_space).unwrap();
+    assert!(!e.realized());
+
+    let err = e.unrealize_from(&mut bus, &mut address_space).unwrap_err();
+    assert!(err.to_string().contains("not realized"));
 }
 
 #[test]
@@ -238,6 +250,18 @@ fn task36_eiointc_decodes_linux_one_hot_ipmap_words_independently() {
     assert_ne!(pending & (1 << 3), 0, "groups 4-7 route to HWI3");
     assert_eq!(e.mmio_read_sized(0, 0x0c0, 4), 0x0202_0202);
     assert_eq!(e.mmio_read_sized(0, 0x0c4, 4), 0x0808_0808);
+}
+
+#[test]
+fn test_eiointc_ipmap_bits_above_hwi3_decode_to_hwi0() {
+    let e = Eiointc::new_named("eiointc0", 1);
+    e.mmio_write_sized(0, 0x0c0, 4, 0x80);
+    e.mmio_write_sized(0, 0x200, 4, 1);
+
+    e.set_irq(0, true);
+
+    assert_eq!(e.pending_for_cpu(0), 1);
+    assert_eq!(e.mmio_read_sized(0, 0x0c0, 4), 0x80);
 }
 
 #[test]

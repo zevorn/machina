@@ -138,14 +138,24 @@ impl MmioOps for PchMsiMmio {
     }
 
     fn write(&self, offset: u64, size: u32, val: u64) {
-        if size != 4 {
+        if size == 8 {
+            self.write(offset, 4, val);
+            self.write(offset.wrapping_add(4), 4, val >> 32);
+            return;
+        }
+
+        if !matches!(size, 1 | 2 | 4) {
             return;
         }
         if offset >= 8 {
             return;
         }
         let regs = self.0.regs.borrow();
-        let irq = (val & 0xff).saturating_sub(u64::from(regs.irq_base));
+        let vector = (val & 0xff) as u32;
+        if vector < regs.irq_base {
+            return;
+        }
+        let irq = u64::from(vector - regs.irq_base);
         let irq_num = regs.irq_num as u64;
         drop(regs);
         if irq < irq_num {

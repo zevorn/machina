@@ -11,7 +11,6 @@ use machina_memory::region::{MemoryRegion, MmioOps};
 
 const IMSIC_MMIO_PAGE_SZ: u64 = 0x1000;
 const IMSIC_MMIO_PAGE_LE: u64 = 0x00;
-const IMSIC_MMIO_PAGE_BE: u64 = 0x04;
 
 const IMSIC_EIPX_BITS: u32 = 32;
 const IMSIC_MIN_ID: u32 = (IMSIC_EIPX_BITS * 2) - 1;
@@ -437,41 +436,35 @@ impl MmioOps for RiscvImsicMmio {
         if (offset & 0x3) != 0 {
             return 0;
         }
-        if offset > IMSIC_MMIO_PAGE_SZ * self.0.num_pages as u64 {
+        if offset >= IMSIC_MMIO_PAGE_SZ * self.0.num_pages as u64 {
             return 0;
         }
         0
     }
 
-    fn write(&self, offset: u64, _size: u32, value: u64) {
+    fn write(&self, offset: u64, size: u32, value: u64) {
+        if size != 4 {
+            return;
+        }
         if (offset & 0x3) != 0 {
             return;
         }
-        if offset > IMSIC_MMIO_PAGE_SZ * self.0.num_pages as u64 {
+        if offset >= IMSIC_MMIO_PAGE_SZ * self.0.num_pages as u64 {
             return;
         }
 
         let page = (offset >> 12) as u32;
         let page_off = offset & (IMSIC_MMIO_PAGE_SZ - 1);
 
-        if page_off == IMSIC_MMIO_PAGE_LE {
-            if value != 0 && (value as u32) < self.0.num_irqs {
-                let base = page * self.0.num_irqs;
-                let mut eistate = self.0.eistate.borrow();
-                eistate[(base + value as u32) as usize] |=
-                    IMSIC_EISTATE_PENDING;
-                drop(eistate);
-                self.0.update_outputs(page);
-            }
-        } else if page_off == IMSIC_MMIO_PAGE_BE {
-            let v = (value as u32).swap_bytes() as u64;
-            if v != 0 && (v as u32) < self.0.num_irqs {
-                let base = page * self.0.num_irqs;
-                let mut eistate = self.0.eistate.borrow();
-                eistate[(base + v as u32) as usize] |= IMSIC_EISTATE_PENDING;
-                drop(eistate);
-                self.0.update_outputs(page);
-            }
+        if page_off == IMSIC_MMIO_PAGE_LE
+            && value != 0
+            && (value as u32) < self.0.num_irqs
+        {
+            let base = page * self.0.num_irqs;
+            let mut eistate = self.0.eistate.borrow();
+            eistate[(base + value as u32) as usize] |= IMSIC_EISTATE_PENDING;
+            drop(eistate);
+            self.0.update_outputs(page);
         }
     }
 }

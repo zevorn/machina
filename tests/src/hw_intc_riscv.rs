@@ -85,6 +85,31 @@ fn test_cmgcr_write_gcr_base() {
 }
 
 #[test]
+fn test_cmgcr_subword_mmio_reads_mask_to_access_width() {
+    let cmgcr = Cmgcr::new_named("cmgcr", 0xa00, 0, 4, 1, 4, 0x1234_5678_8000);
+    let mmio = CmgcrMmio(Arc::new(cmgcr));
+
+    assert_eq!(mmio.read(0x0030, 1), 0x00);
+    assert_eq!(mmio.read(0x0030, 2), 0x0a00);
+    assert_eq!(mmio.read(0x0130, 2), 0x0000);
+    assert_eq!(mmio.read(0x0130, 4), 0x0010_0000);
+    assert_eq!(mmio.read(0x0008, 4), 0x5678_8000);
+    assert_eq!(mmio.read(0x0008, 8), 0x1234_5678_8000);
+}
+
+#[test]
+fn test_cmgcr_subword_mmio_writes_mask_to_access_width() {
+    let cmgcr = Cmgcr::new_named("cmgcr", 0xa00, 0, 4, 1, 4, 0x1FB8_0000);
+    let mmio = CmgcrMmio(Arc::new(cmgcr));
+
+    mmio.write(0x0008, 1, 0x1FB8_0080);
+    assert_eq!(mmio.read(0x0008, 8), 0);
+
+    mmio.write(0x0008, 2, 0x1FB8_8000);
+    assert_eq!(mmio.read(0x0008, 8), 0x8000);
+}
+
+#[test]
 fn test_cmgcr_write_cl_reset_base() {
     let cmgcr =
         Arc::new(Cmgcr::new_named("cmgcr", 0xa00, 0, 6, 2, 3, 0x1FB8_0000));
@@ -121,7 +146,7 @@ fn test_cmgcr_invalid_offset_reads_zero() {
 }
 
 #[test]
-fn test_cmgcr_lifecycle() {
+fn test_cmgcr_lifecycle_and_mom_identity() {
     let cmgcr =
         Arc::new(Cmgcr::new_named("cmgcr", 0xa00, 0, 4, 1, 4, 0x1FB8_0000));
     let mut bus = SysBus::new("sysbus");
@@ -129,6 +154,8 @@ fn test_cmgcr_lifecycle() {
     let base = GPA(0x1FB8_0000);
 
     assert!(!cmgcr.realized());
+    cmgcr.with_mdevice(|device| assert_eq!(device.local_id(), "cmgcr"));
+    assert_eq!(cmgcr.object_info().local_id, "cmgcr");
 
     cmgcr.attach_to_bus(&mut bus).unwrap();
     let region = MemoryRegion::io(
@@ -219,6 +246,21 @@ fn test_cpc_mtime_with_callback() {
 }
 
 #[test]
+fn test_cpc_subword_mmio_reads_mask_to_access_width() {
+    let cpc = Arc::new(Cpc::new_named("cpc", 0, 4, 1, 4, 1));
+    cpc.set_mtime_cb(Box::new(|| 0x1234_5678_9ABC_DEF0));
+    let mmio = CpcMmio(Arc::clone(&cpc));
+
+    assert_eq!(mmio.read(0x1008, 1), 0x00);
+    assert_eq!(mmio.read(0x1008, 2), 0x0000);
+    assert_eq!(mmio.read(0x1008, 4), 6 << 19);
+    assert_eq!(mmio.read(0x50, 1), 0xf0);
+    assert_eq!(mmio.read(0x50, 2), 0xdef0);
+    assert_eq!(mmio.read(0x50, 4), 0x9abc_def0);
+    assert_eq!(mmio.read(0x50, 8), 0x1234_5678_9ABC_DEF0);
+}
+
+#[test]
 fn test_cpc_vp_run_stop_with_callback() {
     let cpc = Arc::new(Cpc::new_named("cpc", 0, 4, 1, 4, 0));
     let mmio = CpcMmio(Arc::clone(&cpc));
@@ -238,6 +280,22 @@ fn test_cpc_vp_run_stop_with_callback() {
     assert_eq!(recorded.len(), 2);
     assert_eq!(recorded[0], (0, true)); // VP 0 run
     assert_eq!(recorded[1], (1, false)); // VP 1 stop
+}
+
+#[test]
+fn test_cpc_byte_mmio_write_masks_to_access_width() {
+    let cpc = Arc::new(Cpc::new_named("cpc", 0, 16, 1, 16, 0));
+    let mmio = CpcMmio(Arc::clone(&cpc));
+    let actions: Arc<Mutex<Vec<(u64, bool)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let a = Arc::clone(&actions);
+    cpc.set_vp_action_cb(Box::new(move |vp, run| {
+        a.lock().unwrap().push((vp, run));
+    }));
+
+    mmio.write(0x2028, 1, 0x0100);
+
+    assert!(actions.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -290,13 +348,15 @@ fn test_cpc_invalid_offset_reads_zero() {
 }
 
 #[test]
-fn test_cpc_lifecycle() {
+fn test_cpc_lifecycle_and_mom_identity() {
     let cpc = Arc::new(Cpc::new_named("cpc", 0, 4, 1, 4, 1));
     let mut bus = SysBus::new("sysbus");
     let mut aspace = make_address_space();
     let base = GPA(0x1FB0_0000);
 
     assert!(!cpc.realized());
+    cpc.with_mdevice(|device| assert_eq!(device.local_id(), "cpc"));
+    assert_eq!(cpc.object_info().local_id, "cpc");
 
     cpc.attach_to_bus(&mut bus).unwrap();
     let region =
@@ -380,14 +440,13 @@ fn test_imsic_mmio_write_le_page_sets_pending() {
 }
 
 #[test]
-fn test_imsic_mmio_write_be_page_byteswaps() {
+fn test_imsic_mmio_write_be_page_is_ignored() {
     let imsic = Arc::new(RiscvImsic::new_named("imsic", false, 0, 2, 64));
     let mmio = RiscvImsicMmio(Arc::clone(&imsic));
 
-    // Write to BE offset: value is byteswapped
     mmio.write(IMSIC_MMIO_PAGE_BE, 4, 0x0300_0000u64);
-    // 0x0300_0000 byteswapped = 0x0000_0003, so IRQ 3 becomes pending
-    assert_eq!(imsic.eistate_val(3) & 1, 1);
+
+    assert_eq!(imsic.eistate_val(3) & 1, 0);
 }
 
 #[test]
@@ -582,13 +641,15 @@ fn test_imsic_eix_rmw_rejects_invalid_num() {
 }
 
 #[test]
-fn test_imsic_lifecycle() {
+fn test_imsic_lifecycle_and_mom_identity() {
     let imsic = Arc::new(RiscvImsic::new_named("imsic", false, 0, 2, 64));
     let mut bus = SysBus::new("sysbus");
     let mut aspace = make_address_space();
     let base = GPA(0x2400_0000);
 
     assert!(!imsic.realized());
+    imsic.with_mdevice(|device| assert_eq!(device.local_id(), "imsic"));
+    assert_eq!(imsic.object_info().local_id, "imsic");
 
     imsic.attach_to_bus(&mut bus).unwrap();
     let region = MemoryRegion::io(
@@ -681,6 +742,20 @@ fn test_aplic_sourcecfg_sm_modes() {
     // Non-SM bits masked (0xFF → SM=0x7=LEVEL_LOW)
     mmio.write(0x0004 + 4 * 4, 4, 0xFF);
     assert_eq!(aplic.sourcecfg_val(5), 0x7);
+}
+
+#[test]
+fn test_aplic_sourcecfg_delegate_cleared_without_children() {
+    let aplic =
+        Arc::new(RiscvAplic::new_named("aplic", 32, 4, 7, false, false));
+    let mmio = RiscvAplicMmio(Arc::clone(&aplic));
+
+    let sourcecfg_irq5 = 0x0004 + 4 * 4;
+    let delegate_bit = 1 << 10;
+    mmio.write(sourcecfg_irq5, 4, delegate_bit | 2);
+
+    assert_eq!(aplic.sourcecfg_val(5), 0);
+    assert_eq!(mmio.read(sourcecfg_irq5, 4), 0);
 }
 
 #[test]
@@ -1037,6 +1112,39 @@ fn test_aplic_msi_mode_genmsi() {
 }
 
 #[test]
+fn test_aplic_msi_mode_genmsi_delivers_write() {
+    let aplic = Arc::new(RiscvAplic::new_named("aplic", 32, 4, 7, true, true));
+    let mmio = RiscvAplicMmio(Arc::clone(&aplic));
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&writes);
+
+    aplic.set_msi_delivery(Box::new(move |addr, data| {
+        seen.lock().unwrap().push((addr, data));
+    }));
+    mmio.write(0x1bc0, 4, 0x1);
+    mmio.write(0x3000, 4, ((2u32 << 18) | (3u32 << 12) | 55) as u64);
+
+    assert_eq!(aplic.genmsi_val(), (2u32 << 18) | 55);
+    assert_eq!(&*writes.lock().unwrap(), &[(0x1000, 55)]);
+}
+
+#[test]
+fn test_aplic_msi_mode_delivery_uses_msicfgaddrh_hart_index_fields() {
+    let aplic = Arc::new(RiscvAplic::new_named("aplic", 32, 4, 7, true, true));
+    let mmio = RiscvAplicMmio(Arc::clone(&aplic));
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&writes);
+
+    aplic.set_msi_delivery(Box::new(move |addr, data| {
+        seen.lock().unwrap().push((addr, data));
+    }));
+    mmio.write(0x1bc4, 4, ((1u32 << 20) | (2u32 << 12)) as u64);
+    mmio.write(0x3000, 4, ((3u32 << 18) | 0x33) as u64);
+
+    assert_eq!(&*writes.lock().unwrap(), &[(0x6000, 0x33)]);
+}
+
+#[test]
 fn test_aplic_msi_mode_domaincfg_dm_bit() {
     let aplic = Arc::new(RiscvAplic::new_named("aplic", 32, 4, 7, true, false));
     let mmio = RiscvAplicMmio(Arc::clone(&aplic));
@@ -1068,6 +1176,18 @@ fn test_aplic_msi_config_regs() {
 }
 
 #[test]
+fn test_aplic_smsi_config_regs_hidden_without_children() {
+    let aplic = Arc::new(RiscvAplic::new_named("aplic", 32, 4, 7, true, true));
+    let mmio = RiscvAplicMmio(Arc::clone(&aplic));
+
+    mmio.write(0x1bc8, 4, 0x1234_5000);
+    mmio.write(0x1bcc, 4, 0x8000_0001);
+
+    assert_eq!(mmio.read(0x1bc8, 4), 0);
+    assert_eq!(mmio.read(0x1bcc, 4), 0);
+}
+
+#[test]
 fn test_aplic_mmio_reads_require_4byte_alignment() {
     let aplic =
         Arc::new(RiscvAplic::new_named("aplic", 32, 4, 7, false, false));
@@ -1090,7 +1210,7 @@ fn test_aplic_invalid_offset_reads_zero() {
 }
 
 #[test]
-fn test_aplic_lifecycle() {
+fn test_aplic_lifecycle_and_mom_identity() {
     let aplic =
         Arc::new(RiscvAplic::new_named("aplic", 32, 4, 7, false, false));
     let mut bus = SysBus::new("sysbus");
@@ -1098,6 +1218,8 @@ fn test_aplic_lifecycle() {
     let base = GPA(0xC000_0000);
 
     assert!(!aplic.realized());
+    aplic.with_mdevice(|device| assert_eq!(device.local_id(), "aplic"));
+    assert_eq!(aplic.object_info().local_id, "aplic");
 
     aplic.attach_to_bus(&mut bus).unwrap();
     let region = MemoryRegion::io(
@@ -1162,18 +1284,23 @@ fn test_imsic_access_size_rejection() {
     mmio.write(0x0000, 4, 5);
     assert_eq!(imsic.eistate_val(5) & 1, 1);
 
-    // 1-byte write at aligned offset: value truncated as u32 byteswap
+    // QEMU only accepts 4-byte IMSIC doorbell writes.
     let imsic2 = Arc::new(RiscvImsic::new_named("imsic2", false, 0, 2, 64));
     let mmio2 = RiscvImsicMmio(Arc::clone(&imsic2));
     mmio2.write(0x0000, 1, 3);
-    // write calls with value=3, offset=0, size=1.
-    // The IMSIC writer converts value->u32->byteswap, which means
-    // the actual IRQ set depends on endian handling. In any case,
-    // IRQ 3 should NOT be set because value=3→byteswap=0x03000000>num_irqs.
-    // But with size=1, the write only covers the low byte of value=3.
-    // The IMSIC ignores size, so the full value is used.
-    // QEMU rejects size != 4, so this is a Machina-specific path.
-    // The device should not panic regardless.
+    assert_eq!(imsic2.eistate_val(3) & 1, 0);
+}
+
+#[test]
+fn test_imsic_end_offset_is_out_of_range() {
+    let imsic = Arc::new(RiscvImsic::new_named("imsic", false, 0, 2, 64));
+    let mmio = RiscvImsicMmio(Arc::clone(&imsic));
+
+    let end_offset = 2 * 0x1000;
+    assert_eq!(mmio.read(end_offset, 4), 0);
+    mmio.write(end_offset, 4, 5);
+
+    assert_eq!(imsic.eistate_val(5) & 1, 0);
 }
 
 #[test]
@@ -1199,16 +1326,17 @@ fn test_aplic_access_size_rejection() {
     // 4-byte aligned read works (returns RDONLY bit)
     assert_eq!(mmio.read(0x0000, 4), 0x8000_0000);
 
-    // Sub-4-byte read at aligned offset: device ignores size
-    assert_eq!(mmio.read(0x0000, 1), 0x8000_0000);
-    assert_eq!(mmio.read(0x0000, 2), 0x8000_0000);
+    // QEMU only accepts 4-byte APLIC MMIO accesses.
+    assert_eq!(mmio.read(0x0000, 1), 0);
+    assert_eq!(mmio.read(0x0000, 2), 0);
+    assert_eq!(mmio.read(0x0000, 8), 0);
 
     // Unaligned 4-byte read returns 0
     assert_eq!(mmio.read(0x0001, 4), 0);
 
-    // Sub-4-byte write at aligned offset: device processes like 4-byte
+    // Non-4-byte writes are rejected and do not update registers.
     mmio.write(0x0000, 1, 0x100);
-    assert_eq!(aplic.domaincfg_val(), 0x100);
+    assert_eq!(aplic.domaincfg_val(), 0);
 
     // 4-byte write also works normally
     mmio.write(0x0000, 4, 0);

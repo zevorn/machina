@@ -92,6 +92,53 @@ fn test_aclint_mtime_write_resets_epoch() {
 }
 
 #[test]
+fn test_aclint_mtime_low_write_preserves_live_high_half() {
+    let aclint = Aclint::new(1);
+
+    aclint.write(0xBFF8, 8, 0xffff_fff0);
+    assert!(
+        wait_with_deadline(
+            || (aclint.read(0xBFF8, 8) >> 32) != 0,
+            Duration::from_millis(50),
+        ),
+        "mtime should cross the 32-bit boundary"
+    );
+    let high = aclint.read(0xBFF8, 8) & 0xffff_ffff_0000_0000;
+
+    aclint.write(0xBFF8, 4, 0x1234);
+
+    let mtime = aclint.read(0xBFF8, 8);
+    assert_eq!(mtime & 0xffff_ffff_0000_0000, high);
+    assert!(
+        (0x1234..0x1234 + 100_000).contains(&(mtime & 0xffff_ffff)),
+        "mtime low half should restart near the written value: {mtime:#x}"
+    );
+}
+
+#[test]
+fn test_aclint_mtime_high_write_preserves_live_low_half() {
+    let aclint = Aclint::new(1);
+
+    aclint.write(0xBFF8, 8, 0);
+    std::thread::sleep(Duration::from_millis(5));
+    let low_before = aclint.read(0xBFF8, 8) & 0xffff_ffff;
+    assert!(
+        low_before > 10_000,
+        "mtime should advance before high write"
+    );
+
+    aclint.write(0xBFFC, 4, 2);
+
+    let mtime = aclint.read(0xBFF8, 8);
+    assert_eq!(mtime >> 32, 2);
+    assert!(
+        (low_before..low_before + 100_000).contains(&(mtime & 0xffff_ffff)),
+        "mtime low half should preserve the live value: \
+         before={low_before:#x}, after={mtime:#x}"
+    );
+}
+
+#[test]
 fn test_aclint_mtimecmp_set() {
     let aclint = Aclint::new(2);
 
@@ -100,6 +147,54 @@ fn test_aclint_mtimecmp_set() {
 
     aclint.write(0x4008, 8, 1000);
     assert_eq!(aclint.read(0x4008, 8), 1000);
+}
+
+#[test]
+fn test_aclint_mtimecmp_rejects_invalid_sizes_and_offsets() {
+    let aclint = Aclint::new(1);
+
+    aclint.write(0x4000, 8, 0x1122_3344_5566_7788);
+    assert_eq!(aclint.read(0x4000, 8), 0x1122_3344_5566_7788);
+
+    assert_eq!(aclint.read(0x4000, 1), 0);
+    assert_eq!(aclint.read(0x4000, 2), 0);
+    assert_eq!(aclint.read(0x4002, 4), 0);
+    assert_eq!(aclint.read(0x4004, 8), 0);
+
+    for size in [1_u32, 2] {
+        aclint.write(0x4000, size, 0);
+        assert_eq!(aclint.read(0x4000, 8), 0x1122_3344_5566_7788);
+    }
+
+    aclint.write(0x4002, 4, 0);
+    assert_eq!(aclint.read(0x4000, 8), 0x1122_3344_5566_7788);
+
+    aclint.write(0x4004, 8, 0);
+    assert_eq!(aclint.read(0x4000, 8), 0x1122_3344_5566_7788);
+}
+
+#[test]
+fn test_aclint_mtime_rejects_invalid_sizes_and_high_64_bit_access() {
+    let aclint = Aclint::new(1);
+
+    aclint.write(0xBFF8, 8, 0x0000_0002_0000_1000);
+    assert_eq!(aclint.read(0xBFF8, 1), 0);
+    assert_eq!(aclint.read(0xBFF8, 2), 0);
+    assert_eq!(aclint.read(0xBFFA, 4), 0);
+    assert_eq!(aclint.read(0xBFFC, 8), 0);
+
+    let before = aclint.read(0xBFF8, 8);
+    aclint.write(0xBFF8, 1, 0);
+    aclint.write(0xBFF8, 2, 0);
+    aclint.write(0xBFFA, 4, 0);
+    aclint.write(0xBFFC, 8, 0);
+    let after = aclint.read(0xBFF8, 8);
+
+    assert!(
+        after >= before,
+        "invalid mtime writes must not move time backwards: before={before:#x}, after={after:#x}"
+    );
+    assert_eq!(after >> 32, before >> 32);
 }
 
 #[test]
@@ -114,6 +209,27 @@ fn test_aclint_msip_set_clear() {
 
     // Only bit 0 is writable.
     aclint.write(0x0000, 4, 0xFF);
+    assert_eq!(aclint.read(0x0000, 4), 1);
+}
+
+#[test]
+fn test_aclint_msip_rejects_non_32_bit_accesses() {
+    let aclint = Aclint::new(1);
+
+    aclint.write(0x0000, 4, 1);
+    assert_eq!(aclint.read(0x0000, 4), 1);
+
+    assert_eq!(aclint.read(0x0000, 1), 0);
+    assert_eq!(aclint.read(0x0000, 2), 0);
+    assert_eq!(aclint.read(0x0000, 8), 0);
+    assert_eq!(aclint.read(0x0002, 4), 0);
+
+    for size in [1_u32, 2, 8] {
+        aclint.write(0x0000, size, 0);
+        assert_eq!(aclint.read(0x0000, 4), 1);
+    }
+
+    aclint.write(0x0002, 4, 0);
     assert_eq!(aclint.read(0x0000, 4), 1);
 }
 
@@ -284,6 +400,35 @@ fn test_aclint_timer_thread_asserts_mti() {
 }
 
 #[test]
+fn test_aclint_timer_thread_requests_exit() {
+    let aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti = 7u32;
+    let exit_requested = Arc::new(AtomicBool::new(false));
+    let exit_seen = Arc::clone(&exit_requested);
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
+    aclint.connect_mti(0, line);
+    aclint.connect_exit_request(
+        0,
+        Arc::new(move || {
+            exit_seen.store(true, Ordering::Release);
+        }),
+    );
+
+    let now = aclint.read(0xBFF8, 8);
+    aclint.write(0x4000, 8, now + 100_000);
+
+    assert!(
+        wait_with_deadline(
+            || exit_requested.load(Ordering::Acquire),
+            Duration::from_millis(100),
+        ),
+        "timer thread should request an exec-loop exit"
+    );
+    assert!(sink.level(mti), "timer thread should still assert MTI");
+}
+
+#[test]
 fn test_aclint_retarget_future_cancels_stale_timer() {
     let aclint = Aclint::new(1);
     let sink = Arc::new(TestIrqSink::new(16));
@@ -338,9 +483,13 @@ fn test_aclint_retarget_future_cancels_stale_timer() {
 }
 
 #[test]
-fn test_aclint_realize_via_sysbus_maps_mmio() {
+fn test_aclint_lifecycle_and_mom_identity() {
     let mut bus = SysBus::new("sysbus0");
     let aclint = Arc::new(Aclint::new_named("aclint0", 2));
+    assert!(!aclint.realized());
+    aclint.with_mdevice(|device| assert_eq!(device.local_id(), "aclint0"));
+    assert_eq!(aclint.object_info().local_id, "aclint0");
+
     aclint.attach_to_bus(&mut bus).unwrap();
     aclint
         .register_mmio(
@@ -356,9 +505,23 @@ fn test_aclint_realize_via_sysbus_maps_mmio() {
     let mut address_space = make_address_space();
     aclint.realize_onto(&mut bus, &mut address_space).unwrap();
 
+    assert!(aclint.realized());
     assert!(address_space.is_mapped(GPA::new(0x0200_0000), 8));
     address_space.write(GPA::new(0x0200_4000), 8, 0x1234);
     assert_eq!(address_space.read(GPA::new(0x0200_4000), 8), 0x1234);
     assert_eq!(bus.mappings().len(), 1);
     assert_eq!(bus.mappings()[0].owner, "aclint0");
+
+    let err = aclint
+        .realize_onto(&mut bus, &mut address_space)
+        .unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+
+    aclint.unrealize_from(&mut bus, &mut address_space).unwrap();
+    assert!(!aclint.realized());
+
+    let err = aclint
+        .unrealize_from(&mut bus, &mut address_space)
+        .unwrap_err();
+    assert!(err.to_string().contains("not realized"));
 }
