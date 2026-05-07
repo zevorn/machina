@@ -30,7 +30,8 @@ pub mod qemu;
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 /// A single register snapshot: register name → value.
 pub type RegSnapshot = BTreeMap<String, u64>;
@@ -230,7 +231,7 @@ impl RuntimeOracle {
         cmd.stderr(Stdio::piped());
         cmd.stdout(Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = spawn_probe(&mut cmd).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
                     "NOT_FOUND:cannot start probe '{}': {e}",
@@ -350,6 +351,25 @@ impl RuntimeOracle {
                 }
             })
             .collect()
+    }
+}
+
+fn spawn_probe(cmd: &mut Command) -> std::io::Result<Child> {
+    const MAX_TEXT_BUSY_RETRIES: usize = 20;
+    const RETRY_DELAY: Duration = Duration::from_millis(5);
+
+    let mut attempts = 0;
+    loop {
+        match cmd.spawn() {
+            Err(err)
+                if err.raw_os_error() == Some(libc::ETXTBSY)
+                    && attempts < MAX_TEXT_BUSY_RETRIES =>
+            {
+                attempts += 1;
+                std::thread::sleep(RETRY_DELAY);
+            }
+            other => return other,
+        }
     }
 }
 
