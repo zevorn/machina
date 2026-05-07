@@ -40,7 +40,7 @@ machina/
 +-- hw/core/        # 设备基础设施：qdev、IRQ、chardev、FDT、loader
 +-- hw/intc/        # 中断控制器：PLIC、ACLINT
 +-- hw/char/        # 字符设备：UART 16550A
-+-- hw/riscv/       # RISC-V 机器定义：riscv64-ref
++-- hw/riscv/       # RISC-V 机器定义：riscv64-ref, k230
 +-- hw/loongarch/   # LoongArch64 机器定义：loongarch64-ref
 +-- disas/          # 反汇编器
 +-- monitor/        # 调试接口
@@ -980,6 +980,13 @@ UART -----> PLIC source 10
 ```
 
 `RiscvCpuIrqSink` 实现 `IrqSink` trait，将中断转换为 `SharedMip` 的原子位设置和 WFI 唤醒。
+
+#### k230 SDK 兼容机器
+
+`hw/riscv/src/k230.rs` 定义 `k230` machine，对齐 QEMU 的 K230 SDK
+兼容板级模型。它装配一个 T-HEAD C908 CPU profile、PLIC、ACLINT、5 个
+UART、2 个 K230 watchdog，以及 SDK 地址图中的 unimplemented window，使
+Linux、OpenSBI 和 SDK U-Boot 看到预期内存布局。
 
 #### boot.rs -- 启动设置
 

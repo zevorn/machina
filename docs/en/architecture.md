@@ -42,7 +42,7 @@ machina/
 +-- hw/core/        # Device infrastructure: qdev, IRQ, chardev, FDT, loader
 +-- hw/intc/        # Interrupt controllers: PLIC, ACLINT
 +-- hw/char/        # Character devices: UART 16550A
-+-- hw/riscv/       # RISC-V machine definitions: riscv64-ref
++-- hw/riscv/       # RISC-V machine definitions: riscv64-ref, k230
 +-- hw/loongarch/   # LoongArch64 machine definitions: loongarch64-ref
 +-- disas/          # Disassembler
 +-- monitor/        # Debug interface
@@ -982,6 +982,13 @@ UART -----> PLIC source 10
 ```
 
 `RiscvCpuIrqSink` implements the `IrqSink` trait, converting interrupts into `SharedMip` atomic bit-set operations and WFI wakeups.
+
+#### k230 SDK-Compatible Machine
+
+`hw/riscv/src/k230.rs` defines the `k230` machine modeled after QEMU's K230
+SDK-compatible board. It wires one T-HEAD C908 CPU profile, PLIC, ACLINT, five
+UARTs, two K230 watchdogs, and unimplemented SDK address windows so Linux,
+OpenSBI, and SDK U-Boot see the expected memory map.
 
 #### boot.rs -- Boot Setup
 
