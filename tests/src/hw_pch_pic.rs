@@ -116,7 +116,7 @@ fn task37_pch_pic_mask_suppresses_until_unmasked() {
 }
 
 #[test]
-fn test_pch_pic_bulk_unmask_accepts_only_lowest_pending_irq() {
+fn test_pch_pic_bulk_unmask_accepts_all_pending_irqs() {
     let pic = Arc::new(PchPic::new_named("pchpic0", 32));
     let sink = RecordingSink::new(16);
     pic.connect_output(4, recording_line(&sink, 4));
@@ -128,9 +128,9 @@ fn test_pch_pic_bulk_unmask_accepts_only_lowest_pending_irq() {
     pic.set_irq(3, true);
     pic.mmio_write_sized(INT_MASK, 8, u64::MAX & !((1 << 2) | (1 << 3)));
 
-    assert_eq!(pic.mmio_read_sized(INT_STATUS, 8), 1 << 2);
+    assert_eq!(pic.mmio_read_sized(INT_STATUS, 8), (1 << 2) | (1 << 3));
     assert!(sink.level(4));
-    assert!(!sink.level(5));
+    assert!(sink.level(5));
 }
 
 #[test]

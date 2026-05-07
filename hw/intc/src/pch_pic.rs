@@ -298,12 +298,10 @@ fn pch_pic_update_irq(
         return;
     }
 
-    let irq = val.trailing_zeros();
-    let bit = 1u64 << irq;
     if level {
-        regs.intisr |= bit;
+        regs.intisr |= val;
     } else {
-        regs.intisr &= !bit;
+        regs.intisr &= !val;
     }
 }
 
