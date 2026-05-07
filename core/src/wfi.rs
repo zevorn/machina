@@ -45,14 +45,18 @@ impl WfiWaker {
 
     /// Wake halted CPU (device IRQ arrived).
     pub fn wake(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s =
+            self.state.lock().expect("WFI state mutex poisoned in wake");
         s.irq_pending = true;
         self.cv.notify_all();
     }
 
     /// Wake for monitor pause (no spurious IRQ).
     pub fn monitor_wake(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self
+            .state
+            .lock()
+            .expect("WFI state mutex poisoned in monitor_wake");
         s.monitor_wake = true;
         self.cv.notify_all();
     }
@@ -61,13 +65,17 @@ impl WfiWaker {
     /// monitor cont to prevent a stale flag from
     /// waking a future WFI.
     pub fn clear_monitor_wake(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self
+            .state
+            .lock()
+            .expect("WFI state mutex poisoned in clear_monitor_wake");
         s.monitor_wake = false;
     }
 
     /// Force-unblock any waiting CPU (manager stop).
     pub fn stop(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s =
+            self.state.lock().expect("WFI state mutex poisoned in stop");
         s.stopped = true;
         self.cv.notify_all();
     }
@@ -76,14 +84,20 @@ impl WfiWaker {
     /// condvar so an ongoing wait() recalculates its
     /// timeout, but does NOT set irq_pending.
     pub fn set_deadline(&self, deadline: Instant) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self
+            .state
+            .lock()
+            .expect("WFI state mutex poisoned in set_deadline");
         s.deadline = Some(deadline);
         self.cv.notify_all();
     }
 
     /// Clear the timer deadline.
     pub fn clear_deadline(&self) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self
+            .state
+            .lock()
+            .expect("WFI state mutex poisoned in clear_deadline");
         s.deadline = None;
     }
 
@@ -92,7 +106,8 @@ impl WfiWaker {
     /// Returns true if woken by IRQ or timer, false if
     /// stopped or monitor wake.
     pub fn wait(&self) -> bool {
-        let mut s = self.state.lock().unwrap();
+        let mut s =
+            self.state.lock().expect("WFI state mutex poisoned in wait");
         loop {
             if s.irq_pending {
                 s.irq_pending = false;
@@ -118,15 +133,20 @@ impl WfiWaker {
                     return true;
                 }
                 let remaining = deadline - now;
-                let (new_s, result) =
-                    self.cv.wait_timeout(s, remaining).unwrap();
+                let (new_s, result) = self
+                    .cv
+                    .wait_timeout(s, remaining)
+                    .expect("WFI condvar wait_timeout failed (mutex poisoned)");
                 s = new_s;
                 if result.timed_out() {
                     s.deadline = None;
                     return true;
                 }
             } else {
-                s = self.cv.wait(s).unwrap();
+                s = self
+                    .cv
+                    .wait(s)
+                    .expect("WFI condvar wait failed (mutex poisoned)");
             }
         }
     }
