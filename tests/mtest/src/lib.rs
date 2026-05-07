@@ -86,4 +86,63 @@ mod tests {
             .windows(b"console=ttyS0,115200 earlycon=sbi cma=0".len())
             .any(|w| w == b"console=ttyS0,115200 earlycon=sbi cma=0"));
     }
+
+    #[test]
+    fn k230_loader_boot_places_sdk_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let fw = dir.path().join("fw.uImage");
+        let image = dir.path().join("Image");
+        let initrd = dir.path().join("rootfs.cpio.gz");
+        let dtb = dir.path().join("k230.dtb");
+        std::fs::write(&fw, [0x11, 0x22, 0x33, 0x44]).unwrap();
+        std::fs::write(&image, [0x55, 0x66, 0x77, 0x88]).unwrap();
+        std::fs::write(&initrd, [0xaa, 0xbb, 0xcc, 0xdd]).unwrap();
+        std::fs::write(&dtb, [0xde, 0xad, 0xbe, 0xef]).unwrap();
+
+        let mut machine = K230Machine::new();
+        let opts = MachineOpts {
+            loaders: vec![
+                LoaderSpec {
+                    file: fw,
+                    addr: 0x0c10_0000,
+                    force_raw: true,
+                },
+                LoaderSpec {
+                    file: image,
+                    addr: 0x0820_0000,
+                    force_raw: true,
+                },
+                LoaderSpec {
+                    file: initrd,
+                    addr: 0x0a10_0000,
+                    force_raw: true,
+                },
+                LoaderSpec {
+                    file: dtb,
+                    addr: 0x0a00_0000,
+                    force_raw: true,
+                },
+            ],
+            ..k230_opts()
+        };
+        machine.init(&opts).unwrap();
+        machine.boot().unwrap();
+
+        assert_eq!(
+            machine.read_ram_bytes(0x0c10_0000, 4).unwrap(),
+            vec![0x11, 0x22, 0x33, 0x44]
+        );
+        assert_eq!(
+            machine.read_ram_bytes(0x0820_0000, 4).unwrap(),
+            vec![0x55, 0x66, 0x77, 0x88]
+        );
+        assert_eq!(
+            machine.read_ram_bytes(0x0a10_0000, 4).unwrap(),
+            vec![0xaa, 0xbb, 0xcc, 0xdd]
+        );
+        assert_eq!(
+            machine.read_ram_bytes(0x0a00_0000, 4).unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+    }
 }

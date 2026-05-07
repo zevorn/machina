@@ -21,6 +21,7 @@ pub fn boot_k230(
     let start_addr = load_bios_or_kernel(machine)?;
     let initrd_range = load_initrd(machine)?;
     let fdt_addr = load_and_fix_user_dtb(machine, initrd_range)?;
+    apply_loaders(machine)?;
     write_k230_reset_vec(machine, start_addr, fdt_addr);
     machine.set_boot_cpu_pc(K230_BOOTROM_BASE, PrivLevel::Machine);
     Ok(())
@@ -84,6 +85,33 @@ fn load_and_fix_user_dtb(
     let addr = place_dtb(machine, &fixed)?;
     machine.set_dtb_blob(fixed);
     Ok(addr)
+}
+
+fn apply_loaders(
+    machine: &K230Machine,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
+    let ddr_end = ddr.base + machine.ram_size();
+    for loader_spec in machine.loaders() {
+        if !loader_spec.force_raw {
+            return Err("k230 loader requires force-raw=on".into());
+        }
+        let data = std::fs::read(&loader_spec.file)?;
+        let end = loader_spec.addr + data.len() as u64;
+        if loader_spec.addr < ddr.base || end > ddr_end {
+            return Err(format!(
+                "k230 loader range {:#x}..{:#x} is outside DDR {:#x}..{:#x}",
+                loader_spec.addr, end, ddr.base, ddr_end
+            )
+            .into());
+        }
+        loader::load_binary(
+            &data,
+            GPA::new(loader_spec.addr),
+            machine.address_space(),
+        )?;
+    }
+    Ok(())
 }
 
 fn place_dtb(
