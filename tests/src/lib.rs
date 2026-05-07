@@ -9,6 +9,8 @@ mod cli_kernel;
 #[cfg(test)]
 mod cli_netdev;
 #[cfg(test)]
+mod cli_ram;
+#[cfg(test)]
 mod core;
 #[cfg(test)]
 mod core_address;

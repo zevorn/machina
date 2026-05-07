@@ -139,6 +139,11 @@ fn parse_args() -> Result<CliArgs, String> {
                     .trim_end_matches('M')
                     .parse::<u64>()
                     .map_err(|e| format!("-m: {}", e))?;
+                if cli.ram_mib == 0 {
+                    return Err(
+                        "-m: RAM size must be greater than 0".to_string()
+                    );
+                }
             }
             "-bios" => {
                 i += 1;
