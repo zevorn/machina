@@ -1,6 +1,7 @@
 //! RISC-V frontend — RV64 user-mode instruction translation.
 
 pub mod cpu;
+pub mod cpu_model;
 pub mod csr;
 pub mod exception;
 pub mod ext;

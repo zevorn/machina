@@ -131,6 +131,8 @@ mod monitor;
 #[cfg(test)]
 mod oracle;
 #[cfg(test)]
+mod riscv_cpu_model;
+#[cfg(test)]
 mod riscv_csr;
 #[cfg(test)]
 mod riscv_exception;

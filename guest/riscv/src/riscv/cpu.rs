@@ -3,6 +3,7 @@
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32};
 
+use super::cpu_model::{RiscvCpuModel, RiscvCpuProfile};
 use super::csr::{CsrFile, PrivLevel};
 
 /// Number of general-purpose registers (x0-x31).
@@ -64,6 +65,8 @@ pub struct RiscvCpu {
     pub priv_level: PrivLevel,
     /// Full CSR register file (M/S/U).
     pub csr: CsrFile,
+    /// Named CPU profile used for vendor hooks and board-selected ISA state.
+    pub profile: RiscvCpuProfile,
 
     /// Runtime PMP state, synced from CSR on pmpcfg/
     /// pmpaddr writes.
@@ -190,6 +193,11 @@ pub const USTATUS_FS_DIRTY: u64 = 0x0000_6000;
 
 impl RiscvCpu {
     pub fn new() -> Self {
+        Self::new_with_model(RiscvCpuModel::GenericRv64)
+    }
+
+    pub fn new_with_model(model: RiscvCpuModel) -> Self {
+        let profile = model.profile();
         Self {
             gpr: [0u64; NUM_GPRS],
             fpr: [0u64; NUM_FPRS],
@@ -211,6 +219,7 @@ impl RiscvCpu {
             halted: AtomicBool::new(false),
             priv_level: PrivLevel::Machine,
             csr: CsrFile::new(),
+            profile,
             pmp: super::pmp::Pmp::new(),
             mmu: super::mmu::Mmu::new(),
             mem_fault_cause: 0,
@@ -227,6 +236,10 @@ impl RiscvCpu {
             neg_align: AtomicI32::new(0),
             dirty_pages: Vec::new(),
         }
+    }
+
+    pub fn profile(&self) -> &RiscvCpuProfile {
+        &self.profile
     }
 
     /// Set the current privilege level.
