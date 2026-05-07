@@ -51,6 +51,8 @@ mod hw_ipi;
 #[cfg(test)]
 mod hw_irq;
 #[cfg(test)]
+mod hw_k230_wdt;
+#[cfg(test)]
 mod hw_loader;
 #[cfg(test)]
 mod hw_misc;
