@@ -6,9 +6,7 @@
 
 use std::sync::Arc;
 
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::mdev::MDevice;
+use machina_hw_core::bus::SysBusDeviceState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpioPwrAction {
@@ -19,6 +17,8 @@ pub enum GpioPwrAction {
 type ActionHandler =
     parking_lot::Mutex<Option<Box<dyn Fn(GpioPwrAction) + Send>>>;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot_child")]
 pub struct GpioPwr {
     state: parking_lot::Mutex<SysBusDeviceState>,
     on_action: ActionHandler,
@@ -61,47 +61,7 @@ impl GpioPwr {
         }
     }
 
-    pub fn attach_to_bus(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn realize(
-        self: &Arc<Self>,
-    ) -> Result<(), machina_hw_core::mdev::MDeviceError> {
-        {
-            let guard = self.state.lock();
-            if guard.device().parent_bus().is_none() {
-                return Err(machina_hw_core::mdev::MDeviceError::LateMutation(
-                    "must attach to parent bus before realize",
-                ));
-            }
-        }
-        self.state.lock().device_mut().mark_realized()
-    }
-
-    pub fn unrealize(
-        self: &Arc<Self>,
-    ) -> Result<(), machina_hw_core::mdev::MDeviceError> {
-        self.state.lock().device_mut().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
     pub fn reset_runtime(&self) {
         // No runtime state to reset.
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
     }
 }

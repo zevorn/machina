@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
-use machina_core::address::GPA;
-use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
+use machina_core::device_cell::{DeviceRefCell, DeviceRegs};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::chardev::CharFrontend;
-use machina_hw_core::mdev::{MDevice, MDeviceError};
+use machina_hw_core::mdev::MDeviceError;
 use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 const HTIF_DEV_SHIFT: u64 = 56;
 const HTIF_CMD_SHIFT: u64 = 48;
@@ -64,9 +62,11 @@ impl HtifRegs {
 
 pub type ExitCallback = Box<dyn Fn(i32) + Send + Sync>;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", lifecycle = "manual")]
 pub struct Htif {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<HtifRegs>,
+    regs: DeviceRegs<HtifRegs>,
     chardev: DeviceRefCell<Option<CharFrontend>>,
     configured_chardev: parking_lot::Mutex<Option<CharFrontend>>,
     exit_cb: parking_lot::Mutex<Option<ExitCallback>>,
@@ -82,23 +82,11 @@ impl Htif {
     pub fn new_named(local_id: &str) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(HtifRegs::new()),
+            regs: DeviceRegs::new(HtifRegs::new()),
             chardev: DeviceRefCell::new(None),
             configured_chardev: parking_lot::Mutex::new(None),
             exit_cb: parking_lot::Mutex::new(None),
         }
-    }
-
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
     }
 
     pub fn realize_onto(
@@ -121,21 +109,6 @@ impl Htif {
         self.chardev.borrow().take();
         self.state.lock().unrealize_from(bus, address_space)?;
         Ok(())
-    }
-
-    #[must_use]
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    #[must_use]
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
     }
 
     pub fn attach_chardev(&self, fe: CharFrontend) -> Result<(), MDeviceError> {

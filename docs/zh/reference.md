@@ -918,10 +918,15 @@ qdev bridge 外，不再提供额外兼容层或迁移层。
 当前第一阶段 MOM 覆盖范围包括：
 
 - 根对象层（`mobject`）
+- 对象树 lookup 和元数据快照
 - 设备层（`mdev`）
 - 可执行的 sysbus realize / unrealize
 - 轻量属性表面
-- 已迁移的平台设备：UART、PLIC、ACLINT、virtio-mmio
+- MOM 设备的类型元数据和 factory 注册
+- reset phase 编排（`enter` / `hold` / `exit`）
+- 降低对象/设备/sysbus 样板代码的 derive/attribute wrapper
+- 已迁移的平台设备：所有已翻译的 `hw` 设备源码都通过 MOM
+  derive/attribute 入口生成标准 accessor
 
 ### 2. 分层
 
@@ -933,6 +938,8 @@ qdev bridge 外，不再提供额外兼容层或迁移层。
 - 为受管对象提供 local ID 和 object path
 - 强制父子严格树结构
 - 也是 `Machine` 进入对象树的基础
+- `MObjectTree` 把 path lookup 与对象本身分离，使 machine
+  assembly 可以查看身份信息，而不需要拥有设备内部状态
 
 #### 2.2 `mdev`
 
@@ -948,7 +955,11 @@ qdev bridge 外，不再提供额外兼容层或迁移层。
 `sysbus` 是可执行装配层，而不只是元数据。
 
 - 设备在 realize 前必须先 attach 到 bus
-- 设备在 realize 前必须先注册 MMIO region
+- 设备在 realize 前声明 MMIO 和 IRQ resource
+- 板级代码在 realize 前映射已声明的 MMIO slot，并连接已声明的
+  IRQ slot
+- `register_mmio` 和 `register_irq` 仍作为 convenience wrapper
+  保留，供简单设备在一个调用里完成声明和接线
 - realize 会校验重叠并把 region 映射进 `AddressSpace`
 - unrealize 会把已实现映射从 `AddressSpace` 和 bus 记录里移除
 
@@ -961,17 +972,87 @@ qdev bridge 外，不再提供额外兼容层或迁移层。
 - static / dynamic 可变性边界显式化
 - UART 的 `chardev` 就通过这层作为标准属性暴露
 
+#### 2.5 类型元数据
+
+`typeinfo` 是当前 MOM 范围内 Rust 侧对应 QEMU type metadata
+的层。
+
+- `MTypeInfo` 记录类型名、类型种类、父类型、属性 schema 和可选
+  factory
+- `MTypeRegistry` 拒绝重复类型，并可强制父类型先于子类型注册
+- 设备 factory 返回 `Box<dyn MDevice>`，测试和后续 machine
+  assembly 可以通过元数据创建设备
+- Machina 不引入 QEMU C QOM 的布局机制：没有 `ParentField`、
+  `ParentInit`、`Opaque`、`ObjectType`、C ABI layout inheritance、
+  unsafe upcast/downcast，也不把 BQL 当作同步前提
+
+#### 2.6 Reset
+
+`reset` 把 reset 建模为 phase 序列，而不是每个设备各写一套
+临时 helper。
+
+- `ResetType` 区分 cold reset 和 warm reset
+- `MResetController` 会先对所有设备运行 `reset_enter`，再运行
+  `reset_hold`，最后运行 `reset_exit`
+- reset 仍是运行时状态操作，不重建 sysbus 拓扑或对象树成员关系
+
+#### 2.7 易用性宏和 derive
+
+当前宏层的目标和 Rust-in-QEMU 里大量使用 attribute 封装 QOM
+的方向一致：设备作者不应该重复编写 trait forwarding 和标准
+accessor 胶水代码。
+
+- `machina_impl_mobject!` 为直接持有 `MObjectState` 的类型实现
+  `MObject`
+- `machina_impl_mdevice!` 为直接持有 `MDeviceState` 的类型实现
+  `MObject` 和 `MDevice`
+- `machina_impl_sysbus_device!` 为直接持有 `SysBusDeviceState` 的
+  类型实现对象/设备 trait
+- 底层 sysbus 和 mdevice accessor helper macro 覆盖标准
+  `std::sync::Mutex`、`parking_lot::Mutex`、direct-state 和
+  sysbus-child wrapper 模式。它们保留为 derive 层的实现细节。
+- `machina_property_specs!` 声明 typed property schema，覆盖
+  `default`、`required` 和 `dynamic` 语义，但不隐藏底层
+  `MPropertySpec`
+- `#[derive(SysBusDevice)]` 配合 `#[mom(...)]`，封装常见的
+  locked-state sysbus 设备 accessor 模式
+- `#[derive(MDevice)]` 配合 `#[mom(...)]`，封装非 sysbus 设备对象的
+  mdevice accessor 模式
+- `#[derive(MProperties)]` 配合字段级 `#[property(...)]`，从设备或
+  config 字段生成 typed property schema
+- `#[derive(Resettable)]` 配合 `#[reset(hold = reset_runtime)]`，
+  把 reset phase 接到设备本地 reset 方法
+
+derive 层保持很薄：它展开到同一套 declarative helper macro 和 typed
+schema builder。设备源码使用 derive/attribute 入口，底层 helper macro
+则留在 `hw/core` 内作为兼容和实现细节。
+
+#### 2.8 寄存器状态
+
+客户可见的 register bank 默认使用内部可变性。这与 Rust-in-QEMU 的
+QOM 规则一致：设备对象通常通过共享引用访问，可变寄存器状态需要通过
+cell-like wrapper 进入。
+
+- `DeviceRegs<T>` 是 `FooRegs` 这类 register bank 的默认容器
+- 单独的 `Copy` 标量寄存器仍可使用 `DeviceCell<T>` 表达独立的内部可变性
+- register bank 类型和字段默认保持 device module 私有
+- 设备文件不暴露 `pub regs`、`pub fn regs()` 或公开的 `*Regs` struct
+- MMIO、I2C、SSI、SD 等 bus callback 是公开寄存器访问面
+- 会触发副作用的寄存器写入应先完成寄存器更新，释放 register borrow，
+  再更新 IRQ、timer 或 frontend/backend wiring
+
 ### 3. 设备生命周期
 
 已迁移设备的生命周期为：
 
 1. 创建设备对象
 2. attach 到 `sysbus`
-3. 注册 MMIO 和设备特定运行时接线输入
+3. 声明 MMIO/IRQ resource 和设备特定运行时接线输入
 4. 应用 realize 前属性
-5. realize 到 `AddressSpace`
-6. reset 仅重置运行时状态，不重建拓扑
-7. unrealize 时先拆运行时状态，再移除已实现映射
+5. 板级代码映射 MMIO slot 并连接 IRQ slot
+6. realize 到 `AddressSpace`
+7. reset 仅重置运行时状态，不重建拓扑
+8. unrealize 时先拆运行时状态，再移除已实现映射
 
 核心规则是：结构性拓扑只创建一次，并跨 reset 保持稳定。reset
 不能隐式重建拓扑。
@@ -1006,6 +1087,15 @@ qdev bridge 外，不再提供额外兼容层或迁移层。
 这样可以明确 transport/proxy 边界，并为后续更复杂的 backend
 关系预留扩展空间，而不会把它们和 machine assembly 混在一起。
 
+#### 4.5 SiFive Test 和 TMP105
+
+- SiFive Test 使用 sysbus derive wrapper，同时把
+  shutdown/reset 行为保留在设备本地
+- TMP105 使用 mdevice derive wrapper，同时把 I2C register 行为保留在
+  设备本地
+- 两个设备都覆盖 MOM identity 和 lifecycle，而不要求每个设备文件
+  手写同样的 forwarding 方法
+
 ### 5. 参考机器装配规则
 
 `RefMachine` 是遵守 MOM 装配规则的 RISC-V 参考机器。
@@ -1030,11 +1120,17 @@ LoongArch64 参考机器的用户可见名称是 `loongarch64-ref`，
 共享 `tests` crate 当前覆盖：
 
 - 对象挂接和生命周期顺序
+- 类型元数据注册和 factory 创建
+- 对象树 path lookup
 - MMIO 只有在 realize 后才可见
+- sysbus declare/map/connect 行为
+- reset phase 顺序
+- 对象/设备/sysbus 宏易用性
 - UART、PLIC、ACLINT、virtio-mmio 的客户可见行为
 - sysbus unrealize / unmap 行为
 - machine 侧 migrated owner 集合
-- 防止回退到 direct root MMIO wiring 的源码级检查
+- 防止回退到 direct root MMIO wiring、手写 MOM 设备 accessor 或
+  底层 helper accessor 的源码级检查
 
 ### 7. 未来扩展点
 
@@ -1733,7 +1829,8 @@ x3 不能作为测试寄存器，因为 QEMU 侧的 `la gp, save_area`
 | hw_aclint | 13 | ACLINT 定时器 MMIO、IPI、mtime/mtimecmp |
 | hw_plic | 9 | PLIC 优先级、pending、enable、claim/complete |
 | hw_qdev | 8 | QDev 对象生命周期、属性、realize |
-| hw_sysbus | 7 | SysBus MMIO 映射、设备挂载 |
+| hw_mom | 14 | MOM type registry、reset phase、property/schema 和易用性宏/derive |
+| hw_sysbus | 11 | SysBus MMIO 映射、设备挂载、declare/map/connect |
 | hw_irq | 7 | IRQ 线 raise/lower、sink/source 接线 |
 | hw_chardev | 7 | 字符设备后端接口 |
 | hw_clock | 6 | 时钟频率、缩放 |

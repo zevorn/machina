@@ -11,7 +11,7 @@
 // and then asserts MTI via the IRQ line.
 //
 // Interior mutability: register state is in
-// DeviceRefCell<AclintRegs>, setup state in
+// DeviceRegs<AclintRegs>, setup state in
 // parking_lot::Mutex<SysBusDeviceState>.  All public
 // methods take &self so the device can be shared via
 // Arc<Aclint> without an outer Mutex.
@@ -20,15 +20,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use machina_core::address::GPA;
-use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
+use machina_core::device_cell::DeviceRegs;
 use machina_core::wfi::WfiWaker;
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::IrqLine;
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 const MSIP_BASE: u64 = 0x0000;
 const MTIMECMP_BASE: u64 = 0x4000;
@@ -43,14 +39,16 @@ struct TimerState {
     cancel_gen: Vec<AtomicU64>,
 }
 
-/// Mutable register state protected by DeviceRefCell.
-pub struct AclintRegs {
+/// Mutable register state protected by DeviceRegs.
+struct AclintRegs {
     epoch: Instant,
     mtime_base: u64,
     mtimecmp: Vec<u64>,
     msip: Vec<u32>,
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = [cancel_timers, lower_outputs, clear_wfi_deadline])]
 pub struct Aclint {
     // Setup-only state behind parking_lot::Mutex so that
     // attach_to_bus / register_mmio / realize_onto can be
@@ -58,7 +56,7 @@ pub struct Aclint {
     state: parking_lot::Mutex<SysBusDeviceState>,
     num_harts: u32,
     // Runtime register state.
-    regs: DeviceRefCell<AclintRegs>,
+    regs: DeviceRegs<AclintRegs>,
     // Output lines. Written only during init (behind
     // parking_lot::Mutex), read at runtime via the lock.
     mti_outputs: parking_lot::Mutex<Vec<Option<IrqLine>>>,
@@ -88,7 +86,7 @@ impl Aclint {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
             num_harts,
-            regs: DeviceRefCell::new(AclintRegs {
+            regs: DeviceRegs::new(AclintRegs {
                 epoch: Instant::now(),
                 mtime_base: 0,
                 mtimecmp: vec![u64::MAX; n],
@@ -100,57 +98,6 @@ impl Aclint {
             timer_state: Arc::new(TimerState { cancel_gen: gens }),
             exit_requests: parking_lot::Mutex::new(vec![None; n]),
         }
-    }
-
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.cancel_timers();
-        self.lower_outputs();
-        {
-            let wk = self.wfi_waker.lock();
-            if let Some(ref w) = *wk {
-                w.clear_deadline();
-            }
-        }
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    /// Access the inner SysBusDeviceState as `&dyn MDevice`
-    /// through a closure (for MOM introspection).
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
     }
 
     pub fn connect_mti(&self, hart: u32, irq: IrqLine) {
@@ -337,6 +284,13 @@ impl Aclint {
         let msi = self.msi_outputs.lock();
         for line in msi.iter().flatten() {
             line.lower();
+        }
+    }
+
+    fn clear_wfi_deadline(&self) {
+        let wk = self.wfi_waker.lock();
+        if let Some(ref w) = *wk {
+            w.clear_deadline();
         }
     }
 

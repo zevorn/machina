@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::mdev::{MDeviceError, MDeviceState};
+use machina_hw_core::mdev::MDeviceState;
 use machina_hw_i2c::{I2cError, I2cEvent, I2cSlave};
 
 const MANUFACTURER_ID: u8 = 0x55;
@@ -99,6 +98,8 @@ impl Tmp421State {
     }
 }
 
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = mdevice, lock = "parking_lot")]
 pub struct Tmp421 {
     mdevice: parking_lot::Mutex<MDeviceState>,
     address: u8,
@@ -134,27 +135,6 @@ impl Tmp421 {
             model,
             state: parking_lot::Mutex::new(Tmp421State::new(model)),
         })
-    }
-
-    pub fn realize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.mdevice.lock().mark_realized()
-    }
-
-    pub fn unrealize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.mdevice.lock().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.mdevice.lock().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
-        let guard = self.mdevice.lock();
-        f(&guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.mdevice.lock().object_info()
     }
 
     pub fn reset_runtime(&self) {

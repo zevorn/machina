@@ -1,13 +1,9 @@
 use std::sync::Arc;
 
-use machina_core::address::GPA;
-use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_core::device_cell::DeviceRegs;
+use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 const CORE_STATUS_OFF: u64 = 0x000;
 const CORE_EN_OFF: u64 = 0x004;
@@ -36,9 +32,11 @@ impl IpiCore {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct LoongArchIpi {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    cores: DeviceRefCell<Vec<IpiCore>>,
+    cores: DeviceRegs<Vec<IpiCore>>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
 
@@ -53,53 +51,9 @@ impl LoongArchIpi {
         let count = num_cpus.max(1) as usize;
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            cores: DeviceRefCell::new(vec![IpiCore::new(); count]),
+            cores: DeviceRegs::new(vec![IpiCore::new(); count]),
             outputs: parking_lot::Mutex::new(empty_outputs(count)),
         }
-    }
-
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.lower_outputs();
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    #[must_use]
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    #[must_use]
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
     }
 
     pub fn connect_output(&self, cpu_id: u32, irq: InterruptSource) {

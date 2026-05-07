@@ -8,13 +8,13 @@
 use std::sync::Arc;
 
 use machina_accel::timer::VirtualClock;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::IrqLine;
-use machina_hw_core::mdev::MDevice;
 
 const GPIO_KEY_LATENCY_NS: i64 = 100_000_000; // 100ms
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot_child")]
 pub struct GpioKey {
     state: parking_lot::Mutex<SysBusDeviceState>,
     irq: IrqLine,
@@ -61,46 +61,6 @@ impl GpioKey {
     /// Reset: cancel the pending timer without lowering IRQ.
     pub fn reset_runtime(&self) {
         self.cancel_timer();
-    }
-
-    pub fn attach_to_bus(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn realize(
-        self: &Arc<Self>,
-    ) -> Result<(), machina_hw_core::mdev::MDeviceError> {
-        {
-            let guard = self.state.lock();
-            if guard.device().parent_bus().is_none() {
-                return Err(machina_hw_core::mdev::MDeviceError::LateMutation(
-                    "must attach to parent bus before realize",
-                ));
-            }
-        }
-        self.state.lock().device_mut().mark_realized()
-    }
-
-    pub fn unrealize(
-        self: &Arc<Self>,
-    ) -> Result<(), machina_hw_core::mdev::MDeviceError> {
-        self.state.lock().device_mut().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
     }
 
     fn cancel_timer(&self) {

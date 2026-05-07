@@ -4,10 +4,10 @@
 //! host controllers and SPI bridges.  The controller-facing transport stays in
 //! [`crate::SdBus`]; this type owns card state and block media.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::mdev::{MDeviceError, MDeviceState};
+use machina_core::device_cell::DeviceRegs;
+use machina_hw_core::mdev::MDeviceState;
 use machina_hw_storage::{BlockBackend, BlockMedia, StorageError};
 
 use crate::{status, SdCard, SdRequest};
@@ -58,11 +58,13 @@ struct SdCardRegs {
     data_offset: usize,
 }
 
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = state, lock = "std")]
 pub struct SdMemoryCard<B: BlockBackend> {
     state: Mutex<MDeviceState>,
     media: BlockMedia<B>,
     config: SdCardConfig,
-    regs: Mutex<SdCardRegs>,
+    regs: DeviceRegs<SdCardRegs>,
 }
 
 impl<B: BlockBackend> SdMemoryCard<B> {
@@ -83,7 +85,7 @@ impl<B: BlockBackend> SdMemoryCard<B> {
             state: Mutex::new(MDeviceState::new(local_id)),
             media,
             config,
-            regs: Mutex::new(SdCardRegs {
+            regs: DeviceRegs::new(SdCardRegs {
                 state: CardState::Idle,
                 expecting_acmd: false,
                 ocr,
@@ -101,29 +103,8 @@ impl<B: BlockBackend> SdMemoryCard<B> {
         })
     }
 
-    pub fn realize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().unwrap().mark_realized()
-    }
-
-    pub fn unrealize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().unwrap().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().unwrap().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
-        let guard = self.state.lock().unwrap();
-        f(&guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().unwrap().object_info()
-    }
-
     pub fn reset_runtime(&self) {
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         self.reset_regs(&mut regs);
     }
 
@@ -188,7 +169,7 @@ impl<B: BlockBackend> SdMemoryCard<B> {
 
 impl<B: BlockBackend> SdCard for SdMemoryCard<B> {
     fn do_command(&self, req: &SdRequest, resp: &mut [u8]) -> usize {
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         if regs.expecting_acmd {
             regs.expecting_acmd = false;
             return match req.cmd {
@@ -484,7 +465,7 @@ impl<B: BlockBackend> SdCard for SdMemoryCard<B> {
     }
 
     fn write_byte(&self, value: u8) {
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         if regs.state != CardState::ReceivingData
             || regs.data_offset >= regs.data.len()
         {
@@ -507,7 +488,7 @@ impl<B: BlockBackend> SdCard for SdMemoryCard<B> {
     }
 
     fn read_byte(&self) -> u8 {
-        let mut regs = self.regs.lock().unwrap();
+        let mut regs = self.regs.lock();
         if regs.data_offset >= regs.data.len() {
             return 0xff;
         }
@@ -538,13 +519,13 @@ impl<B: BlockBackend> SdCard for SdMemoryCard<B> {
     }
 
     fn receive_ready(&self) -> bool {
-        let regs = self.regs.lock().unwrap();
+        let regs = self.regs.lock();
         regs.state == CardState::ReceivingData
             && regs.data_offset < regs.data.len()
     }
 
     fn data_ready(&self) -> bool {
-        let regs = self.regs.lock().unwrap();
+        let regs = self.regs.lock();
         regs.state == CardState::SendingData
             && regs.data_offset < regs.data.len()
     }

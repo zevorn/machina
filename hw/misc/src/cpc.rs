@@ -1,12 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use machina_core::address::GPA;
-use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_core::device_cell::DeviceRegs;
+use machina_hw_core::bus::SysBusDeviceState;
+use machina_memory::region::MmioOps;
 
 pub type CpcMtimeCb = Box<dyn Fn() -> u64 + Send + Sync>;
 pub type CpcVpActionCb = Box<dyn Fn(u64, bool) + Send + Sync>;
@@ -56,9 +52,11 @@ impl CpcRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct Cpc {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<CpcRegs>,
+    regs: DeviceRegs<CpcRegs>,
     mtime_cb: Mutex<Option<CpcMtimeCb>>,
     vp_action_cb: Mutex<Option<CpcVpActionCb>>,
 }
@@ -80,7 +78,7 @@ impl Cpc {
     ) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(CpcRegs::new(
+            regs: DeviceRegs::new(CpcRegs::new(
                 cluster_id,
                 num_vp,
                 num_hart,
@@ -114,49 +112,6 @@ impl Cpc {
 
     pub fn set_vp_action_cb(&self, cb: CpcVpActionCb) {
         *self.vp_action_cb.lock().unwrap() = Some(cb);
-    }
-
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    #[must_use]
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    #[must_use]
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
     }
 
     pub fn reset_runtime(&self) {

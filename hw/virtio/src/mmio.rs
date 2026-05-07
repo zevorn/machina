@@ -7,7 +7,6 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use machina_core::address::GPA;
 use machina_core::mobject::MObject;
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::irq::IrqLine;
@@ -153,6 +152,8 @@ impl VirtioMmioState {
 }
 
 /// VirtIO MMIO device wrapper implementing MmioOps.
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = device, lock = "direct", lifecycle = "manual")]
 pub struct VirtioMmio {
     device: SysBusDeviceState,
     state: Arc<Mutex<VirtioMmioState>>,
@@ -213,21 +214,6 @@ impl VirtioMmio {
         Arc::clone(&self.state)
     }
 
-    pub fn attach_to_bus(
-        &mut self,
-        bus: &mut SysBus,
-    ) -> Result<(), SysBusError> {
-        self.device.attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &mut self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.device.register_mmio(region, base)
-    }
-
     pub fn make_mmio_region(&self, name: &str, size: u64) -> MemoryRegion {
         MemoryRegion::io(
             name,
@@ -251,10 +237,6 @@ impl VirtioMmio {
     ) -> Result<(), SysBusError> {
         self.reset_runtime();
         self.device.unrealize_from(bus, address_space)
-    }
-
-    pub fn realized(&self) -> bool {
-        self.device.device().is_realized()
     }
 
     pub fn reset_runtime(&mut self) {

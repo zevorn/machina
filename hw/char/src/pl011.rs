@@ -1,14 +1,11 @@
 use std::sync::Arc;
 
-use machina_core::address::GPA;
-use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_core::device_cell::{DeviceRefCell, DeviceRegs};
+use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::chardev::CharFrontend;
 use machina_hw_core::irq::{InterruptSource, IrqSink};
-use machina_hw_core::mdev::{MDevice, MDeviceError};
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_hw_core::mdev::MDeviceError;
+use machina_memory::region::MmioOps;
 
 const PL011_FIFO_DEPTH: usize = 16;
 
@@ -242,9 +239,11 @@ impl Pl011Regs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = drop_chardev)]
 pub struct Pl011 {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<Pl011Regs>,
+    regs: DeviceRegs<Pl011Regs>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
     chardev: DeviceRefCell<Option<CharFrontend>>,
     configured_chardev: parking_lot::Mutex<Option<CharFrontend>>,
@@ -260,7 +259,7 @@ impl Pl011 {
     pub fn new_named(local_id: &str) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(Pl011Regs::new()),
+            regs: DeviceRegs::new(Pl011Regs::new()),
             outputs: parking_lot::Mutex::new({
                 let mut v = Vec::with_capacity(PL011_NUM_IRQS);
                 v.resize_with(PL011_NUM_IRQS, || None);
@@ -269,38 +268,6 @@ impl Pl011 {
             chardev: DeviceRefCell::new(None),
             configured_chardev: parking_lot::Mutex::new(None),
         }
-    }
-
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        if let Some(frontend) = self.chardev.borrow().take() {
-            drop(frontend);
-        }
-        self.state.lock().unrealize_from(bus, address_space)?;
-        Ok(())
     }
 
     pub fn attach_chardev(&self, fe: CharFrontend) -> Result<(), MDeviceError> {
@@ -315,21 +282,6 @@ impl Pl011 {
         if let Some(fe) = self.configured_chardev.lock().take() {
             *self.chardev.borrow() = Some(fe);
         }
-    }
-
-    #[must_use]
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    #[must_use]
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
     }
 
     pub fn connect_output(&self, idx: u32, irq: InterruptSource) {
@@ -348,6 +300,12 @@ impl Pl011 {
         let outputs = self.outputs.lock();
         for line in outputs.iter().flatten() {
             line.lower();
+        }
+    }
+
+    fn drop_chardev(&self) {
+        if let Some(frontend) = self.chardev.borrow().take() {
+            drop(frontend);
         }
     }
 

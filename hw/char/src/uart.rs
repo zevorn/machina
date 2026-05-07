@@ -11,7 +11,7 @@
 //   7: SCR
 //
 // Interior mutability: register state is in
-// DeviceRefCell<Uart16550Regs>, setup state in
+// DeviceRegs<Uart16550Regs>, setup state in
 // parking_lot::Mutex<SysBusDeviceState>.  All public
 // methods take &self so the device can be shared via
 // Arc<Uart16550> without an outer Mutex.
@@ -19,18 +19,16 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use machina_core::address::GPA;
-use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
+use machina_core::device_cell::{DeviceRefCell, DeviceRegs};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::chardev::{
     ByteCb, CharFrontend, ChardevResolveError, ChardevResolver,
 };
 use machina_hw_core::irq::IrqLine;
-use machina_hw_core::mdev::{MDevice, MDeviceError};
+use machina_hw_core::mdev::MDeviceError;
 use machina_hw_core::property::{MPropertySpec, MPropertyType, MPropertyValue};
 use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 // IER bits
 const IER_RX_AVAIL: u8 = 1 << 0;
@@ -100,8 +98,8 @@ impl From<ChardevResolveError> for UartError {
     }
 }
 
-/// Mutable register state protected by DeviceRefCell.
-pub struct Uart16550Regs {
+/// Mutable register state protected by DeviceRegs.
+struct Uart16550Regs {
     rbr: u8,
     thr: u8,
     ier: u8,
@@ -182,13 +180,15 @@ impl Uart16550Regs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", lifecycle = "manual")]
 pub struct Uart16550 {
     // Setup-only state behind parking_lot::Mutex so that
     // attach_to_bus / register_mmio / realize_onto can be
     // called through &self (Arc<Uart16550>).
     state: parking_lot::Mutex<SysBusDeviceState>,
     // Runtime register state.
-    regs: DeviceRefCell<Uart16550Regs>,
+    regs: DeviceRegs<Uart16550Regs>,
     // IRQ line. Written during realize, read at runtime.
     irq_line: parking_lot::Mutex<Option<IrqLine>>,
     // Chardev frontend for TX output.
@@ -213,7 +213,7 @@ impl Uart16550 {
 
         Self {
             state: parking_lot::Mutex::new(state),
-            regs: DeviceRefCell::new(Uart16550Regs::new()),
+            regs: DeviceRegs::new(Uart16550Regs::new()),
             irq_line: parking_lot::Mutex::new(None),
             chardev: DeviceRefCell::new(None),
             configured_chardev: parking_lot::Mutex::new(None),
@@ -233,22 +233,6 @@ impl Uart16550 {
             Some(MPropertyValue::Link(path)) => Some(path.clone()),
             _ => None,
         }
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
     }
 
     pub fn attach_irq(&self, irq: IrqLine) -> Result<(), SysBusError> {
@@ -346,17 +330,6 @@ impl Uart16550 {
         };
         let frontend = resolver.take_frontend(&path)?;
         Ok(Some((Some(path), frontend)))
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    /// Access the inner SysBusDeviceState as `&dyn MDevice`
-    /// through a closure (for MOM introspection).
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
     }
 
     pub fn reset_runtime(&self) {

@@ -2,14 +2,11 @@
 
 use std::sync::Arc;
 
-use machina_core::address::GPA;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_core::device_cell::DeviceRegs;
+use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
-use machina_hw_core::mdev::MDevice;
 use machina_hw_timer::{Ptimer, PtimerCallback};
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 pub const SBSA_GWDT_REFRESH_SIZE: u64 = 0x1000;
 pub const SBSA_GWDT_CONTROL_SIZE: u64 = 0x1000;
@@ -59,9 +56,11 @@ impl Default for SbsaGwdtRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", irq = "manual", before_unrealize = [lower_irq, stop_timer])]
 pub struct SbsaGwdt {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: parking_lot::Mutex<SbsaGwdtRegs>,
+    regs: DeviceRegs<SbsaGwdtRegs>,
     irq: parking_lot::Mutex<Option<InterruptSource>>,
     clock_frequency: u32,
     timer: Arc<Ptimer>,
@@ -95,7 +94,7 @@ impl SbsaGwdt {
                 state: parking_lot::Mutex::new(SysBusDeviceState::new(
                     local_id,
                 )),
-                regs: parking_lot::Mutex::new(SbsaGwdtRegs::default()),
+                regs: DeviceRegs::new(SbsaGwdtRegs::default()),
                 irq: parking_lot::Mutex::new(None),
                 clock_frequency,
                 timer: Ptimer::new(Some(callback), 0),
@@ -103,53 +102,10 @@ impl SbsaGwdt {
         })
     }
 
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.lower_irq();
-        self.stop_timer();
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
     pub fn reset_runtime(&self) {
         *self.regs.lock() = SbsaGwdtRegs::default();
         self.stop_timer();
         self.lower_irq();
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
     }
 
     pub fn connect_irq(&self, irq: InterruptSource) {

@@ -29,8 +29,22 @@ pub struct SysBusMapping {
 }
 
 struct RegisteredSysBusMapping {
-    desc: SysBusMapping,
+    owner: String,
+    name: String,
+    base: Option<GPA>,
+    size: u64,
     region: Option<MemoryRegion>,
+}
+
+impl RegisteredSysBusMapping {
+    fn desc(&self) -> Option<SysBusMapping> {
+        self.base.map(|base| SysBusMapping {
+            owner: self.owner.clone(),
+            name: self.name.clone(),
+            base,
+            size: self.size,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +55,13 @@ pub enum SysBusError {
     ParentBusMismatch { attached: String, expected: String },
     DetachedObject(String),
     MissingMmio(String),
+    MissingMmioMapping(String),
+    InvalidMmioSlot(usize),
+    MmioAlreadyMapped(String),
     MissingRealizedMapping(String),
+    MissingIrq(String),
+    InvalidIrqSlot(usize),
+    IrqAlreadyConnected(String),
     MmioOverlap { existing: String, requested: String },
 }
 
@@ -68,8 +88,29 @@ impl fmt::Display for SysBusError {
             Self::MissingMmio(device) => {
                 write!(f, "sysbus device '{device}' has no MMIO mappings")
             }
+            Self::MissingMmioMapping(name) => {
+                write!(f, "sysbus MMIO slot '{name}' has no board mapping")
+            }
+            Self::InvalidMmioSlot(slot) => {
+                write!(f, "sysbus MMIO slot {slot} does not exist")
+            }
+            Self::MmioAlreadyMapped(name) => {
+                write!(f, "sysbus MMIO slot '{name}' is already mapped")
+            }
             Self::MissingRealizedMapping(name) => {
                 write!(f, "sysbus realized mapping '{name}' is missing")
+            }
+            Self::MissingIrq(device) => {
+                write!(
+                    f,
+                    "sysbus device '{device}' has unconnected IRQ outputs"
+                )
+            }
+            Self::InvalidIrqSlot(slot) => {
+                write!(f, "sysbus IRQ slot {slot} does not exist")
+            }
+            Self::IrqAlreadyConnected(device) => {
+                write!(f, "sysbus IRQ slot for '{device}' is already connected")
             }
             Self::MmioOverlap {
                 existing,
@@ -101,6 +142,7 @@ impl From<MObjectError> for SysBusError {
 pub struct SysBusDeviceState {
     device: MDeviceState,
     mappings: Vec<RegisteredSysBusMapping>,
+    irq_slots: Vec<Option<IrqLine>>,
     irq_outputs: Vec<IrqLine>,
 }
 
@@ -109,6 +151,7 @@ impl SysBusDeviceState {
         Self {
             device: MDeviceState::new(local_id),
             mappings: Vec::new(),
+            irq_slots: Vec::new(),
             irq_outputs: Vec::new(),
         }
     }
@@ -135,45 +178,125 @@ impl SysBusDeviceState {
         region: MemoryRegion,
         base: GPA,
     ) -> Result<(), SysBusError> {
+        let slot = self.declare_mmio(region)?;
+        if let Err(err) = self.map_mmio(slot, base) {
+            self.mappings.remove(slot);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    pub fn declare_mmio(
+        &mut self,
+        region: MemoryRegion,
+    ) -> Result<usize, SysBusError> {
         if self.device.is_realized() {
             return Err(MDeviceError::LateMutation("sysbus_mmio").into());
         }
 
-        let requested = SysBusMapping {
+        let slot = self.mappings.len();
+        self.mappings.push(RegisteredSysBusMapping {
             owner: self.device.local_id().to_string(),
             name: region.name.clone(),
-            base,
             size: region.size,
+            base: None,
+            region: Some(region),
+        });
+        Ok(slot)
+    }
+
+    pub fn map_mmio(
+        &mut self,
+        slot: usize,
+        base: GPA,
+    ) -> Result<(), SysBusError> {
+        if self.device.is_realized() {
+            return Err(MDeviceError::LateMutation("sysbus_mmio").into());
+        }
+
+        let requested = {
+            let mapping = self
+                .mappings
+                .get(slot)
+                .ok_or(SysBusError::InvalidMmioSlot(slot))?;
+            if mapping.base.is_some() {
+                return Err(SysBusError::MmioAlreadyMapped(
+                    mapping.name.clone(),
+                ));
+            }
+            SysBusMapping {
+                owner: mapping.owner.clone(),
+                name: mapping.name.clone(),
+                base,
+                size: mapping.size,
+            }
         };
 
-        for existing in &self.mappings {
-            if ranges_overlap(&existing.desc, &requested) {
-                return Err(SysBusError::MmioOverlap {
-                    existing: existing.desc.name.clone(),
-                    requested: requested.name.clone(),
-                });
+        for (index, existing) in self.mappings.iter().enumerate() {
+            if index == slot {
+                continue;
+            }
+            if let Some(existing) = existing.desc() {
+                if ranges_overlap(&existing, &requested) {
+                    return Err(SysBusError::MmioOverlap {
+                        existing: existing.name,
+                        requested: requested.name,
+                    });
+                }
             }
         }
 
-        self.mappings.push(RegisteredSysBusMapping {
-            desc: requested,
-            region: Some(region),
-        });
+        self.mappings[slot].base = Some(base);
         Ok(())
     }
 
     pub fn register_irq(&mut self, irq: IrqLine) -> Result<(), SysBusError> {
+        let slot = self.declare_irq()?;
+        self.connect_irq(slot, irq)
+    }
+
+    pub fn declare_irq(&mut self) -> Result<usize, SysBusError> {
         if self.device.is_realized() {
             return Err(MDeviceError::LateMutation("sysbus_irq").into());
         }
-        self.irq_outputs.push(irq);
+        let slot = self.irq_slots.len();
+        self.irq_slots.push(None);
+        Ok(slot)
+    }
+
+    pub fn connect_irq(
+        &mut self,
+        slot: usize,
+        irq: IrqLine,
+    ) -> Result<(), SysBusError> {
+        if self.device.is_realized() {
+            return Err(MDeviceError::LateMutation("sysbus_irq").into());
+        }
+
+        let irq_slot = self
+            .irq_slots
+            .get_mut(slot)
+            .ok_or(SysBusError::InvalidIrqSlot(slot))?;
+        if irq_slot.is_some() {
+            return Err(SysBusError::IrqAlreadyConnected(
+                self.device.local_id().to_string(),
+            ));
+        }
+
+        *irq_slot = Some(irq);
+        self.refresh_irq_outputs();
         Ok(())
+    }
+
+    fn refresh_irq_outputs(&mut self) {
+        self.irq_outputs =
+            self.irq_slots.iter().filter_map(Clone::clone).collect();
     }
 
     pub fn mappings(&self) -> Vec<SysBusMapping> {
         self.mappings
             .iter()
-            .map(|mapping| mapping.desc.clone())
+            .filter_map(RegisteredSysBusMapping::desc)
             .collect()
     }
 
@@ -196,6 +319,20 @@ impl SysBusDeviceState {
             ));
         }
 
+        for mapping in &self.mappings {
+            if mapping.base.is_none() {
+                return Err(SysBusError::MissingMmioMapping(
+                    mapping.name.clone(),
+                ));
+            }
+        }
+
+        if self.irq_slots.iter().any(Option::is_none) {
+            return Err(SysBusError::MissingIrq(
+                self.device.local_id().to_string(),
+            ));
+        }
+
         match self.device.parent_bus() {
             Some(attached) if attached == bus.name => {}
             Some(attached) => {
@@ -208,21 +345,25 @@ impl SysBusDeviceState {
         }
 
         for mapping in &self.mappings {
-            bus.validate_mapping(&mapping.desc)?;
+            bus.validate_mapping(
+                &mapping
+                    .desc()
+                    .expect("mapped sysbus slot must have a descriptor"),
+            )?;
         }
 
         self.device.mark_realized()?;
 
         for mapping in &mut self.mappings {
-            let desc = mapping.desc.clone();
-            bus.record_mapping(desc);
+            let desc = mapping
+                .desc()
+                .expect("mapped sysbus slot must have a descriptor");
+            bus.record_mapping(desc.clone());
             let region = mapping
                 .region
                 .take()
                 .expect("sysbus MMIO region must exist before realize");
-            address_space
-                .root_mut()
-                .add_subregion(region, mapping.desc.base);
+            address_space.root_mut().add_subregion(region, desc.base);
         }
 
         address_space.update_flat_view();
@@ -239,22 +380,849 @@ impl SysBusDeviceState {
         }
 
         for mapping in self.mappings.iter_mut().rev() {
+            let desc = mapping
+                .desc()
+                .expect("realized sysbus slot must have a descriptor");
             let region = address_space
-                .remove_subregion(mapping.desc.base, &mapping.desc.name)
+                .remove_subregion(desc.base, &desc.name)
                 .ok_or_else(|| {
-                    SysBusError::MissingRealizedMapping(
-                        mapping.desc.name.clone(),
-                    )
+                    SysBusError::MissingRealizedMapping(desc.name.clone())
                 })?;
             mapping.region = Some(region);
-            bus.remove_mapping(&mapping.desc).ok_or_else(|| {
-                SysBusError::MissingRealizedMapping(mapping.desc.name.clone())
+            bus.remove_mapping(&desc).ok_or_else(|| {
+                SysBusError::MissingRealizedMapping(desc.name.clone())
             })?;
         }
 
         self.device.mark_unrealized()?;
         Ok(())
     }
+}
+
+#[macro_export]
+macro_rules! machina_impl_sysbus_device {
+    ($ty:ty, $field:ident) => {
+        impl $crate::machina_core::mobject::MObject for $ty {
+            fn mobject_state(
+                &self,
+            ) -> &$crate::machina_core::mobject::MObjectState {
+                $crate::machina_core::mobject::MObject::mobject_state(
+                    &self.$field,
+                )
+            }
+
+            fn mobject_state_mut(
+                &mut self,
+            ) -> &mut $crate::machina_core::mobject::MObjectState {
+                $crate::machina_core::mobject::MObject::mobject_state_mut(
+                    &mut self.$field,
+                )
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+
+        impl $crate::mdev::MDevice for $ty {
+            fn mdevice_state(&self) -> &$crate::mdev::MDeviceState {
+                $crate::mdev::MDevice::mdevice_state(&self.$field)
+            }
+
+            fn mdevice_state_mut(&mut self) -> &mut $crate::mdev::MDeviceState {
+                $crate::mdev::MDevice::mdevice_state_mut(&mut self.$field)
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! machina_std_mutex_sysbus_accessors {
+    ($field:ident) => {
+        $crate::machina_std_mutex_sysbus_accessors!(@base $field, {}, include_irq);
+        $crate::machina_std_mutex_sysbus_accessors!(@lifecycle $field, {}, {});
+    };
+    ($field:ident, lock = $lock:ident) => {
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @base_with_lock $field,
+            $lock,
+            include_irq
+        );
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @lifecycle_with_lock $field,
+            $lock
+        );
+    };
+    ($field:ident, lifecycle = manual) => {
+        $crate::machina_std_mutex_sysbus_accessors!(@base $field, {}, include_irq);
+    };
+    ($field:ident, before_unrealize = $before_unrealize:ident) => {
+        $crate::machina_std_mutex_sysbus_accessors!(@base $field, {}, include_irq);
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [],
+            [$before_unrealize]
+        );
+    };
+    ($field:ident, before_unrealize = [$($before_unrealize:ident),+ $(,)?]) => {
+        $crate::machina_std_mutex_sysbus_accessors!(@base $field, {}, include_irq);
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [],
+            [$($before_unrealize),+]
+        );
+    };
+    (
+        $field:ident,
+        before_register_mmio = $before_register_mmio:ident,
+        before_realize = $before_realize:ident
+    ) => {
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @base_method $field,
+            $before_register_mmio,
+            include_irq
+        );
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [$before_realize],
+            []
+        );
+    };
+    (
+        $field:ident,
+        before_register_mmio = $before_register_mmio:ident,
+        before_realize = $before_realize:ident,
+        before_unrealize = $before_unrealize:ident
+    ) => {
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @base_method $field,
+            $before_register_mmio,
+            include_irq
+        );
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [$before_realize],
+            [$before_unrealize]
+        );
+    };
+    (
+        $field:ident,
+        before_register_mmio = $before_register_mmio:ident,
+        before_realize = $before_realize:ident,
+        before_unrealize = [$($before_unrealize:ident),+ $(,)?]
+    ) => {
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @base_method $field,
+            $before_register_mmio,
+            include_irq
+        );
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [$before_realize],
+            [$($before_unrealize),+]
+        );
+    };
+    ($field:ident, irq = manual) => {
+        $crate::machina_std_mutex_sysbus_accessors!(@base $field, {}, manual_irq);
+        $crate::machina_std_mutex_sysbus_accessors!(@lifecycle $field, {}, {});
+    };
+    ($field:ident, irq = manual, before_unrealize = $before_unrealize:ident) => {
+        $crate::machina_std_mutex_sysbus_accessors!(@base $field, {}, manual_irq);
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [],
+            [$before_unrealize]
+        );
+    };
+    ($field:ident, irq = manual, before_unrealize = [$($before_unrealize:ident),+ $(,)?]) => {
+        $crate::machina_std_mutex_sysbus_accessors!(@base $field, {}, manual_irq);
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [],
+            [$($before_unrealize),+]
+        );
+    };
+    (@base_method $field:ident, $before_register_mmio:ident, include_irq) => {
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @base_method $field,
+            $before_register_mmio,
+            manual_irq
+        );
+
+        pub fn register_irq(
+            &self,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().register_irq(irq)
+        }
+
+        pub fn declare_irq(&self) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().declare_irq()
+        }
+
+        pub fn connect_irq(
+            &self,
+            slot: usize,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().connect_irq(slot, irq)
+        }
+    };
+    (@base_method $field:ident, $before_register_mmio:ident, manual_irq) => {
+        pub fn attach_to_bus(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().attach_to_bus(bus)
+        }
+
+        pub fn register_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$before_register_mmio(&region)?;
+            self.$field.lock().unwrap().register_mmio(region, base)
+        }
+
+        pub fn declare_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+        ) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().declare_mmio(region)
+        }
+
+        pub fn map_mmio(
+            &self,
+            slot: usize,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().map_mmio(slot, base)
+        }
+
+        pub fn realized(&self) -> bool {
+            let guard = self.$field.lock().unwrap();
+            $crate::mdev::MDevice::is_realized(&*guard)
+        }
+
+        pub fn with_mdevice<T>(
+            &self,
+            f: impl FnOnce(&dyn $crate::mdev::MDevice) -> T,
+        ) -> T {
+            let guard = self.$field.lock().unwrap();
+            f(&*guard)
+        }
+
+        pub fn object_info(
+            &self,
+        ) -> $crate::machina_core::mobject::MObjectInfo {
+            let guard = self.$field.lock().unwrap();
+            $crate::machina_core::mobject::MObject::object_info(&*guard)
+        }
+    };
+    (@base_with_lock $field:ident, $lock:ident, include_irq) => {
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @base_with_lock $field,
+            $lock,
+            manual_irq
+        );
+
+        pub fn register_irq(
+            &self,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).register_irq(irq)
+        }
+
+        pub fn declare_irq(&self) -> Result<usize, $crate::bus::SysBusError> {
+            $lock(&self.$field).declare_irq()
+        }
+
+        pub fn connect_irq(
+            &self,
+            slot: usize,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).connect_irq(slot, irq)
+        }
+    };
+    (@base_with_lock $field:ident, $lock:ident, manual_irq) => {
+        pub fn attach_to_bus(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).attach_to_bus(bus)
+        }
+
+        pub fn register_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).register_mmio(region, base)
+        }
+
+        pub fn declare_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+        ) -> Result<usize, $crate::bus::SysBusError> {
+            $lock(&self.$field).declare_mmio(region)
+        }
+
+        pub fn map_mmio(
+            &self,
+            slot: usize,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).map_mmio(slot, base)
+        }
+
+        pub fn realized(&self) -> bool {
+            let guard = $lock(&self.$field);
+            $crate::mdev::MDevice::is_realized(&*guard)
+        }
+
+        pub fn with_mdevice<T>(
+            &self,
+            f: impl FnOnce(&dyn $crate::mdev::MDevice) -> T,
+        ) -> T {
+            let guard = $lock(&self.$field);
+            f(&*guard)
+        }
+
+        pub fn object_info(
+            &self,
+        ) -> $crate::machina_core::mobject::MObjectInfo {
+            let guard = $lock(&self.$field);
+            $crate::machina_core::mobject::MObject::object_info(&*guard)
+        }
+    };
+    (@base $field:ident, $before_register_mmio:block, include_irq) => {
+        $crate::machina_std_mutex_sysbus_accessors!(@base $field, $before_register_mmio, manual_irq);
+
+        pub fn register_irq(
+            &self,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().register_irq(irq)
+        }
+
+        pub fn declare_irq(&self) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().declare_irq()
+        }
+
+        pub fn connect_irq(
+            &self,
+            slot: usize,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().connect_irq(slot, irq)
+        }
+    };
+    (@base $field:ident, $before_register_mmio:block, manual_irq) => {
+        pub fn attach_to_bus(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().attach_to_bus(bus)
+        }
+
+        pub fn register_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $before_register_mmio
+            self.$field.lock().unwrap().register_mmio(region, base)
+        }
+
+        pub fn declare_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+        ) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().declare_mmio(region)
+        }
+
+        pub fn map_mmio(
+            &self,
+            slot: usize,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().unwrap().map_mmio(slot, base)
+        }
+
+        pub fn realized(&self) -> bool {
+            let guard = self.$field.lock().unwrap();
+            $crate::mdev::MDevice::is_realized(&*guard)
+        }
+
+        pub fn with_mdevice<T>(
+            &self,
+            f: impl FnOnce(&dyn $crate::mdev::MDevice) -> T,
+        ) -> T {
+            let guard = self.$field.lock().unwrap();
+            f(&*guard)
+        }
+
+        pub fn object_info(
+            &self,
+        ) -> $crate::machina_core::mobject::MObjectInfo {
+            let guard = self.$field.lock().unwrap();
+            $crate::machina_core::mobject::MObject::object_info(&*guard)
+        }
+    };
+    (@lifecycle $field:ident, $before_realize:block, $before_unrealize:block) => {
+        pub fn realize_onto(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $before_realize
+            self.$field.lock().unwrap().realize_onto(bus, address_space)
+        }
+
+        pub fn unrealize_from(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $before_unrealize
+            self.$field.lock().unwrap().unrealize_from(bus, address_space)
+        }
+    };
+    (@lifecycle_with_lock $field:ident, $lock:ident) => {
+        pub fn realize_onto(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).realize_onto(bus, address_space)
+        }
+
+        pub fn unrealize_from(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).unrealize_from(bus, address_space)
+        }
+    };
+    (@lifecycle_methods $field:ident, [$($before_realize:ident),*], [$($before_unrealize:ident),*]) => {
+        pub fn realize_onto(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $(self.$before_realize()?;)*
+            self.$field.lock().unwrap().realize_onto(bus, address_space)
+        }
+
+        pub fn unrealize_from(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $(self.$before_unrealize();)*
+            self.$field.lock().unwrap().unrealize_from(bus, address_space)
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! machina_parking_lot_sysbus_accessors {
+    ($field:ident) => {
+        $crate::machina_parking_lot_sysbus_accessors!(@base $field, {}, include_irq);
+        $crate::machina_parking_lot_sysbus_accessors!(@lifecycle $field, {}, {});
+    };
+    ($field:ident, lifecycle = manual) => {
+        $crate::machina_parking_lot_sysbus_accessors!(@base $field, {}, include_irq);
+    };
+    ($field:ident, before_unrealize = $before_unrealize:ident) => {
+        $crate::machina_parking_lot_sysbus_accessors!(@base $field, {}, include_irq);
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [],
+            [$before_unrealize]
+        );
+    };
+    ($field:ident, before_unrealize = [$($before_unrealize:ident),+ $(,)?]) => {
+        $crate::machina_parking_lot_sysbus_accessors!(@base $field, {}, include_irq);
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [],
+            [$($before_unrealize),+]
+        );
+    };
+    (
+        $field:ident,
+        before_register_mmio = $before_register_mmio:ident,
+        before_realize = $before_realize:ident
+    ) => {
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @base_method $field,
+            $before_register_mmio,
+            include_irq
+        );
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [$before_realize],
+            []
+        );
+    };
+    (
+        $field:ident,
+        before_register_mmio = $before_register_mmio:ident,
+        before_realize = $before_realize:ident,
+        before_unrealize = $before_unrealize:ident
+    ) => {
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @base_method $field,
+            $before_register_mmio,
+            include_irq
+        );
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [$before_realize],
+            [$before_unrealize]
+        );
+    };
+    (
+        $field:ident,
+        before_register_mmio = $before_register_mmio:ident,
+        before_realize = $before_realize:ident,
+        before_unrealize = [$($before_unrealize:ident),+ $(,)?]
+    ) => {
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @base_method $field,
+            $before_register_mmio,
+            include_irq
+        );
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [$before_realize],
+            [$($before_unrealize),+]
+        );
+    };
+    ($field:ident, irq = manual) => {
+        $crate::machina_parking_lot_sysbus_accessors!(@base $field, {}, manual_irq);
+        $crate::machina_parking_lot_sysbus_accessors!(@lifecycle $field, {}, {});
+    };
+    ($field:ident, irq = manual, before_unrealize = $before_unrealize:ident) => {
+        $crate::machina_parking_lot_sysbus_accessors!(@base $field, {}, manual_irq);
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [],
+            [$before_unrealize]
+        );
+    };
+    ($field:ident, irq = manual, before_unrealize = [$($before_unrealize:ident),+ $(,)?]) => {
+        $crate::machina_parking_lot_sysbus_accessors!(@base $field, {}, manual_irq);
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @lifecycle_methods $field,
+            [],
+            [$($before_unrealize),+]
+        );
+    };
+    (@base_method $field:ident, $before_register_mmio:ident, include_irq) => {
+        $crate::machina_parking_lot_sysbus_accessors!(
+            @base_method $field,
+            $before_register_mmio,
+            manual_irq
+        );
+
+        pub fn register_irq(
+            &self,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().register_irq(irq)
+        }
+
+        pub fn declare_irq(&self) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.lock().declare_irq()
+        }
+
+        pub fn connect_irq(
+            &self,
+            slot: usize,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().connect_irq(slot, irq)
+        }
+    };
+    (@base_method $field:ident, $before_register_mmio:ident, manual_irq) => {
+        pub fn attach_to_bus(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().attach_to_bus(bus)
+        }
+
+        pub fn register_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$before_register_mmio(&region)?;
+            self.$field.lock().register_mmio(region, base)
+        }
+
+        pub fn declare_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+        ) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.lock().declare_mmio(region)
+        }
+
+        pub fn map_mmio(
+            &self,
+            slot: usize,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().map_mmio(slot, base)
+        }
+
+        pub fn realized(&self) -> bool {
+            self.$field.lock().device().is_realized()
+        }
+
+        pub fn with_mdevice<T>(
+            &self,
+            f: impl FnOnce(&dyn $crate::mdev::MDevice) -> T,
+        ) -> T {
+            let guard = self.$field.lock();
+            f(&*guard)
+        }
+
+        pub fn object_info(
+            &self,
+        ) -> $crate::machina_core::mobject::MObjectInfo {
+            let guard = self.$field.lock();
+            $crate::machina_core::mobject::MObject::object_info(&*guard)
+        }
+    };
+    (@base $field:ident, $before_register_mmio:block, include_irq) => {
+        $crate::machina_parking_lot_sysbus_accessors!(@base $field, $before_register_mmio, manual_irq);
+
+        pub fn register_irq(
+            &self,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().register_irq(irq)
+        }
+
+        pub fn declare_irq(&self) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.lock().declare_irq()
+        }
+
+        pub fn connect_irq(
+            &self,
+            slot: usize,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().connect_irq(slot, irq)
+        }
+    };
+    (@base $field:ident, $before_register_mmio:block, manual_irq) => {
+        pub fn attach_to_bus(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().attach_to_bus(bus)
+        }
+
+        pub fn register_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $before_register_mmio
+            self.$field.lock().register_mmio(region, base)
+        }
+
+        pub fn declare_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+        ) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.lock().declare_mmio(region)
+        }
+
+        pub fn map_mmio(
+            &self,
+            slot: usize,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().map_mmio(slot, base)
+        }
+
+        pub fn realized(&self) -> bool {
+            self.$field.lock().device().is_realized()
+        }
+
+        pub fn with_mdevice<T>(
+            &self,
+            f: impl FnOnce(&dyn $crate::mdev::MDevice) -> T,
+        ) -> T {
+            let guard = self.$field.lock();
+            f(&*guard)
+        }
+
+        pub fn object_info(
+            &self,
+        ) -> $crate::machina_core::mobject::MObjectInfo {
+            let guard = self.$field.lock();
+            $crate::machina_core::mobject::MObject::object_info(&*guard)
+        }
+    };
+    (@lifecycle $field:ident, $before_realize:block, $before_unrealize:block) => {
+        pub fn realize_onto(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $before_realize
+            self.$field.lock().realize_onto(bus, address_space)
+        }
+
+        pub fn unrealize_from(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $before_unrealize
+            self.$field.lock().unrealize_from(bus, address_space)
+        }
+    };
+    (@lifecycle_methods $field:ident, [$($before_realize:ident),*], [$($before_unrealize:ident),*]) => {
+        pub fn realize_onto(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $(self.$before_realize()?;)*
+            self.$field.lock().realize_onto(bus, address_space)
+        }
+
+        pub fn unrealize_from(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $(self.$before_unrealize();)*
+            self.$field.lock().unrealize_from(bus, address_space)
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! machina_direct_sysbus_accessors {
+    ($field:ident, lifecycle = manual) => {
+        $crate::machina_direct_sysbus_accessors!(@base $field);
+    };
+    (@base $field:ident) => {
+        pub fn attach_to_bus(
+            &mut self,
+            bus: &mut $crate::bus::SysBus,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.attach_to_bus(bus)
+        }
+
+        pub fn register_mmio(
+            &mut self,
+            region: $crate::machina_memory::region::MemoryRegion,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.register_mmio(region, base)
+        }
+
+        pub fn declare_mmio(
+            &mut self,
+            region: $crate::machina_memory::region::MemoryRegion,
+        ) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.declare_mmio(region)
+        }
+
+        pub fn map_mmio(
+            &mut self,
+            slot: usize,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.map_mmio(slot, base)
+        }
+
+        pub fn register_irq(
+            &mut self,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.register_irq(irq)
+        }
+
+        pub fn declare_irq(&mut self) -> Result<usize, $crate::bus::SysBusError> {
+            self.$field.declare_irq()
+        }
+
+        pub fn connect_irq(
+            &mut self,
+            slot: usize,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.connect_irq(slot, irq)
+        }
+
+        pub fn realized(&self) -> bool {
+            self.$field.device().is_realized()
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! machina_parking_lot_sysbus_child_accessors {
+    ($field:ident) => {
+        pub fn attach_to_bus(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            self.$field.lock().attach_to_bus(bus)
+        }
+
+        pub fn realize(&self) -> Result<(), $crate::mdev::MDeviceError> {
+            {
+                let guard = self.$field.lock();
+                if guard.device().parent_bus().is_none() {
+                    return Err($crate::mdev::MDeviceError::LateMutation(
+                        "must attach to parent bus before realize",
+                    ));
+                }
+            }
+            self.$field.lock().device_mut().mark_realized()
+        }
+
+        pub fn unrealize(&self) -> Result<(), $crate::mdev::MDeviceError> {
+            self.$field.lock().device_mut().mark_unrealized()
+        }
+
+        pub fn realized(&self) -> bool {
+            self.$field.lock().device().is_realized()
+        }
+
+        pub fn with_mdevice<T>(
+            &self,
+            f: impl FnOnce(&dyn $crate::mdev::MDevice) -> T,
+        ) -> T {
+            let guard = self.$field.lock();
+            f(&*guard)
+        }
+
+        pub fn object_info(
+            &self,
+        ) -> $crate::machina_core::mobject::MObjectInfo {
+            let guard = self.$field.lock();
+            $crate::machina_core::mobject::MObject::object_info(&*guard)
+        }
+    };
 }
 
 impl MObject for SysBusDeviceState {

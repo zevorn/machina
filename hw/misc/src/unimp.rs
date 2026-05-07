@@ -6,13 +6,17 @@
 
 use std::sync::Arc;
 
-use machina_core::address::GPA;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::mdev::{MDevice, MDeviceError};
-use machina_memory::address_space::AddressSpace;
+use machina_hw_core::bus::{SysBusDeviceState, SysBusError};
+use machina_hw_core::mdev::MDeviceError;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(
+    state = state,
+    lock = "parking_lot",
+    before_register_mmio = validate_mmio_region,
+    before_realize = validate_realize
+)]
 pub struct Unimp {
     state: parking_lot::Mutex<SysBusDeviceState>,
     name: String,
@@ -36,17 +40,9 @@ impl Unimp {
         self.size
     }
 
-    pub fn attach_to_bus(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        self: &Arc<Self>,
-        region: MemoryRegion,
-        base: GPA,
+    fn validate_mmio_region(
+        &self,
+        region: &MemoryRegion,
     ) -> Result<(), SysBusError> {
         if region.name != self.name {
             return Err(SysBusError::Device(MDeviceError::LateMutation(
@@ -58,45 +54,20 @@ impl Unimp {
                 "unimp region size must match configured size",
             )));
         }
-        self.state.lock().register_mmio(region, base)
+        Ok(())
     }
 
-    pub fn realize_onto(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
+    fn validate_realize(&self) -> Result<(), SysBusError> {
         if self.size == 0 {
             return Err(SysBusError::Device(MDeviceError::LateMutation(
                 "unimp size must be non-zero",
             )));
         }
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
+        Ok(())
     }
 
     pub fn reset_runtime(&self) {
         // No runtime state to reset.
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
     }
 
     pub fn do_read(&self, _offset: u64, _size: u32) -> u64 {

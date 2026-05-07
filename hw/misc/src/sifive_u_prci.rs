@@ -7,13 +7,9 @@
 
 use std::sync::Arc;
 
-use machina_core::address::GPA;
 use machina_core::device_cell::DeviceCell;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_hw_core::bus::SysBusDeviceState;
+use machina_memory::region::MmioOps;
 
 // Register offsets
 const HFXOSCCFG: u64 = 0x00;
@@ -43,6 +39,8 @@ const PLLCFG0_DEFAULT: u32 =
 
 pub const SIFIVE_U_PRCI_REG_SIZE: u64 = 0x1000;
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct SifiveUPRCI {
     state: parking_lot::Mutex<SysBusDeviceState>,
     hfxosccfg: DeviceCell<u32>,
@@ -76,41 +74,6 @@ impl SifiveUPRCI {
         })
     }
 
-    pub fn attach_to_bus(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        self: &Arc<Self>,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        self: &Arc<Self>,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
     pub fn reset_runtime(&self) {
         // Reference reset only assigns these five registers;
         // ddrpllcfg1, gemgxlpllcfg1, devicesreset, and
@@ -120,15 +83,6 @@ impl SifiveUPRCI {
         self.ddrpllcfg0.set(PLLCFG0_DEFAULT);
         self.gemgxlpllcfg0.set(PLLCFG0_DEFAULT);
         self.coreclksel.set(CORECLKSEL_HFCLK);
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
     }
 
     pub fn do_read(&self, offset: u64, size: u32) -> u64 {

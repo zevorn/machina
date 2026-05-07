@@ -5,10 +5,9 @@
 //! transactions return bytes from that pointer and auto-increment it.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::mdev::{MDeviceError, MDeviceState};
+use machina_hw_core::mdev::MDeviceState;
 use machina_hw_storage::{BlockBackend, StorageError};
 
 use crate::{I2cError, I2cEvent, I2cSlave};
@@ -78,6 +77,8 @@ impl At24cState {
 }
 
 /// Byte-addressed AT24C-compatible EEPROM.
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = mdevice, lock = "std")]
 pub struct At24cEeprom<B: BlockBackend> {
     mdevice: Mutex<MDeviceState>,
     backend: B,
@@ -107,27 +108,6 @@ impl<B: BlockBackend> At24cEeprom<B> {
             config,
             state: Mutex::new(At24cState::new()),
         })
-    }
-
-    pub fn realize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.mdevice.lock().unwrap().mark_realized()
-    }
-
-    pub fn unrealize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.mdevice.lock().unwrap().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.mdevice.lock().unwrap().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
-        let guard = self.mdevice.lock().unwrap();
-        f(&guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.mdevice.lock().unwrap().object_info()
     }
 
     fn read_byte(&self, offset: u32) -> u8 {

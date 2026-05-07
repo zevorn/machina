@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 use std::process::{
     Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio,
 };
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 const DEFAULT_SETTLE_DELAY: Duration = Duration::from_millis(500);
@@ -24,6 +25,10 @@ const RESPONSE_COUNT_MISMATCH: &str = "qtest response count mismatch";
 /// are piped so qtest responses and trace output can be collected after
 /// QEMU terminates.
 pub struct QemuProbe {
+    // Keep external QEMU/qtest probes serialized for the lifetime of each
+    // emulator process; some machines lose qtest responses under heavy
+    // test-level concurrency.
+    _guard: MutexGuard<'static, ()>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
@@ -42,6 +47,13 @@ impl QemuProbe {
         machine: &str,
         extra_args: &[String],
     ) -> Result<Self, String> {
+        static PROBE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+        let guard = PROBE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("QEMU probe lock poisoned");
+
         let mut child = Command::new(qemu_bin)
             .arg("-M")
             .arg(machine)
@@ -63,6 +75,7 @@ impl QemuProbe {
         let stderr = child.stderr.take().ok_or("no QEMU stderr")?;
 
         Ok(Self {
+            _guard: guard,
             stdin: Some(stdin),
             stdout: Some(stdout),
             stderr: Some(stderr),

@@ -1,13 +1,9 @@
 use std::sync::Arc;
 
-use machina_core::address::GPA;
-use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_core::device_cell::DeviceRegs;
+use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 const IMSIC_MMIO_PAGE_SZ: u64 = 0x1000;
 const IMSIC_MMIO_PAGE_LE: u64 = 0x00;
@@ -47,6 +43,8 @@ fn aia_ireg_xlen(ireg: u64) -> u32 {
     ((ireg >> 24) & 0xff) as u32
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct RiscvImsic {
     state: parking_lot::Mutex<SysBusDeviceState>,
     #[allow(dead_code)]
@@ -55,9 +53,9 @@ pub struct RiscvImsic {
     hartid: u32,
     num_pages: u32,
     num_irqs: u32,
-    eidelivery: DeviceRefCell<Vec<u32>>,
-    eithreshold: DeviceRefCell<Vec<u32>>,
-    eistate: DeviceRefCell<Vec<u32>>,
+    eidelivery: DeviceRegs<Vec<u32>>,
+    eithreshold: DeviceRegs<Vec<u32>>,
+    eistate: DeviceRegs<Vec<u32>>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
 
@@ -83,9 +81,9 @@ impl RiscvImsic {
             mmode,
             num_pages: np,
             num_irqs: ni,
-            eidelivery: DeviceRefCell::new(vec![0u32; np as usize]),
-            eithreshold: DeviceRefCell::new(vec![0u32; np as usize]),
-            eistate: DeviceRefCell::new(vec![0u32; num_eistate]),
+            eidelivery: DeviceRegs::new(vec![0u32; np as usize]),
+            eithreshold: DeviceRegs::new(vec![0u32; np as usize]),
+            eistate: DeviceRegs::new(vec![0u32; num_eistate]),
             outputs: parking_lot::Mutex::new({
                 let mut v = Vec::with_capacity(np as usize);
                 v.resize_with(np as usize, || None);
@@ -93,50 +91,6 @@ impl RiscvImsic {
             }),
             hartid,
         }
-    }
-
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.lower_outputs();
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    #[must_use]
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    #[must_use]
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
     }
 
     pub fn connect_output(&self, page: u32, irq: InterruptSource) {

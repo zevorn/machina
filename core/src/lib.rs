@@ -9,5 +9,5 @@ pub mod wfi;
 pub use address::{GPA, GVA, HVA};
 pub use cpu::GuestCpu;
 pub use machine::{Machine, MachineOpts, MachineState};
-pub use mobject::{MObject, MObjectError, MObjectState};
+pub use mobject::{MObject, MObjectError, MObjectState, MObjectTree};
 pub use wfi::WfiWaker;

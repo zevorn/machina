@@ -248,3 +248,142 @@ fn test_sysbus_unrealize_removes_mmio_from_address_space() {
     assert!(bus.mappings().is_empty());
     assert!(!state.is_realized());
 }
+
+#[test]
+fn test_sysbus_board_maps_declared_mmio_slot_before_realize() {
+    let mut bus = SysBus::new("sysbus0");
+    let mut state = SysBusDeviceState::new("uart0");
+    let region = MemoryRegion::io(
+        "uart0-mmio",
+        0x100,
+        Arc::new(TestMmio {
+            value: Arc::new(Mutex::new(0)),
+        }),
+    );
+    let slot = state.declare_mmio(region).expect("declare MMIO slot");
+
+    assert!(state.mappings().is_empty());
+    state
+        .map_mmio(slot, GPA::new(0x1000_0000))
+        .expect("board maps MMIO slot");
+
+    let mut address_space = make_address_space();
+    state.attach_to_bus(&mut bus).unwrap();
+    state.realize_onto(&mut bus, &mut address_space).unwrap();
+
+    assert!(address_space.is_mapped(GPA::new(0x1000_0000), 4));
+    assert_eq!(bus.mappings().len(), 1);
+    assert_eq!(bus.mappings()[0].base, GPA::new(0x1000_0000));
+}
+
+#[test]
+fn test_sysbus_realize_rejects_unmapped_declared_mmio_slot() {
+    let mut bus = SysBus::new("sysbus0");
+    let mut state = SysBusDeviceState::new("uart0");
+    state
+        .declare_mmio(MemoryRegion::io(
+            "uart0-mmio",
+            0x100,
+            Arc::new(TestMmio {
+                value: Arc::new(Mutex::new(0)),
+            }),
+        ))
+        .expect("declare MMIO slot");
+
+    let mut address_space = make_address_space();
+    state.attach_to_bus(&mut bus).unwrap();
+    let err = state
+        .realize_onto(&mut bus, &mut address_space)
+        .expect_err("unmapped MMIO slot must fail");
+
+    assert_eq!(
+        err,
+        SysBusError::MissingMmioMapping("uart0-mmio".to_string())
+    );
+    assert!(!state.is_realized());
+    assert!(bus.mappings().is_empty());
+}
+
+#[test]
+fn test_sysbus_declared_irq_must_be_connected_before_realize() {
+    let mut bus = SysBus::new("sysbus0");
+    let mut state = SysBusDeviceState::new("uart0");
+    let region = MemoryRegion::io(
+        "uart0-mmio",
+        0x100,
+        Arc::new(TestMmio {
+            value: Arc::new(Mutex::new(0)),
+        }),
+    );
+    state.register_mmio(region, GPA::new(0x1000_0000)).unwrap();
+    let irq_slot = state.declare_irq().expect("declare IRQ slot");
+
+    let mut address_space = make_address_space();
+    state.attach_to_bus(&mut bus).unwrap();
+    let err = state
+        .realize_onto(&mut bus, &mut address_space)
+        .expect_err("unconnected IRQ slot must fail");
+    assert_eq!(err, SysBusError::MissingIrq("uart0".to_string()));
+
+    state.connect_irq(irq_slot, test_irq_line()).unwrap();
+    state.realize_onto(&mut bus, &mut address_space).unwrap();
+    assert_eq!(state.irq_outputs().len(), 1);
+}
+
+#[test]
+fn test_sysbus_rejects_late_slot_mutation_after_realize() {
+    let mut bus = SysBus::new("sysbus0");
+    let mut state = SysBusDeviceState::new("uart0");
+    let slot = state
+        .declare_mmio(MemoryRegion::io(
+            "uart0-mmio",
+            0x100,
+            Arc::new(TestMmio {
+                value: Arc::new(Mutex::new(0)),
+            }),
+        ))
+        .expect("declare MMIO slot");
+    state
+        .map_mmio(slot, GPA::new(0x1000_0000))
+        .expect("map MMIO slot");
+    let irq_slot = state.declare_irq().expect("declare IRQ slot");
+    state
+        .connect_irq(irq_slot, test_irq_line())
+        .expect("connect IRQ slot");
+
+    let mut address_space = make_address_space();
+    state.attach_to_bus(&mut bus).unwrap();
+    state.realize_onto(&mut bus, &mut address_space).unwrap();
+
+    let late_mmio = MemoryRegion::io(
+        "late-mmio",
+        0x100,
+        Arc::new(TestMmio {
+            value: Arc::new(Mutex::new(0)),
+        }),
+    );
+    assert_eq!(
+        state.declare_mmio(late_mmio).unwrap_err(),
+        SysBusError::Device(machina_hw_core::mdev::MDeviceError::LateMutation(
+            "sysbus_mmio",
+        ))
+    );
+    assert_eq!(
+        state.map_mmio(slot, GPA::new(0x1000_1000)).unwrap_err(),
+        SysBusError::Device(machina_hw_core::mdev::MDeviceError::LateMutation(
+            "sysbus_mmio",
+        ))
+    );
+    assert_eq!(
+        state.declare_irq().unwrap_err(),
+        SysBusError::Device(machina_hw_core::mdev::MDeviceError::LateMutation(
+            "sysbus_irq",
+        ))
+    );
+    assert_eq!(
+        state.connect_irq(irq_slot, test_irq_line()).unwrap_err(),
+        SysBusError::Device(machina_hw_core::mdev::MDeviceError::LateMutation(
+            "sysbus_irq",
+        ))
+    );
+}

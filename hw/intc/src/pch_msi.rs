@@ -1,13 +1,9 @@
 use std::sync::Arc;
 
-use machina_core::address::GPA;
-use machina_core::device_cell::DeviceRefCell;
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
+use machina_core::device_cell::DeviceRegs;
+use machina_hw_core::bus::SysBusDeviceState;
 use machina_hw_core::irq::InterruptSource;
-use machina_hw_core::mdev::MDevice;
-use machina_memory::address_space::AddressSpace;
-use machina_memory::region::{MemoryRegion, MmioOps};
+use machina_memory::region::MmioOps;
 
 const PCH_MSI_MAX_IRQ_NUM: u32 = 224;
 
@@ -31,9 +27,11 @@ impl PchMsiRegs {
     }
 }
 
+#[derive(machina_hw_core::SysBusDevice)]
+#[mom(state = state, lock = "parking_lot", before_unrealize = lower_outputs)]
 pub struct PchMsi {
     state: parking_lot::Mutex<SysBusDeviceState>,
-    regs: DeviceRefCell<PchMsiRegs>,
+    regs: DeviceRegs<PchMsiRegs>,
     outputs: parking_lot::Mutex<Vec<Option<InterruptSource>>>,
 }
 
@@ -48,7 +46,7 @@ impl PchMsi {
         let irq_count = irq_num as usize;
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new(local_id)),
-            regs: DeviceRefCell::new(PchMsiRegs { irq_base, irq_num }),
+            regs: DeviceRegs::new(PchMsiRegs { irq_base, irq_num }),
             outputs: parking_lot::Mutex::new({
                 let mut v = Vec::with_capacity(irq_count);
                 v.resize_with(irq_count, || None);
@@ -59,50 +57,6 @@ impl PchMsi {
 
     pub fn validate_properties(&self) -> Result<(), String> {
         self.regs.borrow().validate()
-    }
-
-    pub fn attach_to_bus(&self, bus: &mut SysBus) -> Result<(), SysBusError> {
-        self.state.lock().attach_to_bus(bus)
-    }
-
-    pub fn register_mmio(
-        &self,
-        region: MemoryRegion,
-        base: GPA,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().register_mmio(region, base)
-    }
-
-    pub fn realize_onto(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.state.lock().realize_onto(bus, address_space)
-    }
-
-    pub fn unrealize_from(
-        &self,
-        bus: &mut SysBus,
-        address_space: &mut AddressSpace,
-    ) -> Result<(), SysBusError> {
-        self.lower_outputs();
-        self.state.lock().unrealize_from(bus, address_space)
-    }
-
-    #[must_use]
-    pub fn realized(&self) -> bool {
-        self.state.lock().device().is_realized()
-    }
-
-    #[must_use]
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
-        let guard = self.state.lock();
-        f(&*guard)
     }
 
     pub fn connect_output(&self, irq: u32, line: InterruptSource) {

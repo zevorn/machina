@@ -1,7 +1,5 @@
-use std::sync::Arc;
-
-use machina_core::mobject::{MObject, MObjectInfo};
-use machina_hw_core::mdev::{MDeviceError, MDeviceState};
+use machina_core::device_cell::DeviceRegs;
+use machina_hw_core::mdev::MDeviceState;
 use machina_hw_storage::{BlockBackend, FlashMedia};
 use parking_lot::Mutex;
 
@@ -321,12 +319,14 @@ impl M25p80Regs {
 }
 
 /// SPI NOR flash model for the m25p80-compatible command set.
+#[derive(machina_hw_core::MDevice)]
+#[mom(state = state, lock = "parking_lot")]
 pub struct M25p80<B: BlockBackend> {
     state: Mutex<MDeviceState>,
     cs_index: u8,
     jedec_id: [u8; 3],
     flash: FlashMedia<B>,
-    regs: Mutex<M25p80Regs>,
+    regs: DeviceRegs<M25p80Regs>,
 }
 
 impl<B: BlockBackend> M25p80<B> {
@@ -348,29 +348,8 @@ impl<B: BlockBackend> M25p80<B> {
             cs_index,
             jedec_id,
             flash,
-            regs: Mutex::new(M25p80Regs::new(jedec_id[0], flash_size)),
+            regs: DeviceRegs::new(M25p80Regs::new(jedec_id[0], flash_size)),
         }
-    }
-
-    pub fn realize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().mark_realized()
-    }
-
-    pub fn unrealize(self: &Arc<Self>) -> Result<(), MDeviceError> {
-        self.state.lock().mark_unrealized()
-    }
-
-    pub fn realized(&self) -> bool {
-        self.state.lock().is_realized()
-    }
-
-    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
-        let guard = self.state.lock();
-        f(&guard)
-    }
-
-    pub fn object_info(&self) -> MObjectInfo {
-        self.state.lock().object_info()
     }
 
     pub fn reset_runtime(&self) {

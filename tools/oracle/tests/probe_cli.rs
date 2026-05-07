@@ -4,6 +4,7 @@
 //! regardless of target directory — no artifact-walking needed.
 
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 fn probe_binary() -> &'static str {
     env!("CARGO_BIN_EXE_machina-qemu-hw-probe")
@@ -11,6 +12,15 @@ fn probe_binary() -> &'static str {
 
 /// Run the probe and return (status, stdout, stderr).
 fn run_probe(args: &[&str]) -> (std::process::ExitStatus, String, String) {
+    static PROBE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    // QEMU-backed probe processes are not isolated enough to run reliably
+    // under the Rust test harness' default test-level concurrency.
+    let _guard = PROBE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("probe lock poisoned");
+
     let output = Command::new(probe_binary())
         .args(args)
         .output()

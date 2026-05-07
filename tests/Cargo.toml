@@ -37,6 +37,7 @@ machina-gdbstub = { workspace = true }
 machina-softfloat = { workspace = true }
 machina-util = { workspace = true }
 libc = { workspace = true }
+parking_lot = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 flate2 = { workspace = true }
