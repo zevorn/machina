@@ -145,4 +145,84 @@ mod tests {
             vec![0xde, 0xad, 0xbe, 0xef]
         );
     }
+
+    fn qemu_system_riscv64() -> Option<String> {
+        machina_oracle::qemu::find_qemu("riscv64")
+    }
+
+    #[test]
+    fn qemu_k230_wdt_register_mask_slice_matches_machina() {
+        use machina_hw_watchdog::k230::{
+            K230Wdt, K230WdtMmio, CR, PROT_LEVEL, TORR,
+        };
+        use machina_memory::region::MmioOps;
+        use machina_oracle::qemu::QemuProbe;
+
+        let Some(qemu) = qemu_system_riscv64() else {
+            eprintln!("skip: qemu-system-riscv64 not found");
+            return;
+        };
+
+        let extra = vec![
+            "-accel".to_string(),
+            "qtest".to_string(),
+            "-bios".to_string(),
+            "none".to_string(),
+        ];
+        let mut probe = match QemuProbe::spawn(&qemu, "k230", &extra) {
+            Ok(probe) => probe,
+            Err(err) => {
+                eprintln!("skip: cannot start QEMU k230 qtest slice: {err}");
+                return;
+            }
+        };
+
+        let base = 0x9110_6000;
+        probe.send_write(base + CR, 4, u64::MAX).unwrap();
+        probe.send_read(base + CR, 4).unwrap();
+        probe.send_write(base + TORR, 4, u64::MAX).unwrap();
+        probe.send_read(base + TORR, 4).unwrap();
+        probe.send_write(base + PROT_LEVEL, 4, u64::MAX).unwrap();
+        probe.send_read(base + PROT_LEVEL, 4).unwrap();
+
+        let qemu_values = match probe.finish() {
+            Ok(values) if values.len() == 3 => values,
+            Ok(values) => {
+                eprintln!(
+                    "skip: unexpected QEMU k230 qtest response count: {}",
+                    values.len()
+                );
+                return;
+            }
+            Err(err) => {
+                eprintln!("skip: QEMU k230 qtest slice unavailable: {err}");
+                return;
+            }
+        };
+
+        let wdt = K230Wdt::new_named("k230-wdt0");
+        let mmio = K230WdtMmio(wdt);
+        mmio.write(CR, 4, u64::MAX);
+        let machina_cr = mmio.read(CR, 4);
+        mmio.write(TORR, 4, u64::MAX);
+        let machina_torr = mmio.read(TORR, 4);
+        mmio.write(PROT_LEVEL, 4, u64::MAX);
+        let machina_prot = mmio.read(PROT_LEVEL, 4);
+
+        assert_eq!(qemu_values, vec![machina_cr, machina_torr, machina_prot]);
+    }
+
+    #[test]
+    fn k230_sdk_boot_artifacts_are_discovered_for_opt_in_smoke() {
+        let Some(sdk) =
+            std::env::var_os("MACHINA_K230_SDK").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skip: MACHINA_K230_SDK not set");
+            return;
+        };
+
+        assert!(sdk.join("images/little-core/Image").is_file());
+        assert!(sdk.join("images/little-core/k230.dtb").is_file());
+        assert!(sdk.join("images/little-core/rootfs.cpio.gz").is_file());
+    }
 }
