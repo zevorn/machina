@@ -7,7 +7,7 @@ use machina_accel::translate::translate_and_execute;
 use machina_accel::HostCodeGen;
 use machina_accel::X86_64CodeGen;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
-use machina_guest_riscv::riscv::ext::{MisaExt, RiscvCfg};
+use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
 use machina_guest_riscv::translator_loop;
 

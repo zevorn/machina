@@ -20,6 +20,15 @@ const RTC_ICR: u64 = 0x1c;
 
 const PL031_ID: [u8; 8] = [0x31, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1];
 
+fn access_mask(size: u32) -> u64 {
+    match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
+
 struct Pl031Regs {
     // DR: data register (current time in seconds)
     dr: u32,
@@ -59,9 +68,7 @@ impl Pl031Regs {
     }
 
     fn set_alarm(&mut self) {
-        // Only fire if mr is non-zero and matches dr.
-        // Default mr=0, dr=0 should not trigger.
-        if self.mr != 0 && self.mr == self.dr {
+        if self.mr == self.dr {
             self.is = 1;
         }
     }
@@ -183,9 +190,19 @@ impl Default for Pl031 {
 pub struct Pl031Mmio(pub Arc<Pl031>);
 
 impl MmioOps for Pl031Mmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if let Some(value) = read_unaligned(self, offset, size) {
+            return value;
+        }
+
+        if size == 8 {
+            let lo = self.read(offset, 4);
+            let hi = self.read(offset.wrapping_add(4), 4);
+            return lo | (hi << 32);
+        }
+
         let regs = self.0.regs.borrow();
-        match offset {
+        let value = match offset {
             RTC_DR => u64::from(regs.dr),
             RTC_MR => u64::from(regs.mr),
             RTC_LR => u64::from(regs.lr),
@@ -203,11 +220,18 @@ impl MmioOps for Pl031Mmio {
                 }
             }
             _ => 0,
-        }
+        };
+        value & access_mask(size)
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
-        let value = val as u32;
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size == 8 {
+            self.write(offset, 4, val);
+            self.write(offset.wrapping_add(4), 4, val >> 32);
+            return;
+        }
+
+        let value = (val & access_mask(size)) as u32;
         match offset {
             RTC_LR => {
                 let mut regs = self.0.regs.borrow();
@@ -245,4 +269,33 @@ impl MmioOps for Pl031Mmio {
             _ => {}
         }
     }
+}
+
+fn read_unaligned(mmio: &Pl031Mmio, offset: u64, size: u32) -> Option<u64> {
+    if !needs_unaligned_split(offset, size) {
+        return None;
+    }
+
+    let mut value = 0u64;
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        value |= (mmio.read(cur, chunk) & access_mask(chunk)) << (done * 8);
+        done += chunk;
+    }
+    Some(value)
+}
+
+fn needs_unaligned_split(offset: u64, size: u32) -> bool {
+    matches!(size, 2 | 4 | 8) && !offset.is_multiple_of(u64::from(size))
+}
+
+fn aligned_chunk_size(offset: u64, remaining: u32) -> u32 {
+    for size in [8u32, 4, 2, 1] {
+        if remaining >= size && offset.is_multiple_of(u64::from(size)) {
+            return size;
+        }
+    }
+    1
 }

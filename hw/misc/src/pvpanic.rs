@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use machina_core::address::GPA;
+use machina_core::mobject::{MObject, MObjectInfo};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::mdev::MDevice;
 use machina_memory::address_space::AddressSpace;
@@ -97,20 +98,26 @@ impl Pvpanic {
         f(&*guard)
     }
 
-    fn do_read(&self, _offset: u64, size: u32) -> u64 {
-        // QEMU pvpanic ISA: min_access_size=1, max_access_size=1.
-        if size != 1 {
-            return 0;
-        }
-        u64::from(self.events)
+    pub fn object_info(&self) -> MObjectInfo {
+        self.state.lock().object_info()
     }
 
-    fn do_write(&self, _offset: u64, size: u32, val: u64) {
-        // QEMU pvpanic ISA: min_access_size=1, max_access_size=1.
-        if size != 1 {
-            return;
+    fn do_read(&self, _offset: u64, size: u32) -> u64 {
+        let event_byte = u64::from(self.events);
+        match size {
+            1 => event_byte,
+            2 => event_byte | (event_byte << 8),
+            4 => {
+                event_byte
+                    | (event_byte << 8)
+                    | (event_byte << 16)
+                    | (event_byte << 24)
+            }
+            _ => 0,
         }
-        let event = val as u8;
+    }
+
+    fn dispatch_event(&self, event: u8) {
         if let Some(ref handler) = *self.on_event.lock() {
             if event & event::PANICKED != 0 {
                 handler(event::PANICKED);
@@ -119,6 +126,18 @@ impl Pvpanic {
             } else if event & event::SHUTDOWN != 0 {
                 handler(event::SHUTDOWN);
             }
+        }
+    }
+
+    fn do_write(&self, _offset: u64, size: u32, val: u64) {
+        match size {
+            1 | 2 | 4 => {
+                for byte in 0..size {
+                    let event = ((val >> (byte * 8)) & 0xFF) as u8;
+                    self.dispatch_event(event);
+                }
+            }
+            _ => {}
         }
     }
 }

@@ -30,6 +30,69 @@ const REG_IOF_EN: u64 = 0x038;
 const REG_IOF_SEL: u64 = 0x03C;
 const REG_OUT_XOR: u64 = 0x040;
 
+fn access_mask(size: u32) -> u64 {
+    match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
+
+fn read_unaligned(
+    mmio: &SiFiveGpioMmio,
+    offset: u64,
+    size: u32,
+) -> Option<u64> {
+    if !needs_unaligned_split(offset, size) {
+        return None;
+    }
+
+    let mut value = 0u64;
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        value |= (mmio.read(cur, chunk) & access_mask(chunk)) << (done * 8);
+        done += chunk;
+    }
+    Some(value)
+}
+
+fn write_unaligned(
+    mmio: &SiFiveGpioMmio,
+    offset: u64,
+    size: u32,
+    val: u64,
+) -> bool {
+    if !needs_unaligned_split(offset, size) {
+        return false;
+    }
+
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        let chunk_value = (val >> (done * 8)) & access_mask(chunk);
+        mmio.write(cur, chunk, chunk_value);
+        done += chunk;
+    }
+    true
+}
+
+fn needs_unaligned_split(offset: u64, size: u32) -> bool {
+    matches!(size, 2 | 4 | 8) && !offset.is_multiple_of(u64::from(size))
+}
+
+fn aligned_chunk_size(offset: u64, remaining: u32) -> u32 {
+    for size in [8u32, 4, 2, 1] {
+        if remaining >= size && offset.is_multiple_of(u64::from(size)) {
+            return size;
+        }
+    }
+    1
+}
+
 struct SiFiveGpioRegs {
     value: u32,
     input_en: u32,
@@ -275,9 +338,19 @@ impl Default for SiFiveGpio {
 pub struct SiFiveGpioMmio(pub Arc<SiFiveGpio>);
 
 impl MmioOps for SiFiveGpioMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if let Some(value) = read_unaligned(self, offset, size) {
+            return value;
+        }
+
+        if size == 8 {
+            let lo = self.read(offset, 4);
+            let hi = self.read(offset.wrapping_add(4), 4);
+            return lo | (hi << 32);
+        }
+
         let regs = self.0.regs.borrow();
-        match offset {
+        let value = match offset {
             REG_VALUE => u64::from(regs.value),
             REG_INPUT_EN => u64::from(regs.input_en),
             REG_OUTPUT_EN => u64::from(regs.output_en),
@@ -296,11 +369,22 @@ impl MmioOps for SiFiveGpioMmio {
             REG_IOF_SEL => u64::from(regs.iof_sel),
             REG_OUT_XOR => u64::from(regs.out_xor),
             _ => 0,
-        }
+        };
+        value & access_mask(size)
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
-        let value = val as u32;
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if write_unaligned(self, offset, size, val) {
+            return;
+        }
+
+        if size == 8 {
+            self.write(offset, 4, val);
+            self.write(offset.wrapping_add(4), 4, val >> 32);
+            return;
+        }
+
+        let value = (val & access_mask(size)) as u32;
         let mut regs = self.0.regs.borrow();
         match offset {
             REG_INPUT_EN => regs.input_en = value,

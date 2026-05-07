@@ -342,7 +342,11 @@ impl Default for Ls7aRtc {
 pub struct Ls7aRtcMmio(pub Arc<Ls7aRtc>);
 
 impl MmioOps for Ls7aRtcMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
+        }
+
         let regs = self.0.regs.borrow();
         match offset {
             SYS_TOYREAD0 => {
@@ -377,19 +381,17 @@ impl MmioOps for Ls7aRtcMmio {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size != 4 {
+            return;
+        }
+
         let value = val as u32;
         match offset {
             SYS_TOYWRITE0 => {
                 let mut regs = self.0.regs.borrow();
                 if regs.toy_enabled() {
                     regs.decode_toy_write0(value);
-                    regs.check_toy_matches();
-                }
-                let pending = regs.irq_pending;
-                drop(regs);
-                if pending {
-                    self.0.update_irq();
                 }
             }
             SYS_TOYWRITE1 => {
@@ -402,36 +404,18 @@ impl MmioOps for Ls7aRtcMmio {
                 let mut regs = self.0.regs.borrow();
                 if regs.toy_enabled() {
                     regs.toymatch[0] = value;
-                    regs.check_toy_matches();
-                }
-                let pending = regs.irq_pending;
-                drop(regs);
-                if pending {
-                    self.0.update_irq();
                 }
             }
             SYS_TOYMATCH1 => {
                 let mut regs = self.0.regs.borrow();
                 if regs.toy_enabled() {
                     regs.toymatch[1] = value;
-                    regs.check_toy_matches();
-                }
-                let pending = regs.irq_pending;
-                drop(regs);
-                if pending {
-                    self.0.update_irq();
                 }
             }
             SYS_TOYMATCH2 => {
                 let mut regs = self.0.regs.borrow();
                 if regs.toy_enabled() {
                     regs.toymatch[2] = value;
-                    regs.check_toy_matches();
-                }
-                let pending = regs.irq_pending;
-                drop(regs);
-                if pending {
-                    self.0.update_irq();
                 }
             }
             SYS_RTCCTRL => {
@@ -441,48 +425,24 @@ impl MmioOps for Ls7aRtcMmio {
                 let mut regs = self.0.regs.borrow();
                 if regs.rtc_enabled() {
                     regs.rtc_offset = value as i64 - regs.rtc_ticks() as i64;
-                    regs.check_rtc_matches();
-                }
-                let pending = regs.irq_pending;
-                drop(regs);
-                if pending {
-                    self.0.update_irq();
                 }
             }
             SYS_RTCMATCH0 => {
                 let mut regs = self.0.regs.borrow();
                 if regs.rtc_enabled() {
                     regs.rtcmatch[0] = value;
-                    regs.check_rtc_matches();
-                }
-                let pending = regs.irq_pending;
-                drop(regs);
-                if pending {
-                    self.0.update_irq();
                 }
             }
             SYS_RTCMATCH1 => {
                 let mut regs = self.0.regs.borrow();
                 if regs.rtc_enabled() {
                     regs.rtcmatch[1] = value;
-                    regs.check_rtc_matches();
-                }
-                let pending = regs.irq_pending;
-                drop(regs);
-                if pending {
-                    self.0.update_irq();
                 }
             }
             SYS_RTCMATCH2 => {
                 let mut regs = self.0.regs.borrow();
                 if regs.rtc_enabled() {
                     regs.rtcmatch[2] = value;
-                    regs.check_rtc_matches();
-                }
-                let pending = regs.irq_pending;
-                drop(regs);
-                if pending {
-                    self.0.update_irq();
                 }
             }
             _ => {}

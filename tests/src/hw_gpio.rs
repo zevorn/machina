@@ -3,12 +3,14 @@
 use std::sync::{Arc, Mutex};
 
 use machina_accel::timer::{ClockType, VirtualClock};
+use machina_core::address::GPA;
 use machina_hw_core::bus::SysBus;
 use machina_hw_core::irq::{InterruptSource, IrqLine, IrqSink};
 use machina_hw_gpio::pl061::{Pl061, Pl061Mmio};
 use machina_hw_gpio::sifive_gpio::{SiFiveGpio, SiFiveGpioMmio};
 use machina_hw_gpio::{GpioKey, GpioPwr, GpioPwrAction};
-use machina_memory::region::MmioOps;
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
 
 struct TestSink {
     level: Mutex<bool>,
@@ -26,10 +28,6 @@ impl TestSink {
     fn level(&self) -> bool {
         *self.level.lock().unwrap()
     }
-
-    fn call_count(&self) -> u32 {
-        *self.calls.lock().unwrap()
-    }
 }
 
 impl IrqSink for TestSink {
@@ -37,6 +35,13 @@ impl IrqSink for TestSink {
         *self.level.lock().unwrap() = level;
         *self.calls.lock().unwrap() += 1;
     }
+}
+
+fn make_test_aspace() -> (AddressSpace, SysBus) {
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let aspace = AddressSpace::new(root);
+    let bus = SysBus::new("sysbus");
+    (aspace, bus)
 }
 
 // ---- GpioKey ----
@@ -123,13 +128,15 @@ fn test_gpio_key_reset_cancels_timer() {
 }
 
 #[test]
-fn test_gpio_key_lifecycle() {
+fn test_gpio_key_lifecycle_and_mom_identity() {
     let clock = Arc::new(VirtualClock::new(ClockType::Virtual));
     let sink = Arc::new(TestSink::new());
     let irq = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, 0);
 
     let key = GpioKey::new(irq, clock.clone());
     assert!(!key.realized());
+    key.with_mdevice(|device| assert_eq!(device.local_id(), "gpio_key"));
+    assert_eq!(key.object_info().local_id, "gpio_key");
 
     // Reject realize before bus attach
     let err = key.realize().unwrap_err();
@@ -214,9 +221,11 @@ fn test_gpio_pwr_no_handler_safe() {
 }
 
 #[test]
-fn test_gpio_pwr_lifecycle() {
+fn test_gpio_pwr_lifecycle_and_mom_identity() {
     let pwr = GpioPwr::new();
     assert!(!pwr.realized());
+    pwr.with_mdevice(|device| assert_eq!(device.local_id(), "gpio_pwr"));
+    assert_eq!(pwr.object_info().local_id, "gpio_pwr");
 
     // Reject realize before bus attach
     let err = pwr.realize().unwrap_err();
@@ -242,6 +251,32 @@ fn test_gpio_pwr_lifecycle() {
 // -- PL061 tests --
 
 #[test]
+fn test_pl061_lifecycle_and_mom_identity() {
+    let pl061 = Arc::new(Pl061::new());
+    assert!(!pl061.realized());
+    pl061.with_mdevice(|device| assert_eq!(device.local_id(), "pl061"));
+    assert_eq!(pl061.object_info().local_id, "pl061");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x1000);
+    let region = MemoryRegion::io(
+        "pl061",
+        0x1000,
+        Arc::new(Pl061Mmio(Arc::clone(&pl061))),
+    );
+
+    pl061.attach_to_bus(&mut bus).unwrap();
+    pl061.register_mmio(region, base).unwrap();
+    pl061.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(pl061.realized());
+    assert_eq!(aspace.read(GPA(base.0 + 0xfe0), 4), 0x61);
+
+    let err = pl061.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
 fn test_pl061_defaults() {
     let pl061 = Arc::new(Pl061::new());
     let mmio = Pl061Mmio(Arc::clone(&pl061));
@@ -254,6 +289,46 @@ fn test_pl061_defaults() {
     assert_eq!(mmio.read(0x414, 4), 0); // istate
     assert_eq!(mmio.read(0x418, 4), 0); // mis
     assert_eq!(mmio.read(0x420, 4), 0); // afsel
+}
+
+#[test]
+fn test_pl061_wide_mmio_read_splits_into_32bit_callbacks() {
+    let pl061 = Arc::new(Pl061::new());
+    let mmio = Pl061Mmio(Arc::clone(&pl061));
+
+    mmio.write(0x400, 4, 0x12);
+    mmio.write(0x404, 4, 0x34);
+
+    assert_eq!(mmio.read(0x400, 8), 0x0000_0034_0000_0012);
+}
+
+#[test]
+fn test_pl061_wide_mmio_write_splits_into_32bit_callbacks() {
+    let pl061 = Arc::new(Pl061::new());
+    let mmio = Pl061Mmio(Arc::clone(&pl061));
+
+    mmio.write(0x400, 8, 0x0000_0034_0000_0012);
+
+    assert_eq!(mmio.read(0x400, 4), 0x12);
+    assert_eq!(mmio.read(0x404, 4), 0x34);
+}
+
+#[test]
+fn test_pl061_unaligned_wide_accesses_split_like_qemu() {
+    let pl061 = Arc::new(Pl061::new());
+    let mmio = Pl061Mmio(Arc::clone(&pl061));
+
+    mmio.write(0x400, 4, 0xff);
+    mmio.write(0x000, 4, 0);
+    mmio.write(0x001, 4, 0x0102_0304);
+
+    assert_eq!(mmio.read(0x3fc, 4), 0x01);
+    assert_eq!(mmio.read(0x000, 4), 0x00);
+    assert_eq!(mmio.read(0x004, 4), 0x01);
+
+    assert_eq!(mmio.read(0xfe1, 4), 0x1000_6161);
+    assert_eq!(mmio.read(0xfe2, 4), 0x0010_0061);
+    assert_eq!(mmio.read(0xfe3, 4), 0x1000_1061);
 }
 
 #[test]
@@ -362,8 +437,26 @@ fn test_pl061_afsel_write() {
 }
 
 #[test]
-fn test_pl061_luminary_registers() {
+fn test_pl061_default_variant_ignores_luminary_registers() {
     let pl061 = Arc::new(Pl061::new());
+    let mmio = Pl061Mmio(Arc::clone(&pl061));
+
+    assert_eq!(mmio.read(0x500, 4), 0);
+    assert_eq!(mmio.read(0x520, 4), 0);
+    assert_eq!(mmio.read(0x524, 4), 0);
+
+    mmio.write(0x500, 4, 0x12);
+    mmio.write(0x520, 4, 0x0ACC_E551);
+    mmio.write(0x524, 4, 0x0F);
+
+    assert_eq!(mmio.read(0x500, 4), 0);
+    assert_eq!(mmio.read(0x520, 4), 0);
+    assert_eq!(mmio.read(0x524, 4), 0);
+}
+
+#[test]
+fn test_pl061_luminary_registers() {
+    let pl061 = Arc::new(Pl061::new_luminary());
     let mmio = Pl061Mmio(Arc::clone(&pl061));
 
     // Luminary-specific registers
@@ -387,7 +480,7 @@ fn test_pl061_luminary_registers() {
 
 #[test]
 fn test_pl061_reset_runtime() {
-    let pl061 = Arc::new(Pl061::new());
+    let pl061 = Arc::new(Pl061::new_luminary());
     let mmio = Pl061Mmio(Arc::clone(&pl061));
 
     mmio.write(0x400, 4, 0xFF);
@@ -402,6 +495,34 @@ fn test_pl061_reset_runtime() {
 }
 
 // -- SiFive GPIO tests --
+
+#[test]
+fn test_sifive_gpio_lifecycle_and_mom_identity() {
+    let gpio = Arc::new(SiFiveGpio::new());
+    assert!(!gpio.realized());
+    gpio.with_mdevice(|device| assert_eq!(device.local_id(), "sifive_gpio"));
+    assert_eq!(gpio.object_info().local_id, "sifive_gpio");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x2000);
+    let region = MemoryRegion::io(
+        "sifive_gpio",
+        0x1000,
+        Arc::new(SiFiveGpioMmio(Arc::clone(&gpio))),
+    );
+
+    gpio.attach_to_bus(&mut bus).unwrap();
+    gpio.register_mmio(region, base).unwrap();
+    gpio.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(gpio.realized());
+    aspace.write(GPA(base.0 + 0x008), 4, 0x01);
+    aspace.write(GPA(base.0 + 0x00c), 4, 0x01);
+    assert_eq!(aspace.read(GPA(base.0 + 0x00c), 4), 0x01);
+
+    let err = gpio.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
 
 #[test]
 fn test_sifive_gpio_defaults() {
@@ -434,6 +555,62 @@ fn test_sifive_gpio_output_en() {
     mmio.write(0x00C, 4, 0x01); // port
                                 // GPIO value should reflect the output
     assert_eq!(mmio.read(0x00C, 4), 0x01);
+}
+
+#[test]
+fn test_sifive_gpio_wide_mmio_accesses_split_into_32bit_callbacks() {
+    let gpio = Arc::new(SiFiveGpio::new());
+    let mmio = SiFiveGpioMmio(Arc::clone(&gpio));
+
+    mmio.write(0x008, 8, 0x0000_0002_0000_0001);
+
+    assert_eq!(mmio.read(0x008, 4), 0x01);
+    assert_eq!(mmio.read(0x00C, 4), 0x02);
+    assert_eq!(mmio.read(0x008, 8), 0x0000_0002_0000_0001);
+}
+
+#[test]
+fn test_sifive_gpio_narrow_accesses_use_access_width_bits() {
+    let gpio = Arc::new(SiFiveGpio::new());
+    let mmio = SiFiveGpioMmio(Arc::clone(&gpio));
+
+    mmio.write(0x004, 4, 0x1234_5678);
+    assert_eq!(mmio.read(0x004, 1), 0x78);
+    assert_eq!(mmio.read(0x004, 2), 0x5678);
+    assert_eq!(mmio.read(0x004, 4), 0x1234_5678);
+
+    mmio.write(0x008, 1, 0x1234_5678);
+    assert_eq!(mmio.read(0x008, 4), 0x78);
+
+    mmio.write(0x00C, 2, 0x1234_5678);
+    assert_eq!(mmio.read(0x00C, 4), 0x5678);
+}
+
+#[test]
+fn test_sifive_gpio_unaligned_wide_accesses_split_like_qemu() {
+    let gpio = Arc::new(SiFiveGpio::new());
+    let mmio = SiFiveGpioMmio(Arc::clone(&gpio));
+
+    mmio.write(0x004, 4, 0x1234_5678);
+    mmio.write(0x008, 4, 0x9abc_def0);
+
+    assert_eq!(mmio.read(0x005, 4), 0xf000_0000);
+    assert_eq!(mmio.read(0x006, 4), 0xdef0_0000);
+    assert_eq!(mmio.read(0x007, 4), 0x00de_f000);
+
+    mmio.write(0x004, 4, 0);
+    mmio.write(0x008, 4, 0);
+    mmio.write(0x005, 4, 0x0102_0304);
+    assert_eq!(mmio.read(0x004, 4), 0);
+    assert_eq!(mmio.read(0x008, 4), 0x0000_0001);
+
+    mmio.write(0x008, 4, 0);
+    mmio.write(0x006, 4, 0x0102_0304);
+    assert_eq!(mmio.read(0x008, 4), 0x0000_0102);
+
+    mmio.write(0x008, 4, 0);
+    mmio.write(0x007, 4, 0x0102_0304);
+    assert_eq!(mmio.read(0x008, 4), 0x0000_0203);
 }
 
 #[test]

@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use machina_core::mobject::{MObject, MObjectInfo};
+use machina_hw_core::mdev::{MDeviceError, MDeviceState};
 use machina_hw_i2c::{I2cError, I2cEvent, I2cSlave};
 
 const NVRAM_SIZE: usize = 64;
@@ -24,6 +26,7 @@ fn from_bcd(val: u8) -> u8 {
 }
 
 pub struct Ds1338 {
+    state: Mutex<MDeviceState>,
     /// Time offset from real time in seconds.
     offset: AtomicI64,
     /// Weekday offset adjustment.
@@ -41,7 +44,13 @@ pub struct Ds1338 {
 impl Ds1338 {
     #[must_use]
     pub fn new(address: u8) -> Self {
+        Self::new_named("ds1338", address)
+    }
+
+    #[must_use]
+    pub fn new_named(local_id: &str, address: u8) -> Self {
         Self {
+            state: Mutex::new(MDeviceState::new(local_id)),
             offset: AtomicI64::new(0),
             wday_offset: AtomicI64::new(0),
             nvram: Mutex::new([0u8; NVRAM_SIZE]),
@@ -49,6 +58,27 @@ impl Ds1338 {
             addr_byte: Mutex::new(false),
             i2c_address: address,
         }
+    }
+
+    pub fn realize(self: &Arc<Self>) -> Result<(), MDeviceError> {
+        self.state.lock().unwrap().mark_realized()
+    }
+
+    pub fn unrealize(self: &Arc<Self>) -> Result<(), MDeviceError> {
+        self.state.lock().unwrap().mark_unrealized()
+    }
+
+    pub fn realized(&self) -> bool {
+        self.state.lock().unwrap().is_realized()
+    }
+
+    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
+        let guard = self.state.lock().unwrap();
+        f(&guard)
+    }
+
+    pub fn object_info(&self) -> MObjectInfo {
+        self.state.lock().unwrap().object_info()
     }
 
     fn capture_current_time(&self) {

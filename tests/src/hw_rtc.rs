@@ -1,13 +1,23 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use machina_core::address::GPA;
+use machina_hw_core::bus::SysBus;
 use machina_hw_core::irq::{InterruptSource, IrqSink};
 use machina_hw_i2c::{I2cEvent, I2cSlave};
 use machina_hw_rtc::ds1338::Ds1338;
 use machina_hw_rtc::goldfish_rtc::{GoldfishRtc, GoldfishRtcMmio};
 use machina_hw_rtc::ls7a_rtc::{Ls7aRtc, Ls7aRtcMmio};
 use machina_hw_rtc::pl031::{Pl031, Pl031Mmio};
-use machina_memory::region::MmioOps;
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
+
+fn make_test_aspace() -> (AddressSpace, SysBus) {
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let aspace = AddressSpace::new(root);
+    let bus = SysBus::new("sysbus");
+    (aspace, bus)
+}
 
 // -- Test helpers --
 
@@ -34,6 +44,28 @@ impl IrqSink for TestIrqSink {
 }
 
 // -- PL031 tests --
+
+#[test]
+fn test_pl031_lifecycle_and_mom_identity() {
+    let pl031 = Arc::new(Pl031::new());
+    pl031.with_mdevice(|device| assert_eq!(device.local_id(), "pl031"));
+    assert_eq!(pl031.object_info().local_id, "pl031");
+    assert!(!pl031.realized());
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let region = MemoryRegion::io(
+        "pl031",
+        0x1000,
+        Arc::new(Pl031Mmio(Arc::clone(&pl031))),
+    );
+    pl031.attach_to_bus(&mut bus).unwrap();
+    pl031.register_mmio(region, GPA(0x1000)).unwrap();
+    pl031.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(pl031.realized());
+    let err = pl031.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
 
 #[test]
 fn test_pl031_defaults() {
@@ -76,6 +108,74 @@ fn test_pl031_write_lr_sets_time() {
 }
 
 #[test]
+fn test_pl031_lr_zero_matches_default_alarm() {
+    let pl031 = Arc::new(Pl031::new());
+    let mmio = Pl031Mmio(Arc::clone(&pl031));
+
+    mmio.write(0x08, 4, 0);
+    assert_eq!(mmio.read(0x14, 4), 1);
+    assert_eq!(mmio.read(0x18, 4), 0);
+
+    mmio.write(0x10, 4, 1);
+    assert_eq!(mmio.read(0x18, 4), 1);
+
+    mmio.write(0x1c, 4, 1);
+    assert_eq!(mmio.read(0x14, 4), 0);
+    assert_eq!(mmio.read(0x18, 4), 0);
+}
+
+#[test]
+fn test_pl031_wide_mmio_read_splits_into_32bit_callbacks() {
+    let pl031 = Arc::new(Pl031::new());
+    let mmio = Pl031Mmio(Arc::clone(&pl031));
+
+    mmio.write(0x08, 4, 0x1122_3344);
+    mmio.write(0x04, 4, 0x5566_7788);
+
+    assert_eq!(mmio.read(0x00, 8), 0x5566_7788_1122_3344);
+}
+
+#[test]
+fn test_pl031_unaligned_id_reads_split_like_qemu() {
+    let pl031 = Arc::new(Pl031::new());
+    let mmio = Pl031Mmio(Arc::clone(&pl031));
+
+    assert_eq!(mmio.read(0xfe1, 4), 0x1000_3131);
+    assert_eq!(mmio.read(0xfe2, 4), 0x0010_0031);
+    assert_eq!(mmio.read(0xfe3, 4), 0x1000_1031);
+}
+
+#[test]
+fn test_pl031_wide_mmio_write_splits_into_32bit_callbacks() {
+    let pl031 = Arc::new(Pl031::new());
+    let mmio = Pl031Mmio(Arc::clone(&pl031));
+
+    mmio.write(0x04, 8, 0x1234_5678_90ab_cdef);
+
+    assert_eq!(mmio.read(0x04, 4), 0x90ab_cdef);
+    assert_eq!(mmio.read(0x08, 4), 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 4), 0x1234_5678);
+}
+
+#[test]
+fn test_pl031_narrow_accesses_use_access_width_bits() {
+    let pl031 = Arc::new(Pl031::new());
+    let mmio = Pl031Mmio(Arc::clone(&pl031));
+
+    mmio.write(0x08, 4, 0x1234_5678);
+    assert_eq!(mmio.read(0x08, 1), 0x78);
+    assert_eq!(mmio.read(0x08, 2), 0x5678);
+    assert_eq!(mmio.read(0x08, 4), 0x1234_5678);
+
+    mmio.write(0x04, 1, 0x1234_5678);
+    assert_eq!(mmio.read(0x04, 4), 0x78);
+
+    mmio.write(0x08, 2, 0x1234_5678);
+    assert_eq!(mmio.read(0x08, 4), 0x5678);
+    assert_eq!(mmio.read(0x00, 4), 0x5678);
+}
+
+#[test]
 fn test_pl031_match_alarm_irq() {
     let pl031 = Arc::new(Pl031::new());
     let mmio = Pl031Mmio(Arc::clone(&pl031));
@@ -87,6 +187,7 @@ fn test_pl031_match_alarm_irq() {
 
     // Set time
     mmio.write(0x08, 4, 0); // LR = 0
+    mmio.write(0x1c, 4, 1); // Clear default MR=0 match
                             // Set match to 10
     mmio.write(0x04, 4, 10); // MR = 10
                              // Enable interrupt
@@ -191,6 +292,28 @@ fn test_pl031_reset_runtime() {
 // -- Goldfish RTC tests --
 
 #[test]
+fn test_goldfish_rtc_lifecycle_and_mom_identity() {
+    let rtc = Arc::new(GoldfishRtc::new());
+    rtc.with_mdevice(|device| assert_eq!(device.local_id(), "goldfish_rtc"));
+    assert_eq!(rtc.object_info().local_id, "goldfish_rtc");
+    assert!(!rtc.realized());
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let region = MemoryRegion::io(
+        "goldfish_rtc",
+        0x1000,
+        Arc::new(GoldfishRtcMmio(Arc::clone(&rtc))),
+    );
+    rtc.attach_to_bus(&mut bus).unwrap();
+    rtc.register_mmio(region, GPA(0x2000)).unwrap();
+    rtc.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(rtc.realized());
+    let err = rtc.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
 fn test_goldfish_rtc_defaults() {
     let rtc = Arc::new(GoldfishRtc::new());
     let mmio = GoldfishRtcMmio(Arc::clone(&rtc));
@@ -201,6 +324,23 @@ fn test_goldfish_rtc_defaults() {
     assert_eq!(mmio.read(0x0C, 4), 0); // ALARM_HIGH
     assert_eq!(mmio.read(0x10, 4), 0); // IRQ_ENABLED
     assert_eq!(mmio.read(0x18, 4), 0); // ALARM_STATUS
+}
+
+#[test]
+fn test_goldfish_rtc_rejects_non_4byte_mmio_accesses() {
+    let rtc = Arc::new(GoldfishRtc::new());
+    let mmio = GoldfishRtcMmio(Arc::clone(&rtc));
+
+    mmio.write(0x00, 4, 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 1), 0);
+    assert_eq!(mmio.read(0x00, 2), 0);
+    assert_eq!(mmio.read(0x00, 8), 0);
+
+    rtc.set_time(0);
+    mmio.write(0x00, 1, 0x12);
+    mmio.write(0x00, 2, 0x3456);
+    mmio.write(0x00, 8, 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 4), 0);
 }
 
 #[test]
@@ -248,6 +388,30 @@ fn test_goldfish_rtc_alarm_irq() {
     rtc.tick(2000);
 
     assert!(sink.level(), "IRQ should fire when time >= alarm");
+}
+
+#[test]
+fn test_goldfish_rtc_time_write_does_not_fire_alarm() {
+    let rtc = Arc::new(GoldfishRtc::new());
+    let mmio = GoldfishRtcMmio(Arc::clone(&rtc));
+    let sink = Arc::new(TestIrqSink::new());
+    rtc.connect_output(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    mmio.write(0x04, 4, 0);
+    mmio.write(0x00, 4, 0);
+    mmio.write(0x0c, 4, 1);
+    mmio.write(0x08, 4, 0);
+    mmio.write(0x10, 4, 1);
+    assert_eq!(mmio.read(0x18, 4), 1);
+    assert!(!sink.level());
+
+    mmio.write(0x04, 4, 2);
+
+    assert_eq!(mmio.read(0x18, 4), 1);
+    assert!(!sink.level());
 }
 
 #[test]
@@ -311,6 +475,28 @@ fn test_goldfish_rtc_reset_runtime() {
 // -- LS7A RTC tests --
 
 #[test]
+fn test_ls7a_rtc_lifecycle_and_mom_identity() {
+    let rtc = Arc::new(Ls7aRtc::new());
+    rtc.with_mdevice(|device| assert_eq!(device.local_id(), "ls7a_rtc"));
+    assert_eq!(rtc.object_info().local_id, "ls7a_rtc");
+    assert!(!rtc.realized());
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let region = MemoryRegion::io(
+        "ls7a_rtc",
+        0x1000,
+        Arc::new(Ls7aRtcMmio(Arc::clone(&rtc))),
+    );
+    rtc.attach_to_bus(&mut bus).unwrap();
+    rtc.register_mmio(region, GPA(0x3000)).unwrap();
+    rtc.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(rtc.realized());
+    let err = rtc.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
 fn test_ls7a_rtc_defaults() {
     let rtc = Arc::new(Ls7aRtc::new());
     let mmio = Ls7aRtcMmio(Arc::clone(&rtc));
@@ -322,6 +508,24 @@ fn test_ls7a_rtc_defaults() {
     assert_eq!(mmio.read(0x68, 4), 0); // RTCREAD0
     assert_eq!(mmio.read(0x34, 4), 0); // TOYMATCH0
     assert_eq!(mmio.read(0x6C, 4), 0); // RTCMATCH0
+}
+
+#[test]
+fn test_ls7a_rtc_rejects_non_4byte_mmio_accesses() {
+    let rtc = Arc::new(Ls7aRtc::new());
+    let mmio = Ls7aRtcMmio(Arc::clone(&rtc));
+
+    let ctrl = (1u32 << 13) | (1 << 8);
+    mmio.write(0x40, 4, u64::from(ctrl));
+    assert_eq!(mmio.read(0x40, 1), 0);
+    assert_eq!(mmio.read(0x40, 2), 0);
+    assert_eq!(mmio.read(0x40, 8), 0);
+
+    mmio.write(0x40, 4, 0);
+    mmio.write(0x40, 1, u64::from(ctrl));
+    mmio.write(0x40, 2, u64::from(ctrl));
+    mmio.write(0x40, 8, u64::from(ctrl));
+    assert_eq!(mmio.read(0x40, 4), 0);
 }
 
 #[test]
@@ -400,8 +604,53 @@ fn test_ls7a_rtc_toy_match_irq() {
     let cur_toy = mmio.read(0x2C, 4);
     mmio.write(0x34, 4, cur_toy); // TOYMATCH0 = current TOY value
 
-    // IRQ should fire immediately since match equals current
+    assert!(!sink.level());
+
+    // The synthetic test clock triggers pending matches when it advances.
+    rtc.tick(0);
+
     assert!(sink.level());
+}
+
+#[test]
+fn test_ls7a_rtc_toy_match_write_preserves_current_match() {
+    let rtc = Arc::new(Ls7aRtc::new());
+    let mmio = Ls7aRtcMmio(Arc::clone(&rtc));
+    let sink = Arc::new(TestIrqSink::new());
+    rtc.connect_output(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    let ctrl = (1u32 << 11) | (1 << 8);
+    mmio.write(0x40, 4, u64::from(ctrl));
+    let cur_toy = mmio.read(0x2C, 4);
+
+    mmio.write(0x34, 4, cur_toy);
+
+    assert_eq!(mmio.read(0x34, 4), cur_toy);
+    assert!(!sink.level());
+}
+
+#[test]
+fn test_ls7a_rtc_toy_time_write_preserves_existing_match() {
+    let rtc = Arc::new(Ls7aRtc::new());
+    let mmio = Ls7aRtcMmio(Arc::clone(&rtc));
+    let sink = Arc::new(TestIrqSink::new());
+    rtc.connect_output(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    let ctrl = (1u32 << 11) | (1 << 8);
+    mmio.write(0x40, 4, u64::from(ctrl));
+    let cur_toy = mmio.read(0x2C, 4);
+    mmio.write(0x34, 4, cur_toy);
+
+    mmio.write(0x24, 4, cur_toy);
+
+    assert_eq!(mmio.read(0x34, 4), cur_toy);
+    assert!(!sink.level());
 }
 
 #[test]
@@ -427,6 +676,46 @@ fn test_ls7a_rtc_rtc_match_irq() {
     rtc.tick(1); // 32768 ticks, which is > 100
 
     assert!(sink.level(), "IRQ should fire when RTC ticks >= match");
+}
+
+#[test]
+fn test_ls7a_rtc_rtc_match_write_preserves_past_match() {
+    let rtc = Arc::new(Ls7aRtc::new());
+    let mmio = Ls7aRtcMmio(Arc::clone(&rtc));
+    let sink = Arc::new(TestIrqSink::new());
+    rtc.connect_output(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    let ctrl = (1u32 << 13) | (1 << 8);
+    mmio.write(0x40, 4, u64::from(ctrl));
+    mmio.write(0x64, 4, 0x100);
+
+    mmio.write(0x6C, 4, 0x80);
+
+    assert_eq!(mmio.read(0x6C, 4), 0x80);
+    assert!(!sink.level());
+}
+
+#[test]
+fn test_ls7a_rtc_time_write_preserves_existing_rtc_match() {
+    let rtc = Arc::new(Ls7aRtc::new());
+    let mmio = Ls7aRtcMmio(Arc::clone(&rtc));
+    let sink = Arc::new(TestIrqSink::new());
+    rtc.connect_output(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    let ctrl = (1u32 << 13) | (1 << 8);
+    mmio.write(0x40, 4, u64::from(ctrl));
+    mmio.write(0x6C, 4, 0x80);
+
+    mmio.write(0x64, 4, 0x100);
+
+    assert_eq!(mmio.read(0x6C, 4), 0x80);
+    assert!(!sink.level());
 }
 
 #[test]
@@ -456,6 +745,30 @@ fn test_ls7a_rtc_toy_disabled_ignores_write() {
 }
 
 // -- DS1338 tests --
+
+#[test]
+fn test_ds1338_lifecycle_and_mom_identity() {
+    let ds = Arc::new(Ds1338::new(0x68));
+    assert!(!ds.realized());
+    ds.with_mdevice(|device| assert_eq!(device.local_id(), "ds1338"));
+    assert_eq!(ds.object_info().local_id, "ds1338");
+
+    ds.realize().unwrap();
+    assert!(ds.realized());
+    let err = ds.realize().unwrap_err();
+    assert!(
+        err.to_string().contains("already realized"),
+        "unexpected second-realize error: {err}"
+    );
+
+    ds.unrealize().unwrap();
+    assert!(!ds.realized());
+    let err = ds.unrealize().unwrap_err();
+    assert!(
+        err.to_string().contains("not realized"),
+        "unexpected second-unrealize error: {err}"
+    );
+}
 
 #[test]
 fn test_ds1338_i2c_address() {

@@ -175,31 +175,48 @@ impl Default for Cpc {
 pub struct CpcMmio(pub Arc<Cpc>);
 
 impl MmioOps for CpcMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
         let regs = self.0.regs.borrow();
 
+        let mut value = 0;
         for c in 0..regs.num_core as u64 {
             let addr =
                 CPC_CL_BASE_OFS + CPC_STAT_CONF_OFS + c * CPC_CORE_REG_STRIDE;
             if offset == addr {
-                return CPC_Cx_STAT_CONF_SEQ_STATE_U6;
+                value = CPC_Cx_STAT_CONF_SEQ_STATE_U6;
+                break;
             }
         }
 
-        match offset {
-            CPC_CM_STAT_CONF_OFS => CPC_Cx_STAT_CONF_SEQ_STATE_U5,
-            CPC_MTIME_REG_OFS => {
-                let cb = self.0.mtime_cb.lock().unwrap();
-                match *cb {
-                    Some(ref f) => f(),
-                    None => 0,
+        if value == 0 {
+            value = match offset {
+                CPC_CM_STAT_CONF_OFS => CPC_Cx_STAT_CONF_SEQ_STATE_U5,
+                CPC_MTIME_REG_OFS => {
+                    let cb = self.0.mtime_cb.lock().unwrap();
+                    match *cb {
+                        Some(ref f) => f(),
+                        None => 0,
+                    }
                 }
-            }
-            _ => 0,
+                _ => 0,
+            };
+        }
+
+        match size {
+            1 => value & 0xff,
+            2 => value & 0xffff,
+            4 => value & 0xffff_ffff,
+            _ => value,
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        let value = match size {
+            1 => val & 0xff,
+            2 => val & 0xffff,
+            4 => val & 0xffff_ffff,
+            _ => val,
+        };
         let mut regs = self.0.regs.borrow();
         let vp_run_mask = if regs.num_vp >= 64 {
             u64::MAX
@@ -215,7 +232,7 @@ impl MmioOps for CpcMmio {
             if offset
                 == CPC_CL_BASE_OFS + CPC_VP_RUN_OFS + c * CPC_CORE_REG_STRIDE
             {
-                let mask = (val << cpu_index) & vp_run_mask;
+                let mask = (value << cpu_index) & vp_run_mask;
                 regs.vps_running_mask |= mask;
                 let action_cb = self.0.vp_action_cb.lock().unwrap();
                 if let Some(ref cb) = *action_cb {
@@ -230,7 +247,7 @@ impl MmioOps for CpcMmio {
             if offset
                 == CPC_CL_BASE_OFS + CPC_VP_STOP_OFS + c * CPC_CORE_REG_STRIDE
             {
-                let mask = (val << cpu_index) & vp_run_mask;
+                let mask = (value << cpu_index) & vp_run_mask;
                 regs.vps_running_mask &= !mask;
                 let action_cb = self.0.vp_action_cb.lock().unwrap();
                 if let Some(ref cb) = *action_cb {

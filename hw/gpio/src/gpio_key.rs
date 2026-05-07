@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use machina_accel::timer::VirtualClock;
+use machina_core::mobject::{MObject, MObjectInfo};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::irq::IrqLine;
 use machina_hw_core::mdev::MDevice;
@@ -96,6 +97,10 @@ impl GpioKey {
     pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
         let guard = self.state.lock();
         f(&*guard)
+    }
+
+    pub fn object_info(&self) -> MObjectInfo {
+        self.state.lock().object_info()
     }
 
     fn cancel_timer(&self) {

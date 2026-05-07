@@ -86,7 +86,7 @@ impl SiFiveUOtpRegs {
 
     fn set_fusearray_bit(&mut self, idx: usize, offset: u32, bit: u32) {
         if bit != 0 {
-            self.fuse[idx] |= 1u32 << offset;
+            self.fuse[idx] |= bit << offset;
         } else {
             self.fuse[idx] &= !(1u32 << offset);
         }
@@ -185,7 +185,11 @@ impl Default for SiFiveUOtp {
 pub struct SiFiveUOtpMmio(pub Arc<SiFiveUOtp>);
 
 impl MmioOps for SiFiveUOtpMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
+        }
+
         let regs = self.0.regs.borrow();
         match offset {
             SIFIVE_U_OTP_PA => u64::from(regs.pa),
@@ -217,7 +221,11 @@ impl MmioOps for SiFiveUOtpMmio {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size != 4 {
+            return;
+        }
+
         let value = val as u32;
         let mut regs = self.0.regs.borrow();
 

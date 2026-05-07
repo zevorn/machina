@@ -190,7 +190,11 @@ impl Default for GoldfishRtc {
 pub struct GoldfishRtcMmio(pub Arc<GoldfishRtc>);
 
 impl MmioOps for GoldfishRtcMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
+        }
+
         let mut regs = self.0.regs.borrow();
         match offset {
             RTC_TIME_LOW => {
@@ -207,7 +211,11 @@ impl MmioOps for GoldfishRtcMmio {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size != 4 {
+            return;
+        }
+
         let value = val as u32;
         match offset {
             RTC_TIME_LOW => {
@@ -215,9 +223,6 @@ impl MmioOps for GoldfishRtcMmio {
                 let current = regs.current_tick();
                 let new_tick = (current & !0xFFFF_FFFFu64) | u64::from(value);
                 regs.tick_offset += new_tick as i64 - current as i64;
-                let flags = regs.check_alarm();
-                drop(regs);
-                self.0.update_irq(flags);
             }
             RTC_TIME_HIGH => {
                 let mut regs = self.0.regs.borrow();
@@ -225,9 +230,6 @@ impl MmioOps for GoldfishRtcMmio {
                 let new_tick =
                     (u64::from(value) << 32) | (current & 0xFFFF_FFFF);
                 regs.tick_offset += new_tick as i64 - current as i64;
-                let flags = regs.check_alarm();
-                drop(regs);
-                self.0.update_irq(flags);
             }
             RTC_ALARM_LOW => {
                 let mut regs = self.0.regs.borrow();

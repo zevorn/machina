@@ -218,7 +218,11 @@ fn read_id(offset: u64) -> u64 {
 pub struct SseTimerMmio(pub Arc<SseTimer>);
 
 impl MmioOps for SseTimerMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
+        }
+
         let counter_val = self.0.counter.counter_value();
         let regs = self.0.regs.borrow();
         match offset {
@@ -248,7 +252,11 @@ impl MmioOps for SseTimerMmio {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size != 4 {
+            return;
+        }
+
         let mut regs = self.0.regs.borrow();
         match offset {
             A_CNTFRQ => {
@@ -270,8 +278,8 @@ impl MmioOps for SseTimerMmio {
             }
             A_CNTP_TVAL => {
                 let counter_val = self.0.counter.counter_value();
-                let tval = val as u32;
-                let new_cval = counter_val.wrapping_add(u64::from(tval));
+                let tval = val as u32 as i32;
+                let new_cval = counter_val.wrapping_add(tval as i64 as u64);
                 regs.cntp_cval = new_cval;
                 drop(regs);
                 self.0.tick();

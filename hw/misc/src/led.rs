@@ -127,6 +127,11 @@ impl Led {
         *self.intensity.lock() = initial;
     }
 
+    pub fn with_mdevice<T>(&self, f: impl FnOnce(&MDeviceState) -> T) -> T {
+        let guard = self.state.lock();
+        f(&guard)
+    }
+
     pub fn object_info(&self) -> MObjectInfo {
         self.state.lock().object_info()
     }

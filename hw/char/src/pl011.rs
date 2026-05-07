@@ -38,7 +38,6 @@ const INT_E: u32 = INT_OE | INT_BE | INT_PE | INT_FE;
 const INT_MS: u32 = INT_RI | INT_DSR | INT_DCD | INT_CTS;
 
 const LCR_FEN: u32 = 1 << 4;
-#[allow(dead_code)]
 const LCR_BRK: u32 = 1 << 0;
 
 const CR_OUT2: u32 = 1 << 13;
@@ -47,7 +46,6 @@ const CR_RTS: u32 = 1 << 11;
 const CR_DTR: u32 = 1 << 10;
 #[allow(dead_code)]
 const CR_RXE: u32 = 1 << 9;
-const CR_TXE: u32 = 1 << 8;
 const CR_LBE: u32 = 1 << 7;
 #[allow(dead_code)]
 const CR_UARTEN: u32 = 1 << 0;
@@ -56,6 +54,15 @@ const IBRD_MASK: u32 = 0xffff;
 const FBRD_MASK: u32 = 0x3f;
 
 const PL011_ID: [u8; 8] = [0x11, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1];
+
+fn access_mask(size: u32) -> u64 {
+    match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
 
 /// IRQ output indices.
 pub const PL011_IRQ_COMBINED: u32 = 0;
@@ -227,6 +234,12 @@ impl Pl011Regs {
         self.flags = fr;
         self.int_level = il;
     }
+
+    fn loopback_break(&mut self, break_enable: bool) {
+        if break_enable && self.loopback_enabled() {
+            self.rx_fifo_put(DR_BE);
+        }
+    }
 }
 
 pub struct Pl011 {
@@ -395,9 +408,19 @@ impl Default for Pl011 {
 pub struct Pl011Mmio(pub Arc<Pl011>);
 
 impl MmioOps for Pl011Mmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if let Some(value) = read_unaligned(self, offset, size) {
+            return value;
+        }
+
+        if size == 8 {
+            let lo = self.read(offset, 4);
+            let hi = self.read(offset.wrapping_add(4), 4);
+            return lo | (hi << 32);
+        }
+
         let mut regs = self.0.regs.borrow();
-        match offset >> 2 {
+        let value = match offset >> 2 {
             0 => {
                 // DR: read RX FIFO
                 let c = regs.rx_fifo_get();
@@ -405,7 +428,7 @@ impl MmioOps for Pl011Mmio {
                 regs.rsr = rsr;
                 drop(regs);
                 self.0.update_irqs();
-                u64::from(c)
+                return u64::from(c) & access_mask(size);
             }
             1 => u64::from(regs.rsr),
             6 => u64::from(regs.flags),
@@ -419,25 +442,33 @@ impl MmioOps for Pl011Mmio {
             15 => u64::from(regs.int_level),
             16 => u64::from(regs.int_level & regs.int_enabled),
             18 => u64::from(regs.dmacr),
-            idx @ 0x3f8..=0x400 => {
+            idx @ 0x3f8..=0x3ff => {
                 let off = (idx - 0x3f8) as usize;
                 u64::from(PL011_ID[off])
             }
             _ => 0,
-        }
+        };
+        value & access_mask(size)
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
-        let value = val as u32;
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if write_unaligned(self, offset, size, val) {
+            return;
+        }
+
+        if size == 8 {
+            self.write(offset, 4, val);
+            self.write(offset.wrapping_add(4), 4, val >> 32);
+            return;
+        }
+
+        let value = (val & access_mask(size)) as u32;
         match offset >> 2 {
             0 => {
                 // DR: write TX
                 let ch = value as u8;
-                let tx_en = self.0.regs.borrow().cr & CR_TXE != 0;
-                if tx_en {
-                    if let Some(ref mut fe) = *self.0.chardev.borrow() {
-                        fe.write(&[ch]);
-                    }
+                if let Some(ref mut fe) = *self.0.chardev.borrow() {
+                    fe.write(&[ch]);
                 }
                 // Loopback
                 {
@@ -463,6 +494,8 @@ impl MmioOps for Pl011Mmio {
             11 => {
                 let mut regs = self.0.regs.borrow();
                 let old_lcr = regs.lcr;
+                let inject_break =
+                    (old_lcr ^ value) & LCR_BRK != 0 && value & LCR_BRK != 0;
                 // FIFO toggle resets RX/TX FIFOs
                 if (old_lcr ^ value) & LCR_FEN != 0 {
                     regs.flags |= PL011_FLAG_RXFE | PL011_FLAG_TXFE;
@@ -470,8 +503,13 @@ impl MmioOps for Pl011Mmio {
                     regs.read_count = 0;
                     regs.read_pos = 0;
                 }
+                regs.loopback_break(inject_break);
                 regs.lcr = value;
                 regs.set_read_trigger();
+                drop(regs);
+                if inject_break {
+                    self.0.update_irqs();
+                }
             }
             12 => {
                 let mut regs = self.0.regs.borrow();
@@ -497,6 +535,51 @@ impl MmioOps for Pl011Mmio {
             _ => {}
         }
     }
+}
+
+fn read_unaligned(mmio: &Pl011Mmio, offset: u64, size: u32) -> Option<u64> {
+    if !needs_unaligned_split(offset, size) {
+        return None;
+    }
+
+    let mut value = 0u64;
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        value |= (mmio.read(cur, chunk) & access_mask(chunk)) << (done * 8);
+        done += chunk;
+    }
+    Some(value)
+}
+
+fn write_unaligned(mmio: &Pl011Mmio, offset: u64, size: u32, val: u64) -> bool {
+    if !needs_unaligned_split(offset, size) {
+        return false;
+    }
+
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        let chunk_value = (val >> (done * 8)) & access_mask(chunk);
+        mmio.write(cur, chunk, chunk_value);
+        done += chunk;
+    }
+    true
+}
+
+fn needs_unaligned_split(offset: u64, size: u32) -> bool {
+    matches!(size, 2 | 4 | 8) && !offset.is_multiple_of(u64::from(size))
+}
+
+fn aligned_chunk_size(offset: u64, remaining: u32) -> u32 {
+    for size in [8u32, 4, 2, 1] {
+        if remaining >= size && offset.is_multiple_of(u64::from(size)) {
+            return size;
+        }
+    }
+    1
 }
 
 pub struct Pl011IrqSink {

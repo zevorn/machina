@@ -22,8 +22,17 @@ const HTIF_CONSOLE_CMD_PUTC: u8 = 1;
 #[allow(dead_code)]
 const PK_SYS_WRITE: u64 = 64;
 
-const TOHOST_OFFSET: u64 = 0;
-const FROMHOST_OFFSET: u64 = 8;
+const FROMHOST_OFFSET: u64 = 0;
+const TOHOST_OFFSET: u64 = 8;
+
+fn access_mask(size: u32) -> u64 {
+    match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
 
 struct HtifRegs {
     tohost: u64,
@@ -204,9 +213,15 @@ impl Default for Htif {
 pub struct HtifMmio(pub Arc<Htif>);
 
 impl MmioOps for HtifMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size == 8 {
+            let lo = self.read(offset, 4);
+            let hi = self.read(offset.wrapping_add(4), 4);
+            return lo | (hi << 32);
+        }
+
         let regs = self.0.regs.borrow();
-        if offset == TOHOST_OFFSET {
+        let value = if offset == TOHOST_OFFSET {
             regs.tohost & 0xFFFF_FFFF
         } else if offset == TOHOST_OFFSET + 4 {
             (regs.tohost >> 32) & 0xFFFF_FFFF
@@ -216,11 +231,19 @@ impl MmioOps for HtifMmio {
             (regs.fromhost >> 32) & 0xFFFF_FFFF
         } else {
             0
-        }
+        };
+
+        value & access_mask(size)
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
-        let value = val as u32;
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size == 8 {
+            self.write(offset, 4, val);
+            self.write(offset.wrapping_add(4), 4, val >> 32);
+            return;
+        }
+
+        let value = (val & access_mask(size)) as u32;
         if offset == TOHOST_OFFSET {
             let mut regs = self.0.regs.borrow();
             if regs.tohost == 0 {

@@ -36,10 +36,70 @@ fn has_pwm_en_bits(cfg: u32) -> bool {
     (cfg & (CONFIG_ENONESHOT | CONFIG_ENALWAYS)) != 0
 }
 
+fn width_mask(size: u32) -> u64 {
+    match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
+
+fn read_unaligned(mmio: &SiFivePwmMmio, offset: u64, size: u32) -> Option<u64> {
+    if !needs_unaligned_split(offset, size) {
+        return None;
+    }
+
+    let mut value = 0u64;
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        value |= (mmio.read(cur, chunk) & width_mask(chunk)) << (done * 8);
+        done += chunk;
+    }
+    Some(value)
+}
+
+fn write_unaligned(
+    mmio: &SiFivePwmMmio,
+    offset: u64,
+    size: u32,
+    val: u64,
+) -> bool {
+    if !needs_unaligned_split(offset, size) {
+        return false;
+    }
+
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        let chunk_value = (val >> (done * 8)) & width_mask(chunk);
+        mmio.write(cur, chunk, chunk_value);
+        done += chunk;
+    }
+    true
+}
+
+fn needs_unaligned_split(offset: u64, size: u32) -> bool {
+    matches!(size, 2 | 4 | 8) && !offset.is_multiple_of(u64::from(size))
+}
+
+fn aligned_chunk_size(offset: u64, remaining: u32) -> u32 {
+    for size in [8u32, 4, 2, 1] {
+        if remaining >= size && offset.is_multiple_of(u64::from(size)) {
+            return size;
+        }
+    }
+    1
+}
+
 struct SiFivePwmRegs {
     freq_hz: u64,
     pwmcfg: u32,
     pwmcmp: [u32; PWM_CHANS],
+    now_ticks: u64,
     tick_offset: u64,
     irq_state: [bool; PWM_CHANS],
 }
@@ -50,6 +110,7 @@ impl SiFivePwmRegs {
             freq_hz,
             pwmcfg: 0,
             pwmcmp: [0; PWM_CHANS],
+            now_ticks: 0,
             tick_offset: 0,
             irq_state: [false; PWM_CHANS],
         }
@@ -58,6 +119,7 @@ impl SiFivePwmRegs {
     fn reset(&mut self) {
         self.pwmcfg = 0;
         self.pwmcmp = [0; PWM_CHANS];
+        self.tick_offset = self.now_ticks;
         self.irq_state = [false; PWM_CHANS];
     }
 
@@ -74,24 +136,23 @@ impl SiFivePwmRegs {
         self.pwmcfg & CONFIG_SCALE
     }
 
-    fn pwmcount(&self, now_ns: u64) -> u32 {
-        let now_ticks = self.ns_to_ticks(now_ns);
+    fn pwmcount(&self) -> u32 {
         let mask = u64::from(PWMCOUNT_MASK);
         if has_pwm_en_bits(self.pwmcfg) {
-            (now_ticks.wrapping_sub(self.tick_offset) & mask) as u32
+            (self.now_ticks.wrapping_sub(self.tick_offset) & mask) as u32
         } else {
             (self.tick_offset & mask) as u32
         }
     }
 
-    fn pwms(&self, now_ns: u64) -> u32 {
-        let count = self.pwmcount(now_ns);
+    fn pwms(&self) -> u32 {
+        let count = self.pwmcount();
         let s = self.scale();
         (count >> s) & PWMCMP_MASK
     }
 
-    fn check_irqs(&self, now_ns: u64) -> [bool; PWM_CHANS] {
-        let pwms = self.pwms(now_ns);
+    fn check_irqs(&self) -> [bool; PWM_CHANS] {
+        let pwms = self.pwms();
         let mut state = [false; PWM_CHANS];
         for (cmp, s) in self.pwmcmp.iter().zip(state.iter_mut()) {
             *s = pwms >= (*cmp & PWMCMP_MASK);
@@ -196,7 +257,9 @@ impl SiFivePwm {
     pub fn tick(&self, ns: u64) {
         let mut regs = self.regs.borrow();
         let was_incrementing = has_pwm_en_bits(regs.pwmcfg);
-        let now = regs.ns_to_ticks(ns);
+        let delta = regs.ns_to_ticks(ns);
+        regs.now_ticks = regs.now_ticks.wrapping_add(delta);
+        let now = regs.now_ticks;
 
         if has_pwm_en_bits(regs.pwmcfg) {
             // Check for overflow (carry out)
@@ -209,7 +272,7 @@ impl SiFivePwm {
         }
 
         // Update IRQ state
-        let pwms = regs.pwms(ns);
+        let pwms = regs.pwms();
         for i in 0..PWM_CHANS {
             let pwmcmp = regs.pwmcmp[i] & PWMCMP_MASK;
             let firing = pwms >= pwmcmp;
@@ -263,9 +326,19 @@ impl Default for SiFivePwm {
 pub struct SiFivePwmMmio(pub Arc<SiFivePwm>);
 
 impl MmioOps for SiFivePwmMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if let Some(value) = read_unaligned(self, offset, size) {
+            return value;
+        }
+
+        if size == 8 {
+            let lo = self.read(offset, 4);
+            let hi = self.read(offset.wrapping_add(4), 4);
+            return lo | (hi << 32);
+        }
+
         let regs = self.0.regs.borrow();
-        match offset {
+        let value = match offset {
             R_CONFIG => u64::from(regs.pwmcfg),
             R_COUNT => {
                 // Return count value with bit 31 always 0
@@ -273,26 +346,33 @@ impl MmioOps for SiFivePwmMmio {
                 // For testing, we use tick() to advance time.
                 let count = regs.tick_offset & PWMCOUNT_MASK as u64;
                 if has_pwm_en_bits(regs.pwmcfg) {
-                    count
+                    u64::from(regs.pwmcount())
                 } else {
-                    regs.tick_offset & PWMCOUNT_MASK as u64
+                    count
                 }
             }
-            R_PWMS => {
-                let count = regs.tick_offset & PWMCOUNT_MASK as u64;
-                let s = regs.scale();
-                (count >> s) & PWMCMP_MASK as u64
-            }
+            R_PWMS => u64::from(regs.pwms()),
             R_PWMCMP0 => u64::from(regs.pwmcmp[0] & PWMCMP_MASK),
             R_PWMCMP1 => u64::from(regs.pwmcmp[1] & PWMCMP_MASK),
             R_PWMCMP2 => u64::from(regs.pwmcmp[2] & PWMCMP_MASK),
             R_PWMCMP3 => u64::from(regs.pwmcmp[3] & PWMCMP_MASK),
             _ => 0,
-        }
+        };
+        value & width_mask(size)
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
-        let value = val as u32;
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if write_unaligned(self, offset, size, val) {
+            return;
+        }
+
+        if size == 8 {
+            self.write(offset, 4, val);
+            self.write(offset.wrapping_add(4), 4, val >> 32);
+            return;
+        }
+
+        let value = (val & width_mask(size)) as u32;
         let mut regs = self.0.regs.borrow();
         match offset {
             R_CONFIG => {
@@ -301,8 +381,9 @@ impl MmioOps for SiFivePwmMmio {
                 let new_has_en = has_pwm_en_bits(value);
 
                 if old_has_en != new_has_en {
-                    let now = regs.tick_offset;
-                    regs.tick_offset = now & PWMCOUNT_MASK as u64;
+                    regs.tick_offset =
+                        regs.now_ticks.wrapping_sub(regs.tick_offset)
+                            & PWMCOUNT_MASK as u64;
                 }
 
                 // If IP bits are cleared, lower IRQs
@@ -322,13 +403,22 @@ impl MmioOps for SiFivePwmMmio {
                 regs.pwmcfg = value;
             }
             R_COUNT => {
-                regs.tick_offset = u64::from(value) & PWMCOUNT_MASK as u64;
+                let new_offset = u64::from(value) & PWMCOUNT_MASK as u64;
+                if has_pwm_en_bits(regs.pwmcfg) {
+                    regs.tick_offset = regs.now_ticks.wrapping_sub(new_offset);
+                } else {
+                    regs.tick_offset = new_offset;
+                }
             }
             R_PWMS => {
                 let s = regs.scale();
                 let new_offset = ((u64::from(value) & PWMCMP_MASK as u64) << s)
                     & PWMCOUNT_MASK as u64;
-                regs.tick_offset = new_offset;
+                if has_pwm_en_bits(regs.pwmcfg) {
+                    regs.tick_offset = regs.now_ticks.wrapping_sub(new_offset);
+                } else {
+                    regs.tick_offset = new_offset;
+                }
             }
             R_PWMCMP0 => regs.pwmcmp[0] = value & PWMCMP_MASK,
             R_PWMCMP1 => regs.pwmcmp[1] = value & PWMCMP_MASK,
@@ -336,7 +426,7 @@ impl MmioOps for SiFivePwmMmio {
             R_PWMCMP3 => regs.pwmcmp[3] = value & PWMCMP_MASK,
             _ => {}
         }
-        let irq_state = regs.check_irqs(0); // simplified: check at now_ns=0
+        let irq_state = regs.check_irqs();
         let needs_update = irq_state != regs.irq_state;
         regs.irq_state = irq_state;
         drop(regs);

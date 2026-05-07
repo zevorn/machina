@@ -14,6 +14,18 @@ const N_GPIOS: usize = 8;
 const PL061_ID: [u8; 12] = [
     0x00, 0x00, 0x00, 0x00, 0x61, 0x10, 0x04, 0x00, 0x0d, 0xf0, 0x05, 0xb1,
 ];
+const PL061_ID_LUMINARY: [u8; 12] = [
+    0x00, 0x00, 0x00, 0x00, 0x61, 0x00, 0x18, 0x01, 0x0d, 0xf0, 0x05, 0xb1,
+];
+
+fn access_mask(size: u32) -> u64 {
+    match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
 
 struct Pl061Regs {
     data: u32,
@@ -41,10 +53,11 @@ struct Pl061Regs {
     // Properties
     pullups: u8,
     pulldowns: u8,
+    luminary: bool,
 }
 
 impl Pl061Regs {
-    fn new(pullups: u8, pulldowns: u8) -> Self {
+    fn new(pullups: u8, pulldowns: u8, luminary: bool) -> Self {
         Self {
             data: 0,
             old_out_data: 0,
@@ -69,6 +82,7 @@ impl Pl061Regs {
             amsel: 0,
             pullups,
             pulldowns,
+            luminary,
         }
     }
 
@@ -97,11 +111,21 @@ impl Pl061Regs {
     }
 
     fn pullups_mask(&self) -> u8 {
-        self.pullups & !self.dir as u8
+        let pullups = if self.luminary {
+            self.pur as u8
+        } else {
+            self.pullups
+        };
+        pullups & !self.dir as u8
     }
 
     fn floating_mask(&self) -> u8 {
-        !(self.pullups | self.pulldowns) & !self.dir as u8
+        let fixed = if self.luminary {
+            (self.pur | self.pdr) as u8
+        } else {
+            self.pullups | self.pulldowns
+        };
+        !fixed & !self.dir as u8
     }
 
     fn update(&mut self) {
@@ -154,9 +178,20 @@ impl Pl061 {
 
     #[must_use]
     pub fn new_with_pull(pullups: u8, pulldowns: u8) -> Self {
+        Self::new_variant(pullups, pulldowns, false)
+    }
+
+    #[must_use]
+    pub fn new_luminary() -> Self {
+        Self::new_variant(0xFF, 0x00, true)
+    }
+
+    fn new_variant(pullups: u8, pulldowns: u8, luminary: bool) -> Self {
         Self {
             state: parking_lot::Mutex::new(SysBusDeviceState::new("pl061")),
-            regs: DeviceRefCell::new(Pl061Regs::new(pullups, pulldowns)),
+            regs: DeviceRefCell::new(Pl061Regs::new(
+                pullups, pulldowns, luminary,
+            )),
             output: parking_lot::Mutex::new(None),
             gpio_outputs: parking_lot::Mutex::new([
                 None, None, None, None, None, None, None, None,
@@ -277,7 +312,17 @@ impl Default for Pl061 {
 pub struct Pl061Mmio(pub Arc<Pl061>);
 
 impl MmioOps for Pl061Mmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if let Some(value) = read_unaligned(self, offset, size) {
+            return value;
+        }
+
+        if size == 8 {
+            let lo = self.read(offset, 4);
+            let hi = self.read(offset.wrapping_add(4), 4);
+            return lo | (hi << 32);
+        }
+
         let regs = self.0.regs.borrow();
         match offset {
             0x000..=0x3FF => {
@@ -292,21 +337,28 @@ impl MmioOps for Pl061Mmio {
             0x414 => u64::from(regs.istate),
             0x418 => u64::from(regs.istate & regs.im),
             0x420 => u64::from(regs.afsel),
-            0x500 => u64::from(regs.dr2r),
-            0x504 => u64::from(regs.dr4r),
-            0x508 => u64::from(regs.dr8r),
-            0x50C => u64::from(regs.odr),
-            0x510 => u64::from(regs.pur),
-            0x514 => u64::from(regs.pdr),
-            0x518 => u64::from(regs.slr),
-            0x51C => u64::from(regs.den),
-            0x520 => u64::from(u32::from(regs.locked)),
-            0x524 => u64::from(regs.cr),
-            0x528 => u64::from(regs.amsel),
+            0x500 if regs.luminary => u64::from(regs.dr2r),
+            0x504 if regs.luminary => u64::from(regs.dr4r),
+            0x508 if regs.luminary => u64::from(regs.dr8r),
+            0x50C if regs.luminary => u64::from(regs.odr),
+            0x510 if regs.luminary => u64::from(regs.pur),
+            0x514 if regs.luminary => u64::from(regs.pdr),
+            0x518 if regs.luminary => u64::from(regs.slr),
+            0x51C if regs.luminary => u64::from(regs.den),
+            0x520 if regs.luminary => u64::from(u32::from(regs.locked)),
+            0x524 if regs.luminary => u64::from(regs.cr),
+            0x528 if regs.luminary => u64::from(regs.amsel),
+            0x500 | 0x504 | 0x508 | 0x50C | 0x510 | 0x514 | 0x518 | 0x51C
+            | 0x520 | 0x524 | 0x528 => 0,
             0xFD0..=0xFFF => {
                 let idx = ((offset - 0xFD0) >> 2) as usize;
-                if idx < PL061_ID.len() {
-                    u64::from(PL061_ID[idx])
+                let id = if regs.luminary {
+                    &PL061_ID_LUMINARY
+                } else {
+                    &PL061_ID
+                };
+                if idx < id.len() {
+                    u64::from(id[idx])
                 } else {
                     0
                 }
@@ -315,7 +367,17 @@ impl MmioOps for Pl061Mmio {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if write_unaligned(self, offset, size, val) {
+            return;
+        }
+
+        if size == 8 {
+            self.write(offset, 4, val);
+            self.write(offset.wrapping_add(4), 4, val >> 32);
+            return;
+        }
+
         let value = val as u32;
         let mut regs = self.0.regs.borrow();
         match offset {
@@ -342,25 +404,72 @@ impl MmioOps for Pl061Mmio {
                 let mask = regs.cr;
                 regs.afsel = (regs.afsel & !mask) | (value & mask);
             }
-            0x500 => regs.dr2r = value & 0xFF,
-            0x504 => regs.dr4r = value & 0xFF,
-            0x508 => regs.dr8r = value & 0xFF,
-            0x50C => regs.odr = value & 0xFF,
-            0x510 => regs.pur = value & 0xFF,
-            0x514 => regs.pdr = value & 0xFF,
-            0x518 => regs.slr = value & 0xFF,
-            0x51C => regs.den = value & 0xFF,
-            0x520 => regs.locked = value != 0x0ACC_E551,
-            0x524 => {
+            0x500 if regs.luminary => regs.dr2r = value & 0xFF,
+            0x504 if regs.luminary => regs.dr4r = value & 0xFF,
+            0x508 if regs.luminary => regs.dr8r = value & 0xFF,
+            0x50C if regs.luminary => regs.odr = value & 0xFF,
+            0x510 if regs.luminary => regs.pur = value & 0xFF,
+            0x514 if regs.luminary => regs.pdr = value & 0xFF,
+            0x518 if regs.luminary => regs.slr = value & 0xFF,
+            0x51C if regs.luminary => regs.den = value & 0xFF,
+            0x520 if regs.luminary => regs.locked = value != 0x0ACC_E551,
+            0x524 if regs.luminary => {
                 if !regs.locked {
                     regs.cr = value & 0xFF;
                 }
             }
-            0x528 => regs.amsel = value & 0xFF,
+            0x528 if regs.luminary => regs.amsel = value & 0xFF,
+            0x500 | 0x504 | 0x508 | 0x50C | 0x510 | 0x514 | 0x518 | 0x51C
+            | 0x520 | 0x524 | 0x528 => return,
             _ => return,
         }
         regs.update();
         drop(regs);
         self.0.update_irq();
     }
+}
+
+fn read_unaligned(mmio: &Pl061Mmio, offset: u64, size: u32) -> Option<u64> {
+    if !needs_unaligned_split(offset, size) {
+        return None;
+    }
+
+    let mut value = 0u64;
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        value |= (mmio.read(cur, chunk) & access_mask(chunk)) << (done * 8);
+        done += chunk;
+    }
+    Some(value)
+}
+
+fn write_unaligned(mmio: &Pl061Mmio, offset: u64, size: u32, val: u64) -> bool {
+    if !needs_unaligned_split(offset, size) {
+        return false;
+    }
+
+    let mut done = 0u32;
+    while done < size {
+        let cur = offset + u64::from(done);
+        let chunk = aligned_chunk_size(cur, size - done);
+        let chunk_value = (val >> (done * 8)) & access_mask(chunk);
+        mmio.write(cur, chunk, chunk_value);
+        done += chunk;
+    }
+    true
+}
+
+fn needs_unaligned_split(offset: u64, size: u32) -> bool {
+    matches!(size, 2 | 4 | 8) && !offset.is_multiple_of(u64::from(size))
+}
+
+fn aligned_chunk_size(offset: u64, remaining: u32) -> u32 {
+    for size in [8u32, 4, 2, 1] {
+        if remaining >= size && offset.is_multiple_of(u64::from(size)) {
+            return size;
+        }
+    }
+    1
 }

@@ -97,7 +97,7 @@ impl SseCounterRegs {
         let freq = if self.freq_hz > 0 { self.freq_hz } else { 1 };
         // Ticks = ns * freq / 1_000_000_000
         let ticks = (ns as u128 * freq as u128 / 1_000_000_000u128) as u64;
-        if (self.cntcr & CNTCR_SCEN) != 0 && self.cntscr0 > 0 {
+        if (self.cntcr & CNTCR_SCEN) != 0 {
             let scaled =
                 (ticks as u128 * self.cntscr0 as u128 / 0x0100_0000u128) as u64;
             self.ticks_then = self.ticks_then.wrapping_add(scaled);
@@ -237,7 +237,11 @@ fn read_id(frame: &[u8; 12], offset: u64) -> u64 {
 pub struct SseCounterControlMmio(pub Arc<SseCounter>);
 
 impl MmioOps for SseCounterControlMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
+        }
+
         let regs = self.0.regs.borrow();
         match offset {
             A_CNTCR => u64::from(regs.cntcr),
@@ -245,8 +249,8 @@ impl MmioOps for SseCounterControlMmio {
             A_CNTCV_LO => regs.counter_value() & 0xFFFF_FFFF,
             A_CNTCV_HI => (regs.counter_value() >> 32) & 0xFFFF_FFFF,
             A_CNTID => {
-                // CNTSC implemented (bit 0), CNTSELCLK = 1 (bit 16)
-                (1 << 16) | 1
+                // CNTSC implemented, CNTSELCLK selects CLK0.
+                (1 << 17) | 1
             }
             A_CNTSCR | A_CNTSCR0 => u64::from(regs.cntscr0),
             A_CNTSCR1 => 0,
@@ -255,23 +259,33 @@ impl MmioOps for SseCounterControlMmio {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size != 4 {
+            return;
+        }
+
         let value = val as u32;
+        let mut notify = false;
         match offset {
             A_CNTCR => {
                 let mut regs = self.0.regs.borrow();
-                regs.cntcr = value & CNTCR_VALID_MASK;
+                let new_cntcr = value & CNTCR_VALID_MASK;
+                notify = ((new_cntcr ^ regs.cntcr) & CNTCR_EN) != 0;
+                regs.cntcr = new_cntcr;
             }
             A_CNTCV_LO => {
                 let mut regs = self.0.regs.borrow();
                 let cv = regs.counter_value();
                 let new_cv = (cv & 0xFFFF_FFFF_0000_0000) | (val & 0xFFFF_FFFF);
                 regs.set_counter(new_cv);
+                notify = true;
             }
             A_CNTCV_HI => {
                 let mut regs = self.0.regs.borrow();
-                let new_cv = (val & 0xFFFF_FFFF) << 32;
+                let cv = regs.counter_value();
+                let new_cv = (cv & 0xFFFF_FFFF) | ((val & 0xFFFF_FFFF) << 32);
                 regs.set_counter(new_cv);
+                notify = true;
             }
             A_CNTSCR | A_CNTSCR0 => {
                 self.0.regs.borrow().cntscr0 = value;
@@ -280,14 +294,20 @@ impl MmioOps for SseCounterControlMmio {
             // RO registers: CNTSR, CNTID, PID/CID
             _ => {}
         }
-        self.0.notify_callbacks();
+        if notify {
+            self.0.notify_callbacks();
+        }
     }
 }
 
 pub struct SseCounterStatusMmio(pub Arc<SseCounter>);
 
 impl MmioOps for SseCounterStatusMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
+        }
+
         let regs = self.0.regs.borrow();
         match offset {
             A_STATUS_CNTCV_LO => regs.counter_value() & 0xFFFF_FFFF,

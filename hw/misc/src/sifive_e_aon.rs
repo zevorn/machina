@@ -167,6 +167,10 @@ fn field_get(val: u32, pos: u8) -> u32 {
     (val >> pos) & 1
 }
 
+fn scale_get(val: u32) -> u32 {
+    (val >> WDOGCFG_SCALE) & 0xF
+}
+
 fn field_set(val: u32, pos: u8, bit: u32) -> u32 {
     let mask = 1u32 << pos;
     if bit != 0 {
@@ -192,7 +196,7 @@ fn update_wdogcount(regs: &mut SiFiveEAonRegs, now: i64) {
 fn update_state(regs: &mut SiFiveEAonRegs, now: i64) {
     update_wdogcount(regs, now);
 
-    let scale = field_get(regs.wdogcfg, WDOGCFG_SCALE);
+    let scale = scale_get(regs.wdogcfg);
     let wdogs = (regs.wdogcount >> scale) as u16;
     let cmp_signal = wdogs >= regs.wdogcmp0;
 
@@ -207,7 +211,11 @@ fn update_state(regs: &mut SiFiveEAonRegs, now: i64) {
 pub struct SiFiveEAonMmio(pub Arc<SiFiveEAon>);
 
 impl MmioOps for SiFiveEAonMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
+        }
+
         if offset >= SIFIVE_E_AON_MAX {
             return 0;
         }
@@ -223,7 +231,7 @@ impl MmioOps for SiFiveEAonMmio {
                 }
                 AON_WDT_WDOGS => {
                     update_wdogcount(&mut regs, now);
-                    let scale = field_get(regs.wdogcfg, WDOGCFG_SCALE);
+                    let scale = scale_get(regs.wdogcfg);
                     u64::from(regs.wdogcount >> scale)
                 }
                 AON_WDT_WDOGFEED => 0,
@@ -237,7 +245,11 @@ impl MmioOps for SiFiveEAonMmio {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size != 4 {
+            return;
+        }
+
         if offset >= SIFIVE_E_AON_MAX {
             return;
         }

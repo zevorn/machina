@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use machina_core::address::GPA;
+use machina_core::mobject::{MObject, MObjectInfo};
 use machina_hw_core::bus::{SysBus, SysBusDeviceState, SysBusError};
 use machina_hw_core::mdev::{MDevice, MDeviceError};
 use machina_memory::address_space::AddressSpace;
@@ -92,6 +93,10 @@ impl Unimp {
     pub fn with_mdevice<T>(&self, f: impl FnOnce(&dyn MDevice) -> T) -> T {
         let guard = self.state.lock();
         f(&*guard)
+    }
+
+    pub fn object_info(&self) -> MObjectInfo {
+        self.state.lock().object_info()
     }
 
     pub fn do_read(&self, _offset: u64, _size: u32) -> u64 {

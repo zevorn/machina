@@ -79,9 +79,11 @@ fn test_sifive_e_prci_reset_runtime() {
 }
 
 #[test]
-fn test_sifive_e_prci_lifecycle() {
+fn test_sifive_e_prci_lifecycle_and_mom_identity() {
     let prci = SifiveEPRCI::new();
     assert!(!prci.realized());
+    prci.with_mdevice(|device| assert_eq!(device.local_id(), "sifive_e_prci"));
+    assert_eq!(prci.object_info().local_id, "sifive_e_prci");
 
     let (mut aspace, mut bus) = make_test_aspace();
     let base = GPA(0x1000_0000);
@@ -220,9 +222,11 @@ fn test_sifive_u_prci_reset_preserves_untouched_regs() {
 }
 
 #[test]
-fn test_sifive_u_prci_lifecycle() {
+fn test_sifive_u_prci_lifecycle_and_mom_identity() {
     let prci = SifiveUPRCI::new();
     assert!(!prci.realized());
+    prci.with_mdevice(|device| assert_eq!(device.local_id(), "sifive_u_prci"));
+    assert_eq!(prci.object_info().local_id, "sifive_u_prci");
 
     let (mut aspace, mut bus) = make_test_aspace();
     let base = GPA(0x1000_0000);
@@ -265,6 +269,20 @@ fn test_pvpanic_mmio_read_events() {
     let mmio = PvpanicMmio(pvp.clone());
     let events = mmio.read(0x00, 1) as u8;
     assert_eq!(events, PvpanicEvent::PANICKED | PvpanicEvent::CRASH_LOADED);
+}
+
+#[test]
+fn test_pvpanic_wide_reads_repeat_event_byte() {
+    let pvp = Pvpanic::new(
+        PvpanicEvent::PANICKED
+            | PvpanicEvent::CRASH_LOADED
+            | PvpanicEvent::SHUTDOWN,
+    );
+    let mmio = PvpanicMmio(pvp.clone());
+
+    assert_eq!(mmio.read(0x00, 1), 0x07);
+    assert_eq!(mmio.read(0x00, 2), 0x0707);
+    assert_eq!(mmio.read(0x00, 4), 0x0707_0707);
 }
 
 #[test]
@@ -316,6 +334,24 @@ fn test_pvpanic_mmio_write_dispatches_priority() {
 }
 
 #[test]
+fn test_pvpanic_wide_write_dispatches_split_event_bytes() {
+    use std::sync::Mutex;
+
+    let pvp = Pvpanic::new(PvpanicEvent::PANICKED);
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let received_clone = Arc::clone(&received);
+    pvp.set_event_handler(Box::new(move |event| {
+        received_clone.lock().unwrap().push(event);
+    }));
+
+    let mmio = PvpanicMmio(pvp.clone());
+
+    mmio.write(0x00, 2, u64::from(PvpanicEvent::PANICKED) << 8);
+
+    assert_eq!(*received.lock().unwrap(), vec![PvpanicEvent::PANICKED]);
+}
+
+#[test]
 fn test_pvpanic_mmio_unadvertised_event_still_dispatches() {
     use std::sync::Mutex;
 
@@ -355,9 +391,11 @@ fn test_pvpanic_mmio_write_no_recognized_event() {
 }
 
 #[test]
-fn test_pvpanic_lifecycle() {
+fn test_pvpanic_lifecycle_and_mom_identity() {
     let pvp = Pvpanic::new(PvpanicEvent::PANICKED);
     assert!(!pvp.realized());
+    pvp.with_mdevice(|device| assert_eq!(device.local_id(), "pvpanic"));
+    assert_eq!(pvp.object_info().local_id, "pvpanic");
 
     let (mut aspace, mut bus) = make_test_aspace();
     let base = GPA(0x1000_0000);
@@ -432,9 +470,11 @@ fn test_unimp_mmio_wrapper() {
 }
 
 #[test]
-fn test_unimp_lifecycle() {
+fn test_unimp_lifecycle_and_mom_identity() {
     let unimp = Unimp::new("test-device", 0x1000);
     assert!(!unimp.realized());
+    unimp.with_mdevice(|device| assert_eq!(device.local_id(), "test-device"));
+    assert_eq!(unimp.object_info().local_id, "test-device");
 
     let (mut aspace, mut bus) = make_test_aspace();
     let base = GPA(0x1000_0000);
@@ -625,9 +665,12 @@ fn test_led_reset_runtime() {
 }
 
 #[test]
-fn test_led_lifecycle() {
+fn test_led_lifecycle_and_mom_identity() {
     let led = Led::new(LedColor::Green, "lifecycle", true);
     assert!(!led.realized());
+    led.with_mdevice(|device| assert_eq!(device.local_id(), "led"));
+    assert_eq!(led.object_info().local_id, "led");
+
     led.realize().unwrap();
     assert!(led.realized());
     let err = led.realize().unwrap_err();
@@ -729,9 +772,11 @@ fn test_virt_ctrl_mmio_wrapper() {
 }
 
 #[test]
-fn test_virt_ctrl_lifecycle() {
+fn test_virt_ctrl_lifecycle_and_mom_identity() {
     let vc = VirtCtrl::new();
     assert!(!vc.realized());
+    vc.with_mdevice(|device| assert_eq!(device.local_id(), "virt_ctrl"));
+    assert_eq!(vc.object_info().local_id, "virt_ctrl");
 
     let (mut aspace, mut bus) = make_test_aspace();
     let base = GPA(0x1000_0000);
@@ -810,6 +855,32 @@ impl IrqSink for Sink {
 }
 
 #[test]
+fn test_pl050_lifecycle_and_mom_identity() {
+    let pl050 = Arc::new(Pl050::new());
+    assert!(!pl050.realized());
+    pl050.with_mdevice(|device| assert_eq!(device.local_id(), "pl050"));
+    assert_eq!(pl050.object_info().local_id, "pl050");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x1000);
+    let region = MemoryRegion::io(
+        "pl050",
+        0x1000,
+        Arc::new(Pl050Mmio(Arc::clone(&pl050))),
+    );
+
+    pl050.attach_to_bus(&mut bus).unwrap();
+    pl050.register_mmio(region, base).unwrap();
+    pl050.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(pl050.realized());
+    assert_eq!(aspace.read(GPA(base.0 + 0xfe0), 4), 0x50);
+
+    let err = pl050.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
 fn test_pl050_defaults() {
     let pl050 = Arc::new(Pl050::new());
     let mmio = Pl050Mmio(Arc::clone(&pl050));
@@ -841,6 +912,16 @@ fn test_pl050_stat_txempty() {
 
     let stat = mmio.read(0x04, 4) as u32;
     assert!(stat & 0x40 != 0); // TXEMPTY set
+}
+
+#[test]
+fn test_pl050_wide_mmio_read_splits_into_32bit_callbacks() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    mmio.write(0x00, 4, 0x12);
+
+    assert_eq!(mmio.read(0x00, 8), 0x0000_0040_0000_0012);
 }
 
 #[test]
@@ -894,12 +975,66 @@ fn test_pl050_clk_write() {
 }
 
 #[test]
-fn test_pl050_data_write_read() {
+fn test_pl050_data_write_returns_ps2_resend_response() {
     let pl050 = Arc::new(Pl050::new());
     let mmio = Pl050Mmio(Arc::clone(&pl050));
 
     mmio.write(0x08, 4, 0xAB);
-    assert_eq!(mmio.read(0x08, 4), 0xAB);
+
+    assert_eq!(mmio.read(0x04, 4), 0x50);
+    assert_eq!(mmio.read(0x08, 4), 0xFE);
+    assert_eq!(mmio.read(0x04, 4), 0x44);
+    assert_eq!(mmio.read(0x10, 4), 0x02);
+}
+
+#[test]
+fn test_pl050_wide_mmio_write_splits_into_32bit_callbacks() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    mmio.write(0x08, 8, 0x1234_5678_0000_00ab);
+
+    assert_eq!(mmio.read(0x04, 4), 0x50);
+    assert_eq!(mmio.read(0x08, 4), 0xfe);
+    assert_eq!(mmio.read(0x0c, 4), 0x1234_5678);
+    assert_eq!(mmio.read(0x10, 4), 0x02);
+}
+
+#[test]
+fn test_pl050_unaligned_wide_accesses_split_like_qemu() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    mmio.write(0x00, 4, 0);
+    mmio.write(0x01, 4, 0x0102_0304);
+    assert_eq!(mmio.read(0x00, 4), 0x0203);
+    assert_eq!(mmio.read(0x04, 4), 0x40);
+
+    mmio.write(0x0c, 4, 0);
+    mmio.write(0x0d, 4, 0x0102_0304);
+    assert_eq!(mmio.read(0x0c, 4), 0x0203);
+    assert_eq!(mmio.read(0x10, 4), 0x02);
+
+    assert_eq!(mmio.read(0xfe1, 4), 0x1000_5050);
+    assert_eq!(mmio.read(0xfe2, 4), 0x0010_0050);
+    assert_eq!(mmio.read(0xfe3, 4), 0x1000_1050);
+}
+
+#[test]
+fn test_pl050_narrow_accesses_use_access_width_bits() {
+    let pl050 = Arc::new(Pl050::new());
+    let mmio = Pl050Mmio(Arc::clone(&pl050));
+
+    mmio.write(0x00, 4, 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 1), 0x78);
+    assert_eq!(mmio.read(0x00, 2), 0x5678);
+    assert_eq!(mmio.read(0x01, 1), 0x78);
+    assert_eq!(mmio.read(0x02, 2), 0x5678);
+
+    mmio.write(0x00, 1, 0x1234);
+    assert_eq!(mmio.read(0x00, 4), 0x34);
+    mmio.write(0x0c, 2, 0x1234_5678);
+    assert_eq!(mmio.read(0x0c, 4), 0x5678);
 }
 
 #[test]
@@ -919,12 +1054,53 @@ fn test_pl050_reset_runtime() {
 // -- SiFive E AON tests --
 
 #[test]
+fn test_sifive_e_aon_lifecycle_and_mom_identity() {
+    let aon = Arc::new(SiFiveEAon::default());
+    assert!(!aon.realized());
+    aon.with_mdevice(|device| assert_eq!(device.local_id(), "sifive_e_aon"));
+    assert_eq!(aon.object_info().local_id, "sifive_e_aon");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x2000);
+    let region = MemoryRegion::io(
+        "sifive_e_aon",
+        0x1000,
+        Arc::new(SiFiveEAonMmio(Arc::clone(&aon))),
+    );
+
+    aon.attach_to_bus(&mut bus).unwrap();
+    aon.register_mmio(region, base).unwrap();
+    aon.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(aon.realized());
+    assert_eq!(aspace.read(GPA(base.0 + 0x20), 4), 0xbeef);
+
+    let err = aon.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
 fn test_sifive_e_aon_defaults() {
     let aon = Arc::new(SiFiveEAon::default());
     let mmio = SiFiveEAonMmio(Arc::clone(&aon));
 
     assert_eq!(mmio.read(0x00, 4), 0); // WDOGCFG
     assert_eq!(mmio.read(0x20, 4), 0xbeef); // WDOGCMP0
+}
+
+#[test]
+fn test_sifive_e_aon_rejects_non_4byte_mmio_accesses() {
+    let aon = Arc::new(SiFiveEAon::default());
+    let mmio = SiFiveEAonMmio(Arc::clone(&aon));
+
+    assert_eq!(mmio.read(0x20, 1), 0);
+    assert_eq!(mmio.read(0x20, 2), 0);
+    assert_eq!(mmio.read(0x20, 8), 0);
+
+    mmio.write(0x1C, 1, 0x51F1_5E);
+    mmio.write(0x1C, 2, 0x51F1_5E);
+    mmio.write(0x1C, 8, 0x51F1_5E);
+    assert_eq!(mmio.read(0x1C, 4), 0);
 }
 
 #[test]
@@ -972,6 +1148,19 @@ fn test_sifive_e_aon_feed_resets_count() {
 
     // Counter should be reset to 0
     assert_eq!(mmio.read(0x08, 4), 0);
+}
+
+#[test]
+fn test_sifive_e_aon_wdogs_uses_four_bit_scale_field() {
+    let aon = Arc::new(SiFiveEAon::default());
+    let mmio = SiFiveEAonMmio(Arc::clone(&aon));
+
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x08, 4, 0x80);
+    mmio.write(0x1C, 4, 0x51F1_5E);
+    mmio.write(0x00, 4, 0x03);
+
+    assert_eq!(mmio.read(0x10, 4), 0x10);
 }
 
 #[test]
@@ -1035,6 +1224,33 @@ fn test_sifive_e_aon_reset_runtime() {
 // -- SiFive U OTP tests --
 
 #[test]
+fn test_sifive_u_otp_lifecycle_and_mom_identity() {
+    let otp = Arc::new(SiFiveUOtp::new());
+    assert!(!otp.realized());
+    otp.with_mdevice(|device| assert_eq!(device.local_id(), "sifive_u_otp"));
+    assert_eq!(otp.object_info().local_id, "sifive_u_otp");
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let base = GPA(0x3000);
+    let region = MemoryRegion::io(
+        "sifive_u_otp",
+        0x1000,
+        Arc::new(SiFiveUOtpMmio(Arc::clone(&otp))),
+    );
+
+    otp.attach_to_bus(&mut bus).unwrap();
+    otp.register_mmio(region, base).unwrap();
+    otp.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(otp.realized());
+    aspace.write(base, 4, 0x1234);
+    assert_eq!(aspace.read(base, 4), 0x234);
+
+    let err = otp.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
 fn test_sifive_u_otp_defaults() {
     let otp = Arc::new(SiFiveUOtp::new());
     let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
@@ -1058,6 +1274,21 @@ fn test_sifive_u_otp_pa_masked() {
 
     mmio.write(0x00, 4, 0xDEAD);
     assert_eq!(mmio.read(0x00, 4), 0xDEAD & 0xFFF);
+}
+
+#[test]
+fn test_sifive_u_otp_rejects_non_4byte_mmio_accesses() {
+    let otp = Arc::new(SiFiveUOtp::new());
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    assert_eq!(mmio.read(0x18, 1), 0);
+    assert_eq!(mmio.read(0x18, 2), 0);
+    assert_eq!(mmio.read(0x18, 8), 0);
+
+    mmio.write(0x00, 1, 0x12);
+    mmio.write(0x00, 2, 0x3456);
+    mmio.write(0x00, 8, 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 4), 0);
 }
 
 #[test]
@@ -1130,6 +1361,23 @@ fn test_sifive_u_otp_pwe_write() {
 
     // Verify bit 5 cleared: 0xFFFF_FFFF & ~(1<<5) = 0xFFFF_FFDF
     assert_eq!(mmio.read(0x18, 4), 0xFFFF_FFDF);
+}
+
+#[test]
+fn test_sifive_u_otp_pdin_value_is_shifted_into_fuse() {
+    let otp = Arc::new(SiFiveUOtp::with_serial(1));
+    let mmio = SiFiveUOtpMmio(Arc::clone(&otp));
+
+    mmio.write(0x00, 4, 0xfc); // PA=serial fuse index
+    mmio.write(0x04, 4, 5); // PAIO=5
+    mmio.write(0x14, 4, 2); // PDIN=2
+    mmio.write(0x38, 4, 1); // PWE_EN
+
+    mmio.write(0x0c, 4, 1); // PCE_EN
+    mmio.write(0x1c, 4, 1); // PDSTB_EN
+    mmio.write(0x34, 4, 1); // PTRIM_EN
+
+    assert_eq!(mmio.read(0x18, 4), 0x41);
 }
 
 #[test]

@@ -147,9 +147,6 @@ fn test_recv_packet_invalid_checksum_chars() {
 
 #[test]
 fn test_recv_packet_ctrl_c() {
-    // 0x03 byte should return "\x03".
-    let data = vec![0x03];
-    let mut cursor = std::io::Cursor::new(data);
     // recv_packet will block waiting for '$' after the
     // interrupt byte. Test the 0x03 path by providing it
     // followed by a valid packet.

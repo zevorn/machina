@@ -2,6 +2,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use machina_accel::timer::VirtualClock;
+use machina_core::address::GPA;
+use machina_hw_core::bus::SysBus;
 use machina_hw_core::irq::{InterruptSource, IrqSink};
 use machina_hw_timer::policy;
 use machina_hw_timer::sifive_pwm::{SiFivePwm, SiFivePwmMmio};
@@ -10,7 +12,15 @@ use machina_hw_timer::sse_counter::{
 };
 use machina_hw_timer::sse_timer::{SseTimer, SseTimerMmio};
 use machina_hw_timer::{self as timer, Ptimer};
-use machina_memory::region::MmioOps;
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
+
+fn make_test_aspace() -> (AddressSpace, SysBus) {
+    let root = MemoryRegion::container("root", 0x1_0000_0000);
+    let aspace = AddressSpace::new(root);
+    let bus = SysBus::new("sysbus");
+    (aspace, bus)
+}
 
 /// Utility: create a timer with a callback that increments a counter.
 fn counting_timer(policy_mask: u8) -> (Arc<Ptimer>, Arc<AtomicU64>) {
@@ -613,6 +623,28 @@ impl IrqSink for TestIrqSink {
 // -- SiFive PWM tests --
 
 #[test]
+fn test_sifive_pwm_lifecycle_and_mom_identity() {
+    let pwm = Arc::new(SiFivePwm::new());
+    pwm.with_mdevice(|device| assert_eq!(device.local_id(), "sifive_pwm"));
+    assert_eq!(pwm.object_info().local_id, "sifive_pwm");
+    assert!(!pwm.realized());
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let region = MemoryRegion::io(
+        "sifive_pwm",
+        0x1000,
+        Arc::new(SiFivePwmMmio(Arc::clone(&pwm))),
+    );
+    pwm.attach_to_bus(&mut bus).unwrap();
+    pwm.register_mmio(region, GPA(0x1000)).unwrap();
+    pwm.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(pwm.realized());
+    let err = pwm.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
 fn test_sifive_pwm_defaults() {
     let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
     let mmio = SiFivePwmMmio(Arc::clone(&pwm));
@@ -638,12 +670,72 @@ fn test_sifive_pwm_config_write() {
 }
 
 #[test]
+fn test_sifive_pwm_narrow_accesses_use_access_width_bits() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    mmio.write(0x00, 4, 0x1234_5678);
+    assert_eq!(mmio.read(0x00, 1), 0x78);
+    assert_eq!(mmio.read(0x00, 2), 0x5678);
+    assert_eq!(mmio.read(0x01, 1), 0);
+    assert_eq!(mmio.read(0x02, 2), 0);
+
+    mmio.write(0x20, 4, 0x1234_5678);
+    assert_eq!(mmio.read(0x20, 1), 0x78);
+    assert_eq!(mmio.read(0x20, 2), 0x5678);
+
+    mmio.write(0x00, 1, 0x1234);
+    assert_eq!(mmio.read(0x00, 4), 0x34);
+    mmio.write(0x20, 2, 0x1234_5678);
+    assert_eq!(mmio.read(0x20, 4), 0x5678);
+}
+
+#[test]
+fn test_sifive_pwm_unaligned_wide_accesses_split_like_qemu() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    mmio.write(0x20, 4, 0x1234_5678);
+    mmio.write(0x24, 4, 0x9abc_def0);
+
+    assert_eq!(mmio.read(0x21, 4), 0xf000_0000);
+    assert_eq!(mmio.read(0x22, 4), 0xdef0_0000);
+    assert_eq!(mmio.read(0x23, 4), 0x00de_f000);
+
+    mmio.write(0x20, 4, 0);
+    mmio.write(0x24, 4, 0);
+    mmio.write(0x21, 4, 0x0102_0304);
+    assert_eq!(mmio.read(0x20, 4), 0);
+    assert_eq!(mmio.read(0x24, 4), 0x0000_0001);
+
+    mmio.write(0x24, 4, 0);
+    mmio.write(0x22, 4, 0x0102_0304);
+    assert_eq!(mmio.read(0x24, 4), 0x0000_0102);
+
+    mmio.write(0x24, 4, 0);
+    mmio.write(0x23, 4, 0x0102_0304);
+    assert_eq!(mmio.read(0x24, 4), 0x0000_0203);
+}
+
+#[test]
 fn test_sifive_pwm_count_write() {
     let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
     let mmio = SiFivePwmMmio(Arc::clone(&pwm));
 
     mmio.write(0x08, 4, 100);
     assert_eq!(mmio.read(0x08, 4), 100);
+}
+
+#[test]
+fn test_sifive_pwm_count_advances_when_enabled() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(1_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    mmio.write(0x00, 4, 1u64 << 12); // ENALWAYS
+    pwm.tick(1_000_000_000);
+
+    assert_eq!(mmio.read(0x08, 4), 1_000_000);
+    assert_eq!(mmio.read(0x10, 4), 0x4240);
 }
 
 #[test]
@@ -656,6 +748,28 @@ fn test_sifive_pwm_pwmcmp_write() {
 
     mmio.write(0x24, 4, 0x1234);
     assert_eq!(mmio.read(0x24, 4), 0x1234);
+}
+
+#[test]
+fn test_sifive_pwm_wide_mmio_read_splits_into_32bit_callbacks() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    mmio.write(0x20, 4, 0x1234);
+    mmio.write(0x24, 4, 0x5678);
+
+    assert_eq!(mmio.read(0x20, 8), 0x0000_5678_0000_1234);
+}
+
+#[test]
+fn test_sifive_pwm_wide_mmio_write_splits_into_32bit_callbacks() {
+    let pwm = Arc::new(SiFivePwm::new_with_freq(500_000_000));
+    let mmio = SiFivePwmMmio(Arc::clone(&pwm));
+
+    mmio.write(0x20, 8, 0x0000_5678_0000_1234);
+
+    assert_eq!(mmio.read(0x20, 4), 0x1234);
+    assert_eq!(mmio.read(0x24, 4), 0x5678);
 }
 
 #[test]
@@ -682,7 +796,7 @@ fn test_sifive_pwm_irq_fires() {
     assert!(!sink.level());
 
     // Set pwmcmp0 = 0 (matches pwms=0) and enable
-    let cfg = (1u32 << 12); // ENALWAYS
+    let cfg = 1u32 << 12; // ENALWAYS
     mmio.write(0x00, 4, u64::from(cfg));
     // IRQ should fire since pwms(0) >= pwmcmp0(0)
     assert!(sink.level());
@@ -694,11 +808,14 @@ fn test_sifive_pwm_reset_runtime() {
     let mmio = SiFivePwmMmio(Arc::clone(&pwm));
 
     mmio.write(0x00, 4, 0xDEAD);
+    mmio.write(0x08, 4, 0x100);
     mmio.write(0x20, 4, 1234);
 
     pwm.reset_runtime();
 
     assert_eq!(mmio.read(0x00, 4), 0);
+    assert_eq!(mmio.read(0x08, 4), 0);
+    assert_eq!(mmio.read(0x10, 4), 0);
     assert_eq!(mmio.read(0x20, 4), 0);
 }
 
@@ -714,6 +831,42 @@ fn test_sifive_pwm_pwmcmp_mask() {
 }
 
 // -- SSE Counter tests --
+
+#[test]
+fn test_sse_counter_lifecycle_and_mom_identity() {
+    let counter = Arc::new(SseCounter::new());
+    counter.with_mdevice(|device| assert_eq!(device.local_id(), "sse_counter"));
+    assert_eq!(counter.object_info().local_id, "sse_counter");
+    assert!(!counter.realized());
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    counter.attach_to_bus(&mut bus).unwrap();
+    counter
+        .register_mmio(
+            MemoryRegion::io(
+                "sse_counter_control",
+                0x1000,
+                Arc::new(SseCounterControlMmio(Arc::clone(&counter))),
+            ),
+            GPA(0x2000),
+        )
+        .unwrap();
+    counter
+        .register_mmio(
+            MemoryRegion::io(
+                "sse_counter_status",
+                0x1000,
+                Arc::new(SseCounterStatusMmio(Arc::clone(&counter))),
+            ),
+            GPA(0x3000),
+        )
+        .unwrap();
+    counter.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(counter.realized());
+    let err = counter.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
 
 #[test]
 fn test_sse_counter_control_defaults() {
@@ -733,6 +886,26 @@ fn test_sse_counter_status_defaults() {
 
     assert_eq!(mmio.read(0x00, 4), 0); // CNTCV_LO
     assert_eq!(mmio.read(0x04, 4), 0); // CNTCV_HI
+}
+
+#[test]
+fn test_sse_counter_rejects_non_4byte_mmio_accesses() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let control = SseCounterControlMmio(Arc::clone(&counter));
+    let status = SseCounterStatusMmio(Arc::clone(&counter));
+
+    control.write(0x08, 4, 0x1234);
+    assert_eq!(control.read(0x08, 1), 0);
+    assert_eq!(control.read(0x08, 2), 0);
+    assert_eq!(control.read(0x08, 8), 0);
+    assert_eq!(status.read(0x00, 1), 0);
+    assert_eq!(status.read(0x00, 2), 0);
+    assert_eq!(status.read(0x00, 8), 0);
+
+    control.write(0x00, 1, 0x01);
+    control.write(0x00, 2, 0x03);
+    control.write(0x00, 8, 0x1F);
+    assert_eq!(control.read(0x00, 4), 0);
 }
 
 #[test]
@@ -761,9 +934,8 @@ fn test_sse_counter_cntid() {
     let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
     let mmio = SseCounterControlMmio(Arc::clone(&counter));
 
-    // CNTSC=1, CNTSELCLK=1
-    let id = mmio.read(0x1C, 4);
-    assert_eq!(id & 1, 1); // CNTSC bit 0
+    // CNTSC=1, CNTSELCLK=1 in bits [18:17].
+    assert_eq!(mmio.read(0x1C, 4), 0x0002_0001);
 }
 
 #[test]
@@ -790,8 +962,7 @@ fn test_sse_counter_write_cntcv() {
 
     mmio.write(0x0C, 4, 0x9ABCDEF0); // CNTCV_HI
     assert_eq!(mmio.read(0x0C, 4), 0x9ABCDEF0);
-    // CNTCV_LO should be 0 (HI write clears LO)
-    assert_eq!(mmio.read(0x08, 4), 0);
+    assert_eq!(mmio.read(0x08, 4), 0x12345678);
 }
 
 #[test]
@@ -807,6 +978,32 @@ fn test_sse_counter_write_cntscr() {
 }
 
 #[test]
+fn test_sse_counter_notifies_only_on_sync_writes() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&notifications);
+    counter.register_callback(Box::new(move || {
+        observed.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    mmio.write(0x10, 4, 0x0200_0000); // CNTSCR0
+    mmio.write(0xD4, 4, 0x1234_5678); // CNTSCR1 RAZ/WI
+    mmio.write(0x04, 4, 0xFFFF_FFFF); // CNTSR RO
+    mmio.write(0x00, 4, 0x10); // CNTCR.PSLVERRDIS, EN unchanged
+    assert_eq!(notifications.load(Ordering::SeqCst), 0);
+
+    mmio.write(0x00, 4, 0x11); // CNTCR.EN toggles on
+    assert_eq!(notifications.load(Ordering::SeqCst), 1);
+
+    mmio.write(0x00, 4, 0x01); // CNTCR.EN unchanged
+    assert_eq!(notifications.load(Ordering::SeqCst), 1);
+
+    mmio.write(0x08, 4, 0x1234_5678); // CNTCV_LO
+    assert_eq!(notifications.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn test_sse_counter_tick_advances() {
     let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
     let mmio = SseCounterControlMmio(Arc::clone(&counter));
@@ -819,6 +1016,19 @@ fn test_sse_counter_tick_advances() {
     // At 1MHz, 1 second = 1_000_000 ticks
     let lo = mmio.read(0x08, 4);
     assert_eq!(lo, 1_000_000);
+}
+
+#[test]
+fn test_sse_counter_zero_scale_stops_visible_counter_when_scaling_enabled() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let mmio = SseCounterControlMmio(Arc::clone(&counter));
+
+    mmio.write(0x10, 4, 0); // CNTSCR0
+    mmio.write(0x00, 4, 0x05); // CNTCR.EN | CNTCR.SCEN
+    counter.tick(1_000_000_000);
+
+    assert_eq!(mmio.read(0x08, 4), 0);
+    assert_eq!(mmio.read(0x0c, 4), 0);
 }
 
 #[test]
@@ -864,6 +1074,29 @@ fn test_sse_counter_status_frame_read_only() {
 // -- SSE Timer tests --
 
 #[test]
+fn test_sse_timer_lifecycle_and_mom_identity() {
+    let counter = Arc::new(SseCounter::new());
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    timer.with_mdevice(|device| assert_eq!(device.local_id(), "sse_timer"));
+    assert_eq!(timer.object_info().local_id, "sse_timer");
+    assert!(!timer.realized());
+
+    let (mut aspace, mut bus) = make_test_aspace();
+    let region = MemoryRegion::io(
+        "sse_timer",
+        0x1000,
+        Arc::new(SseTimerMmio(Arc::clone(&timer))),
+    );
+    timer.attach_to_bus(&mut bus).unwrap();
+    timer.register_mmio(region, GPA(0x4000)).unwrap();
+    timer.realize_onto(&mut bus, &mut aspace).unwrap();
+
+    assert!(timer.realized());
+    let err = timer.realize_onto(&mut bus, &mut aspace).unwrap_err();
+    assert!(err.to_string().contains("already realized"));
+}
+
+#[test]
 fn test_sse_timer_defaults() {
     let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
     let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
@@ -881,6 +1114,22 @@ fn test_sse_timer_defaults() {
     assert_eq!(mmio.read(0x48, 4), 0); // CNTP_AIVAL_RELOAD
     assert_eq!(mmio.read(0x4C, 4), 0); // CNTP_AIVAL_CTL
     assert_eq!(mmio.read(0x50, 4), 1); // CNTP_CFG
+}
+
+#[test]
+fn test_sse_timer_rejects_non_4byte_mmio_accesses() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    assert_eq!(mmio.read(0x50, 1), 0);
+    assert_eq!(mmio.read(0x50, 2), 0);
+    assert_eq!(mmio.read(0x50, 8), 0);
+
+    mmio.write(0x10, 1, 0x12);
+    mmio.write(0x10, 2, 0x3456);
+    mmio.write(0x10, 8, 0x1234_5678);
+    assert_eq!(mmio.read(0x10, 4), 0);
 }
 
 #[test]
@@ -1051,6 +1300,19 @@ fn test_sse_timer_tval_write_sets_cval() {
     // Write TVAL = 500 → cval = counter + 500 = 600
     mmio.write(0x28, 4, 500);
     assert_eq!(mmio.read(0x20, 4), 600); // CNTP_CVAL_LO
+}
+
+#[test]
+fn test_sse_timer_tval_write_sign_extends_32bit_value() {
+    let counter = Arc::new(SseCounter::new_with_freq(1_000_000));
+    let timer = Arc::new(SseTimer::new(Arc::clone(&counter)));
+    let mmio = SseTimerMmio(Arc::clone(&timer));
+
+    mmio.write(0x28, 4, 0xffff_fffe);
+
+    assert_eq!(mmio.read(0x20, 4), 0xffff_fffe);
+    assert_eq!(mmio.read(0x24, 4), 0xffff_ffff);
+    assert_eq!(mmio.read(0x28, 4), 0xffff_fffe);
 }
 
 #[test]

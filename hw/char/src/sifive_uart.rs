@@ -239,6 +239,11 @@ impl SiFiveUart {
 
     /// Flush TX FIFO to chardev.
     pub fn flush_tx(&self) {
+        if !sifive_uart_txen(self.regs.borrow().txctrl) {
+            self.update_irq();
+            return;
+        }
+
         if let Some(ref mut fe) = *self.chardev.borrow() {
             let mut regs = self.regs.borrow();
             while !regs.tx_fifo_empty() {
@@ -281,7 +286,11 @@ impl Default for SiFiveUart {
 pub struct SiFiveUartMmio(pub Arc<SiFiveUart>);
 
 impl MmioOps for SiFiveUartMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size != 4 {
+            return 0;
+        }
+
         match offset {
             SIFIVE_UART_RXFIFO => {
                 let mut regs = self.0.regs.borrow();
@@ -308,14 +317,16 @@ impl MmioOps for SiFiveUartMmio {
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size != 4 {
+            return;
+        }
+
         let value = val as u32;
         match offset {
             SIFIVE_UART_TXFIFO => {
                 let mut regs = self.0.regs.borrow();
-                if sifive_uart_txen(regs.txctrl) {
-                    regs.tx_fifo_push(value as u8);
-                }
+                regs.tx_fifo_push(value as u8);
                 drop(regs);
                 self.0.flush_tx();
             }

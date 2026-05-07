@@ -195,19 +195,32 @@ impl Default for Cmgcr {
 pub struct CmgcrMmio(pub Arc<Cmgcr>);
 
 impl MmioOps for CmgcrMmio {
-    fn read(&self, offset: u64, _size: u32) -> u64 {
+    fn read(&self, offset: u64, size: u32) -> u64 {
         let regs = self.0.regs.borrow();
-        match offset {
+        let value = match offset {
             GCR_CONFIG_OFS => 0,
             GCR_BASE_OFS => regs.gcr_base,
             GCR_REV_OFS => regs.gcr_rev as u64,
             GCR_CPC_STATUS_OFS => u64::from(regs.has_cpc),
             GCR_L2_CONFIG_OFS => GCR_L2_CONFIG_BYPASS_MSK,
             _ => 0,
+        };
+
+        match size {
+            1 => value & 0xff,
+            2 => value & 0xffff,
+            4 => value & 0xffff_ffff,
+            _ => value,
         }
     }
 
-    fn write(&self, offset: u64, _size: u32, val: u64) {
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        let value = match size {
+            1 => val & 0xff,
+            2 => val & 0xffff,
+            4 => val & 0xffff_ffff,
+            _ => val,
+        };
         let mut regs = self.0.regs.borrow();
 
         for c in 0..regs.num_core as u64 {
@@ -216,7 +229,7 @@ impl MmioOps for CmgcrMmio {
                 if offset == addr {
                     let cpu_index = (c * regs.num_hart as u64 + h) as usize;
                     if cpu_index < GCR_MAX_VPS {
-                        let masked = val & GCR_CL_RESET_BASE_MSK;
+                        let masked = value & GCR_CL_RESET_BASE_MSK;
                         regs.reset_base[cpu_index] = masked;
                         let cb = self.0.vp_reset_base_cb.lock().unwrap();
                         if let Some(ref cb) = *cb {
@@ -229,7 +242,7 @@ impl MmioOps for CmgcrMmio {
         }
 
         if offset == GCR_BASE_OFS {
-            regs.gcr_base = val & GCR_BASE_GCRBASE_MSK;
+            regs.gcr_base = value & GCR_BASE_GCRBASE_MSK;
             let new_cpc = (regs.gcr_base + 0x8001) & GCR_CPC_BASE_MSK;
             regs.cpc_base = new_cpc;
         }
