@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,81 @@ pub struct MObjectState {
     object_path: Option<String>,
     parent_path: Option<String>,
     child_paths: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MObjectTree {
+    objects: BTreeMap<String, MObjectInfo>,
+}
+
+impl MObjectTree {
+    pub fn track_root(
+        &mut self,
+        root: &MObjectState,
+    ) -> Result<(), MObjectError> {
+        self.track_info(root.info())
+    }
+
+    pub fn track_info(
+        &mut self,
+        info: MObjectInfo,
+    ) -> Result<(), MObjectError> {
+        let path = info
+            .object_path
+            .clone()
+            .ok_or(MObjectError::ParentDetached)?
+            .to_string();
+        self.objects.insert(path, info);
+        Ok(())
+    }
+
+    pub fn lookup(&self, object_path: &str) -> Option<&MObjectInfo> {
+        self.objects.get(object_path)
+    }
+
+    pub fn attach_child(
+        &mut self,
+        parent: &mut MObjectState,
+        child: &mut MObjectState,
+    ) -> Result<(), MObjectError> {
+        let parent_path = parent
+            .object_path()
+            .ok_or(MObjectError::ParentDetached)?
+            .to_string();
+        parent.attach_child(child)?;
+        let child_path = child
+            .object_path()
+            .expect("attached child must have an object path")
+            .to_string();
+
+        self.objects.insert(parent_path, parent.info());
+        self.objects.insert(child_path, child.info());
+        Ok(())
+    }
+
+    pub fn detach_child(
+        &mut self,
+        parent: &mut MObjectState,
+        child: &mut MObjectState,
+    ) -> Result<(), MObjectError> {
+        let child_path = child
+            .object_path()
+            .ok_or(MObjectError::ChildPathMismatch)?
+            .to_string();
+        let parent_path = parent
+            .object_path()
+            .ok_or(MObjectError::ParentDetached)?
+            .to_string();
+
+        parent.detach_child(child)?;
+        self.objects.insert(parent_path, parent.info());
+        self.objects.remove(&child_path);
+        Ok(())
+    }
+
+    pub fn infos(&self) -> impl Iterator<Item = &MObjectInfo> {
+        self.objects.values()
+    }
 }
 
 impl MObjectState {
@@ -219,6 +295,41 @@ impl MObject for MObjectNode {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+/// Implements `MObject` forwarding for a type with a direct
+/// `MObjectState` field.
+///
+/// ```compile_fail
+/// struct MissingState {
+///     other: machina_core::mobject::MObjectState,
+/// }
+///
+/// machina_core::machina_impl_mobject!(MissingState, state);
+/// ```
+#[macro_export]
+macro_rules! machina_impl_mobject {
+    ($ty:ty, $field:ident) => {
+        impl $crate::mobject::MObject for $ty {
+            fn mobject_state(&self) -> &$crate::mobject::MObjectState {
+                &self.$field
+            }
+
+            fn mobject_state_mut(
+                &mut self,
+            ) -> &mut $crate::mobject::MObjectState {
+                &mut self.$field
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+    };
 }
 
 fn validate_local_id(local_id: &str) -> Result<(), MObjectError> {

@@ -1,6 +1,6 @@
 use std::any::Any;
 
-use machina_core::mobject::{MObject, MObjectState};
+use machina_core::mobject::{MObject, MObjectState, MObjectTree};
 
 struct TestObject {
     state: MObjectState,
@@ -82,6 +82,33 @@ fn test_mobject_duplicate_child_id_rejected() {
 }
 
 #[test]
+fn test_mobject_detached_parent_cannot_attach_child() {
+    let mut parent = TestObject::new_detached("parent");
+    let mut child = TestObject::new_detached("uart0");
+
+    let err = parent
+        .mobject_state_mut()
+        .attach_child(child.mobject_state_mut())
+        .expect_err("detached parent must not attach a child");
+
+    assert_eq!(err, machina_core::mobject::MObjectError::ParentDetached);
+    assert!(child.object_path().is_none());
+}
+
+#[test]
+fn test_mobject_detach_unrelated_child_is_rejected() {
+    let mut root = TestObject::new_root("machine");
+    let mut child = TestObject::new_detached("uart0");
+
+    let err = root
+        .mobject_state_mut()
+        .detach_child(child.mobject_state_mut())
+        .expect_err("unrelated child detach must fail");
+
+    assert_eq!(err, machina_core::mobject::MObjectError::ChildPathMismatch);
+}
+
+#[test]
 fn test_mobject_detach_child_clears_attachment() {
     let mut root = TestObject::new_root("machine");
     let mut child = TestObject::new_detached("uart0");
@@ -102,4 +129,29 @@ fn test_mobject_detach_child_clears_attachment() {
 fn test_mobject_compile_time_type_check() {
     let obj = TestObject::new_root("machine");
     assert!(obj.is_type::<TestObject>());
+}
+
+#[test]
+fn test_mobject_tree_tracks_attach_lookup_and_detach() {
+    let mut root = TestObject::new_root("machine");
+    let mut child = TestObject::new_detached("uart0");
+    let mut tree = MObjectTree::default();
+
+    tree.track_root(root.mobject_state())
+        .expect("track root object");
+    tree.attach_child(root.mobject_state_mut(), child.mobject_state_mut())
+        .expect("attach child through tree");
+
+    assert_eq!(tree.lookup("/machine").unwrap().local_id, "machine");
+    assert_eq!(tree.lookup("/machine/uart0").unwrap().local_id, "uart0");
+    assert_eq!(
+        tree.lookup("/machine").unwrap().child_paths,
+        vec!["/machine/uart0".to_string()]
+    );
+
+    tree.detach_child(root.mobject_state_mut(), child.mobject_state_mut())
+        .expect("detach child through tree");
+
+    assert!(tree.lookup("/machine/uart0").is_none());
+    assert!(tree.lookup("/machine").unwrap().child_paths.is_empty());
 }

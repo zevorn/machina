@@ -53,6 +53,8 @@ mod hw_loader;
 #[cfg(test)]
 mod hw_misc;
 #[cfg(test)]
+mod hw_mom;
+#[cfg(test)]
 mod hw_pch_pic;
 #[cfg(test)]
 mod hw_pflash;

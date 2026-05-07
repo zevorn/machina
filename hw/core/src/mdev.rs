@@ -204,3 +204,214 @@ impl MObject for MDeviceState {
         self
     }
 }
+
+#[macro_export]
+macro_rules! machina_impl_mdevice {
+    ($ty:ty, $field:ident) => {
+        impl $crate::machina_core::mobject::MObject for $ty {
+            fn mobject_state(
+                &self,
+            ) -> &$crate::machina_core::mobject::MObjectState {
+                self.$field.object()
+            }
+
+            fn mobject_state_mut(
+                &mut self,
+            ) -> &mut $crate::machina_core::mobject::MObjectState {
+                self.$field.object_mut()
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+
+        impl $crate::mdev::MDevice for $ty {
+            fn mdevice_state(&self) -> &$crate::mdev::MDeviceState {
+                &self.$field
+            }
+
+            fn mdevice_state_mut(&mut self) -> &mut $crate::mdev::MDeviceState {
+                &mut self.$field
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! machina_parking_lot_mdevice_accessors {
+    ($field:ident) => {
+        pub fn realize(&self) -> Result<(), $crate::mdev::MDeviceError> {
+            self.$field.lock().mark_realized()
+        }
+
+        pub fn unrealize(&self) -> Result<(), $crate::mdev::MDeviceError> {
+            self.$field.lock().mark_unrealized()
+        }
+
+        pub fn realized(&self) -> bool {
+            self.$field.lock().is_realized()
+        }
+
+        pub fn with_mdevice<T>(
+            &self,
+            f: impl FnOnce(&$crate::mdev::MDeviceState) -> T,
+        ) -> T {
+            let guard = self.$field.lock();
+            f(&guard)
+        }
+
+        pub fn object_info(
+            &self,
+        ) -> $crate::machina_core::mobject::MObjectInfo {
+            let guard = self.$field.lock();
+            $crate::machina_core::mobject::MObject::object_info(&*guard)
+        }
+    };
+}
+
+/// Builds typed property schema declarations.
+///
+/// ```compile_fail
+/// let _ = machina_hw_core::machina_property_specs![
+///     bool enabled = "yes",
+/// ];
+/// ```
+#[macro_export]
+macro_rules! machina_property_specs {
+    () => {
+        Vec::new()
+    };
+    ($kind:ident $name:ident = $value:expr, $($tail:tt)*) => {{
+        let mut specs = vec![
+            $crate::machina_property_spec!($kind $name = $value)
+        ];
+        specs.extend($crate::machina_property_specs![$($tail)*]);
+        specs
+    }};
+    ($kind:ident $name:ident = $value:expr $(,)?) => {{
+        vec![$crate::machina_property_spec!($kind $name = $value)]
+    }};
+    ($kind:ident $name:ident required, $($tail:tt)*) => {{
+        let mut specs = vec![
+            $crate::machina_property_spec!($kind $name required)
+        ];
+        specs.extend($crate::machina_property_specs![$($tail)*]);
+        specs
+    }};
+    ($kind:ident $name:ident required $(,)?) => {{
+        vec![$crate::machina_property_spec!($kind $name required)]
+    }};
+    ($kind:ident $name:ident dynamic, $($tail:tt)*) => {{
+        let mut specs = vec![
+            $crate::machina_property_spec!($kind $name dynamic)
+        ];
+        specs.extend($crate::machina_property_specs![$($tail)*]);
+        specs
+    }};
+    ($kind:ident $name:ident dynamic $(,)?) => {{
+        vec![$crate::machina_property_spec!($kind $name dynamic)]
+    }};
+    ($kind:ident $name:ident, $($tail:tt)*) => {{
+        let mut specs = vec![
+            $crate::machina_property_spec!($kind $name)
+        ];
+        specs.extend($crate::machina_property_specs![$($tail)*]);
+        specs
+    }};
+    ($kind:ident $name:ident $(,)?) => {{
+        vec![$crate::machina_property_spec!($kind $name)]
+    }};
+}
+
+#[macro_export]
+macro_rules! machina_property_spec {
+    (bool $name:ident) => {
+        $crate::property::MPropertySpec::new(
+            stringify!($name),
+            $crate::property::MPropertyType::Bool,
+        )
+    };
+    (bool $name:ident = $value:expr) => {
+        $crate::machina_property_spec!(bool $name)
+            .default($crate::property::MPropertyValue::Bool($value))
+    };
+    (bool $name:ident required) => {
+        $crate::machina_property_spec!(bool $name).required()
+    };
+    (bool $name:ident dynamic) => {
+        $crate::machina_property_spec!(bool $name).dynamic()
+    };
+
+    (u32 $name:ident) => {
+        $crate::property::MPropertySpec::new(
+            stringify!($name),
+            $crate::property::MPropertyType::U32,
+        )
+    };
+    (u32 $name:ident = $value:expr) => {
+        $crate::machina_property_spec!(u32 $name)
+            .default($crate::property::MPropertyValue::U32($value))
+    };
+    (u32 $name:ident required) => {
+        $crate::machina_property_spec!(u32 $name).required()
+    };
+    (u32 $name:ident dynamic) => {
+        $crate::machina_property_spec!(u32 $name).dynamic()
+    };
+
+    (u64 $name:ident) => {
+        $crate::property::MPropertySpec::new(
+            stringify!($name),
+            $crate::property::MPropertyType::U64,
+        )
+    };
+    (u64 $name:ident = $value:expr) => {
+        $crate::machina_property_spec!(u64 $name)
+            .default($crate::property::MPropertyValue::U64($value))
+    };
+    (u64 $name:ident required) => {
+        $crate::machina_property_spec!(u64 $name).required()
+    };
+    (u64 $name:ident dynamic) => {
+        $crate::machina_property_spec!(u64 $name).dynamic()
+    };
+
+    (string $name:ident) => {
+        $crate::property::MPropertySpec::new(
+            stringify!($name),
+            $crate::property::MPropertyType::String,
+        )
+    };
+    (string $name:ident = $value:expr) => {
+        $crate::machina_property_spec!(string $name)
+            .default($crate::property::MPropertyValue::String(String::from($value)))
+    };
+    (string $name:ident required) => {
+        $crate::machina_property_spec!(string $name).required()
+    };
+    (string $name:ident dynamic) => {
+        $crate::machina_property_spec!(string $name).dynamic()
+    };
+
+    (link $name:ident) => {
+        $crate::property::MPropertySpec::new(
+            stringify!($name),
+            $crate::property::MPropertyType::Link,
+        )
+    };
+    (link $name:ident = $value:expr) => {
+        $crate::machina_property_spec!(link $name)
+            .default($crate::property::MPropertyValue::Link(String::from($value)))
+    };
+    (link $name:ident required) => {
+        $crate::machina_property_spec!(link $name).required()
+    };
+    (link $name:ident dynamic) => {
+        $crate::machina_property_spec!(link $name).dynamic()
+    };
+}
