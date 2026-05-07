@@ -53,7 +53,7 @@ impl RiscvCpuProfile {
                     | MisaExt::S.bits()
                     | MisaExt::U.bits(),
             ),
-            cfg: RiscvCfg::RV64GC,
+            cfg: RiscvCfg::THEAD_C908,
             mvendorid: THEAD_VENDOR_ID,
             marchid: THEAD_C908_MARCHID,
             max_satp_mode: 9,

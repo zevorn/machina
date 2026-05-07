@@ -224,7 +224,14 @@ impl RiscvCpu {
             csr,
             profile,
             pmp: super::pmp::Pmp::new(),
-            mmu: super::mmu::Mmu::new(),
+            mmu: {
+                let mut mmu = super::mmu::Mmu::new();
+                mmu.configure_profile(
+                    profile.max_satp_mode,
+                    profile.cfg.ext_svpbmt,
+                );
+                mmu
+            },
             mem_fault_cause: 0,
             mem_fault_tval: 0,
             as_ptr: 0,

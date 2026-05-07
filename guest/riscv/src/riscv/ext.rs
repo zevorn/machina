@@ -99,9 +99,26 @@ pub struct RiscvCfg {
     pub ext_zfhmin: bool,
 
     // ── Supervisor extensions ─────────────────────
+    pub ext_svpbmt: bool,
     pub ext_ssvnapot: bool,
     pub ext_svadu: bool,
+    pub ext_svinval: bool,
     pub ext_sstc: bool,
+
+    // ── Vendor extensions ─────────────────────────
+    pub ext_smepmp: bool,
+    pub ext_sscofpmf: bool,
+    pub ext_xtheadba: bool,
+    pub ext_xtheadbb: bool,
+    pub ext_xtheadbs: bool,
+    pub ext_xtheadcmo: bool,
+    pub ext_xtheadcondmov: bool,
+    pub ext_xtheadfmv: bool,
+    pub ext_xtheadfmemidx: bool,
+    pub ext_xtheadmac: bool,
+    pub ext_xtheadmemidx: bool,
+    pub ext_xtheadmempair: bool,
+    pub ext_xtheadsync: bool,
 }
 
 // ── Predefined profiles ────────────────────────────
@@ -143,9 +160,53 @@ impl RiscvCfg {
         ext_zfh: true,
         ext_zfhmin: false,
         // Supervisor extensions.
+        ext_svpbmt: false,
         ext_ssvnapot: false,
         ext_svadu: true,
+        ext_svinval: false,
         ext_sstc: false,
+        // Vendor extensions.
+        ext_smepmp: false,
+        ext_sscofpmf: false,
+        ext_xtheadba: false,
+        ext_xtheadbb: false,
+        ext_xtheadbs: false,
+        ext_xtheadcmo: false,
+        ext_xtheadcondmov: false,
+        ext_xtheadfmv: false,
+        ext_xtheadfmemidx: false,
+        ext_xtheadmac: false,
+        ext_xtheadmemidx: false,
+        ext_xtheadmempair: false,
+        ext_xtheadsync: false,
+    };
+
+    /// T-HEAD C908 profile used by the Kendryte K230 SDK board.
+    pub const THEAD_C908: Self = Self {
+        ext_zicbom: true,
+        ext_zicboz: true,
+        ext_zba: true,
+        ext_zbb: true,
+        ext_zbc: true,
+        ext_zbs: true,
+        ext_svpbmt: true,
+        ext_ssvnapot: true,
+        ext_svinval: true,
+        ext_sstc: true,
+        ext_smepmp: true,
+        ext_sscofpmf: true,
+        ext_xtheadba: true,
+        ext_xtheadbb: true,
+        ext_xtheadbs: true,
+        ext_xtheadcmo: true,
+        ext_xtheadcondmov: true,
+        ext_xtheadfmv: true,
+        ext_xtheadfmemidx: true,
+        ext_xtheadmac: true,
+        ext_xtheadmemidx: true,
+        ext_xtheadmempair: true,
+        ext_xtheadsync: true,
+        ..Self::RV64GC
     };
 
     /// RV64GC + all bit-manipulation extensions.

@@ -1,5 +1,6 @@
 use super::super::cpu_model::{RiscvCpuProfile, RiscvVendor};
 use super::super::csr::PrivLevel;
+use super::super::ext::RiscvCfg;
 
 pub const CSR_TH_MXSTATUS: u16 = 0x7c0;
 pub const CSR_TH_MHCR: u16 = 0x7c1;
@@ -114,4 +115,18 @@ pub fn write(
 ) -> Result<(), u64> {
     let _ = read(addr, current, profile)?;
     Ok(())
+}
+
+pub fn has_xthead(cfg: RiscvCfg) -> bool {
+    cfg.ext_xtheadba
+        || cfg.ext_xtheadbb
+        || cfg.ext_xtheadbs
+        || cfg.ext_xtheadcmo
+        || cfg.ext_xtheadcondmov
+        || cfg.ext_xtheadfmv
+        || cfg.ext_xtheadfmemidx
+        || cfg.ext_xtheadmac
+        || cfg.ext_xtheadmemidx
+        || cfg.ext_xtheadmempair
+        || cfg.ext_xtheadsync
 }

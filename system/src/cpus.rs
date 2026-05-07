@@ -17,7 +17,6 @@ use machina_gdbstub::handler::{GdbTarget, StopReason};
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_guest_riscv::riscv::exception::Exception;
-use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
 use machina_guest_riscv::{DisasJumpType, TranslatorOps};
 
@@ -523,7 +522,7 @@ impl GuestCpu for FullSystemCpu {
             return 0;
         }
 
-        let cfg = RiscvCfg::default();
+        let cfg = self.cpu.profile().cfg;
 
         // The virtual PC of the boundary instruction
         // (last 2 bytes of page A).

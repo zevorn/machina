@@ -71,6 +71,12 @@ fn satp_sv39(asid: u16, root_ppn: u64) -> u64 {
     (8u64 << 60) | ((asid as u64) << 44) | root_ppn
 }
 
+fn satp_sv48(asid: u16, root_ppn: u64) -> u64 {
+    (9u64 << 60) | ((asid as u64) << 44) | root_ppn
+}
+
+const PTE_PBMT_NC: u64 = 1 << 61;
+
 // -- Tests --
 
 #[test]
@@ -559,4 +565,94 @@ fn test_pmp_subpage_deny() {
         Ok(0x0084),
         "access outside PMP subpage region must succeed"
     );
+}
+
+#[test]
+fn test_sv48_identity_map_when_profile_allows() {
+    let mem_size = 0x10000;
+    let mut mem = vec![0u8; mem_size];
+
+    write_pte(&mut mem, 0x1000, ptr_pte(2));
+    write_pte(&mut mem, 0x2000, ptr_pte(3));
+    write_pte(&mut mem, 0x3000, ptr_pte(4));
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    write_pte(&mut mem, 0x4000, leaf_pte(0, flags));
+
+    let mut mmu = Mmu::new();
+    mmu.configure_profile(9, false);
+    mmu.set_satp(satp_sv48(0, 1));
+
+    let reader = mem_reader(&mem);
+    let pa = mmu.translate(
+        0x0100,
+        AccessType::Read,
+        PrivLevel::Machine,
+        0,
+        4,
+        None,
+        &reader,
+        no_write,
+    );
+    assert_eq!(pa, Ok(0x0100));
+}
+
+#[test]
+fn test_sv48_faults_when_profile_restricts_satp_mode() {
+    let mut mmu = Mmu::new();
+    mmu.configure_profile(8, false);
+    mmu.set_satp(satp_sv48(0, 1));
+
+    let dummy = |_addr: u64| -> u64 { 0 };
+    let err = mmu.translate(
+        0x0100,
+        AccessType::Read,
+        PrivLevel::Machine,
+        0,
+        4,
+        None,
+        dummy,
+        no_write,
+    );
+    assert_eq!(err, Err(Exception::LoadPageFault));
+}
+
+#[test]
+fn test_pbmt_bits_fault_without_svpbmt_and_are_ignored_when_enabled() {
+    let mem_size = 0x10000;
+    let mut mem = vec![0u8; mem_size];
+
+    write_pte(&mut mem, 0x1000, ptr_pte(2));
+    write_pte(&mut mem, 0x2000, ptr_pte(3));
+    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    write_pte(&mut mem, 0x3000, leaf_pte(0, flags) | PTE_PBMT_NC);
+
+    let reader = mem_reader(&mem);
+    let mut mmu = Mmu::new();
+    mmu.set_satp(satp_sv39(0, 1));
+    let err = mmu.translate(
+        0x0100,
+        AccessType::Read,
+        PrivLevel::Machine,
+        0,
+        4,
+        None,
+        &reader,
+        no_write,
+    );
+    assert_eq!(err, Err(Exception::LoadPageFault));
+
+    let mut mmu = Mmu::new();
+    mmu.configure_profile(8, true);
+    mmu.set_satp(satp_sv39(0, 1));
+    let pa = mmu.translate(
+        0x0100,
+        AccessType::Read,
+        PrivLevel::Machine,
+        0,
+        4,
+        None,
+        &reader,
+        no_write,
+    );
+    assert_eq!(pa, Ok(0x0100));
 }

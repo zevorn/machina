@@ -39,3 +39,27 @@ fn c908_profile_initializes_machine_id_csrs_and_sv48_satp_gate() {
         .unwrap();
     assert_eq!(cpu.csr.satp >> 60, 9);
 }
+
+#[test]
+fn c908_profile_sets_standard_and_thead_extension_flags() {
+    let cpu = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
+    let cfg = cpu.profile().cfg;
+    assert!(cfg.ext_zicsr);
+    assert!(cfg.ext_zifencei);
+    assert!(cfg.ext_zba);
+    assert!(cfg.ext_zbb);
+    assert!(cfg.ext_zbc);
+    assert!(cfg.ext_zbs);
+    assert!(cfg.ext_zicbom);
+    assert!(cfg.ext_zicboz);
+    assert!(cfg.ext_svpbmt);
+    assert!(cfg.ext_ssvnapot);
+    assert!(cfg.ext_svinval);
+    assert!(cfg.ext_sstc);
+    assert!(cfg.ext_xtheadba);
+    assert!(cfg.ext_xtheadbb);
+    assert!(cfg.ext_xtheadbs);
+    assert!(cfg.ext_xtheadcmo);
+    assert!(cfg.ext_xtheadfmv);
+    assert!(cfg.ext_xtheadsync);
+}

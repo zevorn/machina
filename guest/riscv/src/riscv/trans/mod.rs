@@ -59,6 +59,18 @@ macro_rules! require_cfg {
     };
 }
 
+pub(super) fn decode_vendor_thead(
+    ctx: &mut RiscvDisasContext,
+    _ir: &mut Context,
+    insn: u32,
+) -> bool {
+    if !crate::riscv::vendor::thead::has_xthead(ctx.cfg) {
+        return false;
+    }
+    let _ = insn;
+    false
+}
+
 // ── Decode trait implementation ──────────────────────
 
 impl Decode<Context> for RiscvDisasContext {

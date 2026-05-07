@@ -178,6 +178,9 @@ impl TranslatorOps for RiscvTranslator {
             insn_decode::decode(ctx, ir, insn)
         };
 
+        let decoded =
+            decoded || trans::decode_vendor_thead(ctx, ir, ctx.opcode);
+
         if !decoded {
             let pc_val = ctx.base.pc_next;
             let pc_const = ir.new_const(Type::I64, pc_val);
