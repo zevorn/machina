@@ -196,6 +196,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn k230_loader_boot_rejects_overflowing_payload_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let fw = dir.path().join("fw.uImage");
+        std::fs::write(&fw, [0x11, 0x22, 0x33, 0x44]).unwrap();
+
+        let mut machine = K230Machine::new();
+        let opts = MachineOpts {
+            loaders: vec![LoaderSpec {
+                file: fw,
+                addr: u64::MAX - 1,
+                force_raw: true,
+            }],
+            ..k230_opts()
+        };
+        machine.init(&opts).unwrap();
+
+        let err = machine.boot().unwrap_err().to_string();
+        assert!(err.contains("k230 loader range end overflows u64"));
+    }
+
     fn qemu_system_riscv64() -> Option<String> {
         machina_oracle::qemu::find_qemu("riscv64")
     }

@@ -134,7 +134,10 @@ fn apply_loaders(
             return Err("k230 loader requires force-raw=on".into());
         }
         let data = std::fs::read(&loader_spec.file)?;
-        let end = loader_spec.addr + data.len() as u64;
+        let end = loader_spec
+            .addr
+            .checked_add(data.len() as u64)
+            .ok_or("k230 loader range end overflows u64")?;
         if loader_spec.addr < ddr.base || end > ddr_end {
             return Err(format!(
                 "k230 loader range {:#x}..{:#x} is outside DDR {:#x}..{:#x}",
