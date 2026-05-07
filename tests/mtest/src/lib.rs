@@ -88,6 +88,26 @@ mod tests {
     }
 
     #[test]
+    fn k230_dtb_fixup_preserves_bootargs_without_append() {
+        let bootargs = "console=ttyS0 root=/dev/mmcblk0p2";
+        let mut blob =
+            machina_hw_riscv::k230_dtb::test_fixture_dtb_with_sdhci_nodes_and_bootargs(
+                bootargs,
+            );
+        blob = machina_hw_riscv::k230_dtb::fixup_k230_dtb(
+            &blob,
+            Some((0x0a10_0000, 0x0a20_0000)),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            machina_hw_riscv::k230_dtb::dtb_chosen_bootargs(&blob).unwrap(),
+            Some(bootargs.to_string()),
+        );
+    }
+
+    #[test]
     fn k230_loader_boot_places_sdk_payloads() {
         let dir = tempfile::tempdir().unwrap();
         let fw = dir.path().join("fw.uImage");

@@ -33,7 +33,9 @@ pub fn fixup_k230_dtb(
     let mut root = parse_dtb(blob)?;
 
     let chosen = ensure_child(&mut root, "chosen");
-    set_string_prop(chosen, "bootargs", cmdline.unwrap_or(""));
+    if let Some(cmdline) = cmdline {
+        set_string_prop(chosen, "bootargs", cmdline);
+    }
     if let Some((start, end)) = initrd {
         set_u64_prop(chosen, "linux,initrd-start", start);
         set_u64_prop(chosen, "linux,initrd-end", end);
@@ -65,14 +67,32 @@ pub fn dtb_node_status(
     Ok(Some(prop_as_string(&prop.data)?))
 }
 
+pub fn dtb_chosen_bootargs(blob: &[u8]) -> Result<Option<String>, String> {
+    let root = parse_dtb(blob)?;
+    let Some(node) = find_node(&root, "/chosen") else {
+        return Ok(None);
+    };
+    let Some(prop) = node.props.iter().find(|prop| prop.name == "bootargs")
+    else {
+        return Ok(None);
+    };
+    Ok(Some(prop_as_string(&prop.data)?))
+}
+
 pub fn test_fixture_dtb_with_sdhci_nodes() -> Vec<u8> {
+    test_fixture_dtb_with_sdhci_nodes_and_bootargs("")
+}
+
+pub fn test_fixture_dtb_with_sdhci_nodes_and_bootargs(
+    bootargs: &str,
+) -> Vec<u8> {
     let mut fdt = FdtBuilder::new();
     fdt.begin_node("");
     fdt.property_u32("#address-cells", 2);
     fdt.property_u32("#size-cells", 2);
 
     fdt.begin_node("chosen");
-    fdt.property_string("bootargs", "");
+    fdt.property_string("bootargs", bootargs);
     fdt.end_node();
 
     fdt.begin_node("soc");
