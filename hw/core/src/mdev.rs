@@ -274,6 +274,38 @@ macro_rules! machina_parking_lot_mdevice_accessors {
     };
 }
 
+#[macro_export]
+macro_rules! machina_std_mutex_mdevice_accessors {
+    ($field:ident) => {
+        pub fn realize(&self) -> Result<(), $crate::mdev::MDeviceError> {
+            self.$field.lock().unwrap().mark_realized()
+        }
+
+        pub fn unrealize(&self) -> Result<(), $crate::mdev::MDeviceError> {
+            self.$field.lock().unwrap().mark_unrealized()
+        }
+
+        pub fn realized(&self) -> bool {
+            self.$field.lock().unwrap().is_realized()
+        }
+
+        pub fn with_mdevice<T>(
+            &self,
+            f: impl FnOnce(&$crate::mdev::MDeviceState) -> T,
+        ) -> T {
+            let guard = self.$field.lock().unwrap();
+            f(&guard)
+        }
+
+        pub fn object_info(
+            &self,
+        ) -> $crate::machina_core::mobject::MObjectInfo {
+            let guard = self.$field.lock().unwrap();
+            $crate::machina_core::mobject::MObject::object_info(&*guard)
+        }
+    };
+}
+
 /// Builds typed property schema declarations.
 ///
 /// ```compile_fail
