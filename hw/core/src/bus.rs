@@ -446,6 +446,17 @@ macro_rules! machina_std_mutex_sysbus_accessors {
         $crate::machina_std_mutex_sysbus_accessors!(@base $field, {}, include_irq);
         $crate::machina_std_mutex_sysbus_accessors!(@lifecycle $field, {}, {});
     };
+    ($field:ident, lock = $lock:ident) => {
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @base_with_lock $field,
+            $lock,
+            include_irq
+        );
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @lifecycle_with_lock $field,
+            $lock
+        );
+    };
     ($field:ident, lifecycle = manual) => {
         $crate::machina_std_mutex_sysbus_accessors!(@base $field, {}, include_irq);
     };
@@ -613,6 +624,83 @@ macro_rules! machina_std_mutex_sysbus_accessors {
             $crate::machina_core::mobject::MObject::object_info(&*guard)
         }
     };
+    (@base_with_lock $field:ident, $lock:ident, include_irq) => {
+        $crate::machina_std_mutex_sysbus_accessors!(
+            @base_with_lock $field,
+            $lock,
+            manual_irq
+        );
+
+        pub fn register_irq(
+            &self,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).register_irq(irq)
+        }
+
+        pub fn declare_irq(&self) -> Result<usize, $crate::bus::SysBusError> {
+            $lock(&self.$field).declare_irq()
+        }
+
+        pub fn connect_irq(
+            &self,
+            slot: usize,
+            irq: $crate::irq::IrqLine,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).connect_irq(slot, irq)
+        }
+    };
+    (@base_with_lock $field:ident, $lock:ident, manual_irq) => {
+        pub fn attach_to_bus(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).attach_to_bus(bus)
+        }
+
+        pub fn register_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).register_mmio(region, base)
+        }
+
+        pub fn declare_mmio(
+            &self,
+            region: $crate::machina_memory::region::MemoryRegion,
+        ) -> Result<usize, $crate::bus::SysBusError> {
+            $lock(&self.$field).declare_mmio(region)
+        }
+
+        pub fn map_mmio(
+            &self,
+            slot: usize,
+            base: $crate::machina_core::address::GPA,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).map_mmio(slot, base)
+        }
+
+        pub fn realized(&self) -> bool {
+            let guard = $lock(&self.$field);
+            $crate::mdev::MDevice::is_realized(&*guard)
+        }
+
+        pub fn with_mdevice<T>(
+            &self,
+            f: impl FnOnce(&dyn $crate::mdev::MDevice) -> T,
+        ) -> T {
+            let guard = $lock(&self.$field);
+            f(&*guard)
+        }
+
+        pub fn object_info(
+            &self,
+        ) -> $crate::machina_core::mobject::MObjectInfo {
+            let guard = $lock(&self.$field);
+            $crate::machina_core::mobject::MObject::object_info(&*guard)
+        }
+    };
     (@base $field:ident, $before_register_mmio:block, include_irq) => {
         $crate::machina_std_mutex_sysbus_accessors!(@base $field, $before_register_mmio, manual_irq);
 
@@ -704,6 +792,23 @@ macro_rules! machina_std_mutex_sysbus_accessors {
         ) -> Result<(), $crate::bus::SysBusError> {
             $before_unrealize
             self.$field.lock().unwrap().unrealize_from(bus, address_space)
+        }
+    };
+    (@lifecycle_with_lock $field:ident, $lock:ident) => {
+        pub fn realize_onto(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).realize_onto(bus, address_space)
+        }
+
+        pub fn unrealize_from(
+            &self,
+            bus: &mut $crate::bus::SysBus,
+            address_space: &mut $crate::machina_memory::address_space::AddressSpace,
+        ) -> Result<(), $crate::bus::SysBusError> {
+            $lock(&self.$field).unrealize_from(bus, address_space)
         }
     };
     (@lifecycle_methods $field:ident, [$($before_realize:ident),*], [$($before_unrealize:ident),*]) => {

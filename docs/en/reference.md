@@ -1897,7 +1897,7 @@ for smoke/integration tests against the machina binary.
 | hw_aclint | 13 | ACLINT timer MMIO, IPI, mtime/mtimecmp |
 | hw_plic | 9 | PLIC priority, pending, enable, claim/complete |
 | hw_qdev | 8 | QDev object lifecycle, property, realize |
-| hw_mom | 10 | MOM type registry, reset phases, property/schema and ergonomic macros |
+| hw_mom | 11 | MOM type registry, reset phases, property/schema and ergonomic macros |
 | hw_sysbus | 11 | SysBus MMIO mapping, device attachment, declare/map/connect |
 | hw_irq | 7 | IRQ line raise/lower, sink/source wiring |
 | hw_chardev | 7 | Character device backend interface |

@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use machina_core::address::GPA;
 use machina_core::mobject::{MObject, MObjectState};
@@ -254,6 +254,37 @@ impl LockedSysBusFixture {
     machina_hw_core::machina_std_mutex_sysbus_accessors!(state);
 }
 
+struct RecoveringLockedSysBusFixture {
+    state: Mutex<SysBusDeviceState>,
+}
+
+impl RecoveringLockedSysBusFixture {
+    fn new(local_id: &str) -> Self {
+        Self {
+            state: Mutex::new(SysBusDeviceState::new(local_id)),
+        }
+    }
+
+    fn poison_state(&self) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = self.state.lock().unwrap();
+            panic!("poison fixture state");
+        }));
+    }
+
+    machina_hw_core::machina_std_mutex_sysbus_accessors!(
+        state,
+        lock = recover_lock
+    );
+}
+
+fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 struct LockedMDeviceFixture {
     mdevice: parking_lot::Mutex<MDeviceState>,
 }
@@ -288,6 +319,21 @@ fn test_locked_state_accessor_macros_cover_common_device_wrappers() {
     dev.unrealize().expect("unrealize mdevice");
     assert!(!dev.realized());
     assert_eq!(dev.object_info().local_id, "tmp105");
+}
+
+#[test]
+fn test_std_mutex_sysbus_accessor_can_use_custom_poison_recovering_lock() {
+    let sysbus = RecoveringLockedSysBusFixture::new("uart0");
+    sysbus.poison_state();
+
+    assert_eq!(sysbus.object_info().local_id, "uart0");
+    assert!(!sysbus.realized());
+    let slot = sysbus
+        .declare_mmio(MemoryRegion::io("uart0-mmio", 0x100, Arc::new(NoopMmio)))
+        .expect("declare MMIO after poison");
+    sysbus
+        .map_mmio(slot, GPA::new(0x1000_0000))
+        .expect("map MMIO after poison");
 }
 
 struct RecordingReset {

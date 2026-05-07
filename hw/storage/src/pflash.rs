@@ -123,7 +123,7 @@ impl<B: BlockBackend> PFlashCfi01<B> {
         })
     }
 
-    machina_hw_core::machina_std_mutex_sysbus_accessors!(state);
+    machina_hw_core::machina_std_mutex_sysbus_accessors!(state, lock = lock);
 
     pub fn reset_runtime(&self) {
         let mut regs = lock(&self.regs);
@@ -602,7 +602,7 @@ impl<B: BlockBackend> PFlashCfi02<B> {
         })
     }
 
-    machina_hw_core::machina_std_mutex_sysbus_accessors!(state);
+    machina_hw_core::machina_std_mutex_sysbus_accessors!(state, lock = lock);
 
     pub fn reset_runtime(&self) {
         let mut regs = lock(&self.regs);
