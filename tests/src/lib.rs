@@ -143,6 +143,8 @@ mod riscv_pmp;
 #[cfg(test)]
 mod riscv_pmp_internal;
 #[cfg(test)]
+mod riscv_thead_csr;
+#[cfg(test)]
 mod softfloat;
 #[cfg(test)]
 mod softmmu;

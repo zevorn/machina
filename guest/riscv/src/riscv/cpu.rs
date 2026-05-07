@@ -198,6 +198,9 @@ impl RiscvCpu {
 
     pub fn new_with_model(model: RiscvCpuModel) -> Self {
         let profile = model.profile();
+        let mut csr = CsrFile::new();
+        csr.set_machine_ids(profile.mvendorid, profile.marchid);
+        csr.set_max_satp_mode(profile.max_satp_mode);
         Self {
             gpr: [0u64; NUM_GPRS],
             fpr: [0u64; NUM_FPRS],
@@ -218,7 +221,7 @@ impl RiscvCpu {
             interrupt_request: AtomicU32::new(0),
             halted: AtomicBool::new(false),
             priv_level: PrivLevel::Machine,
-            csr: CsrFile::new(),
+            csr,
             profile,
             pmp: super::pmp::Pmp::new(),
             mmu: super::mmu::Mmu::new(),
@@ -251,26 +254,30 @@ impl RiscvCpu {
     /// Panics on illegal access.
     pub fn csr_read(&self, addr: u16) -> u64 {
         self.csr
-            .read(addr, self.priv_level)
+            .read_for_profile(addr, self.priv_level, self.profile())
             .expect("illegal CSR read")
     }
 
     /// Write a CSR, using the current privilege level.
     /// Panics on illegal access.
     pub fn csr_write(&mut self, addr: u16, val: u64) {
+        let profile = self.profile;
         self.csr
-            .write(addr, val, self.priv_level)
+            .write_for_profile(addr, val, self.priv_level, &profile)
             .expect("illegal CSR write");
     }
 
     /// Try to read a CSR with privilege check.
     pub fn try_csr_read(&self, addr: u16) -> Result<u64, u64> {
-        self.csr.read(addr, self.priv_level)
+        self.csr
+            .read_for_profile(addr, self.priv_level, self.profile())
     }
 
     /// Try to write a CSR with privilege check.
     pub fn try_csr_write(&mut self, addr: u16, val: u64) -> Result<(), u64> {
-        self.csr.write(addr, val, self.priv_level)
+        let profile = self.profile;
+        self.csr
+            .write_for_profile(addr, val, self.priv_level, &profile)
     }
 }
 

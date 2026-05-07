@@ -4,6 +4,9 @@
 //! including privilege checks, WARL masking, and S-mode aliasing
 //! into M-mode registers (sstatus→mstatus, sip→mip, sie→mie).
 
+use super::cpu_model::RiscvCpuProfile;
+use super::vendor;
+
 // ── CSR address constants ───────────────────────────────────────
 
 // Machine-level CSRs
@@ -239,6 +242,9 @@ pub struct CsrFile {
 
     // Machine info (read-only)
     pub hart_id: u64,
+    pub mvendorid: u64,
+    pub marchid: u64,
+    pub max_satp_mode: u64,
 }
 
 impl CsrFile {
@@ -276,6 +282,47 @@ impl CsrFile {
             fflags: 0,
             frm: 0,
             hart_id: 0,
+            mvendorid: 0,
+            marchid: 0,
+            max_satp_mode: 8,
+        }
+    }
+
+    pub fn set_machine_ids(&mut self, mvendorid: u64, marchid: u64) {
+        self.mvendorid = mvendorid;
+        self.marchid = marchid;
+    }
+
+    pub fn set_max_satp_mode(&mut self, max_satp_mode: u64) {
+        self.max_satp_mode = max_satp_mode;
+    }
+
+    pub fn read_for_profile(
+        &self,
+        addr: u16,
+        priv_level: PrivLevel,
+        profile: &RiscvCpuProfile,
+    ) -> Result<u64, u64> {
+        match self.read(addr, priv_level) {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                vendor::thead::read(addr, priv_level, profile).map_err(|_| err)
+            }
+        }
+    }
+
+    pub fn write_for_profile(
+        &mut self,
+        addr: u16,
+        val: u64,
+        priv_level: PrivLevel,
+        profile: &RiscvCpuProfile,
+    ) -> Result<(), u64> {
+        match self.write(addr, val, priv_level) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                vendor::thead::write(addr, priv_level, profile).map_err(|_| err)
+            }
         }
     }
 
@@ -347,8 +394,8 @@ impl CsrFile {
 
             // -- Machine info (read-only) --
             CSR_MHARTID => Ok(self.hart_id),
-            CSR_MVENDORID => Ok(0),
-            CSR_MARCHID => Ok(0),
+            CSR_MVENDORID => Ok(self.mvendorid),
+            CSR_MARCHID => Ok(self.marchid),
             CSR_MIMPID => Ok(0),
 
             // -- Counters --
@@ -519,7 +566,7 @@ impl CsrFile {
                     return Err(CAUSE_ILLEGAL_INSN);
                 }
                 let mode = (val >> 60) & 0xF;
-                if mode == 0 || mode == 8 {
+                if mode == 0 || mode <= self.max_satp_mode {
                     self.satp = val;
                 }
                 Ok(())

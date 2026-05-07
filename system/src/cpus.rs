@@ -1006,7 +1006,11 @@ impl GuestCpu for FullSystemCpu {
             machina_guest_riscv::riscv::csr::CSR_INSTRET => {
                 self.cpu.csr.instret
             }
-            _ => match self.cpu.csr.read(csr_addr, priv_level) {
+            _ => match self.cpu.csr.read_for_profile(
+                csr_addr,
+                priv_level,
+                self.cpu.profile(),
+            ) {
                 Ok(v) => v,
                 Err(_) => return false,
             },
@@ -1028,10 +1032,16 @@ impl GuestCpu for FullSystemCpu {
             _ => false,
         };
 
-        if do_write
-            && self.cpu.csr.write(csr_addr, new_val, priv_level).is_err()
-        {
-            return false;
+        if do_write {
+            let profile = *self.cpu.profile();
+            if self
+                .cpu
+                .csr
+                .write_for_profile(csr_addr, new_val, priv_level, &profile)
+                .is_err()
+            {
+                return false;
+            }
         }
 
         if do_write {
@@ -1394,6 +1404,7 @@ pub unsafe extern "sysv64" fn machina_csr_op(
     let cpu = &mut *(env as *mut RiscvCpu);
     let csr_addr = csr as u16;
     let priv_level = cpu.priv_level;
+    let profile = cpu.profile;
 
     let old = match csr_addr {
         machina_guest_riscv::riscv::csr::CSR_TIME
@@ -1407,7 +1418,7 @@ pub unsafe extern "sysv64" fn machina_csr_op(
             }
         }
         machina_guest_riscv::riscv::csr::CSR_INSTRET => cpu.csr.instret,
-        _ => match cpu.csr.read(csr_addr, priv_level) {
+        _ => match cpu.csr.read_for_profile(csr_addr, priv_level, &profile) {
             Ok(v) => v,
             Err(_) => {
                 cpu.raise_exception(Exception::IllegalInstruction, 0);
@@ -1429,7 +1440,11 @@ pub unsafe extern "sysv64" fn machina_csr_op(
     };
 
     if do_write {
-        if cpu.csr.write(csr_addr, new_val, priv_level).is_err() {
+        if cpu
+            .csr
+            .write_for_profile(csr_addr, new_val, priv_level, &profile)
+            .is_err()
+        {
             cpu.raise_exception(Exception::IllegalInstruction, 0);
             cpu_loop_exit(cpu);
         }
@@ -1523,7 +1538,16 @@ impl FullSystemCpu {
         let priv_level = self.cpu.priv_level;
         GDB_CSRS
             .iter()
-            .map(|entry| self.cpu.csr.read(entry.addr, priv_level).unwrap_or(0))
+            .map(|entry| {
+                self.cpu
+                    .csr
+                    .read_for_profile(
+                        entry.addr,
+                        priv_level,
+                        self.cpu.profile(),
+                    )
+                    .unwrap_or(0)
+            })
             .collect()
     }
 
@@ -1531,11 +1555,14 @@ impl FullSystemCpu {
     fn restore_csrs(&self, csrs: &[u64]) {
         use crate::gdb_csr::GDB_CSRS;
         let priv_level = self.cpu.priv_level;
+        let profile = self.cpu.profile;
         let cpu_ptr = &self.cpu as *const RiscvCpu as *mut RiscvCpu;
         for (i, entry) in GDB_CSRS.iter().enumerate() {
             if let Some(&val) = csrs.get(i) {
                 unsafe {
-                    let _ = (*cpu_ptr).csr.write(entry.addr, val, priv_level);
+                    let _ = (*cpu_ptr).csr.write_for_profile(
+                        entry.addr, val, priv_level, &profile,
+                    );
                 }
             }
         }
@@ -1627,7 +1654,11 @@ impl GdbTarget for FullSystemCpu {
                         let val = self
                             .cpu
                             .csr
-                            .read(entry.addr, self.cpu.priv_level)
+                            .read_for_profile(
+                                entry.addr,
+                                self.cpu.priv_level,
+                                self.cpu.profile(),
+                            )
                             .unwrap_or(0);
                         val.to_le_bytes().to_vec()
                     }
@@ -1653,10 +1684,12 @@ impl GdbTarget for FullSystemCpu {
                 use crate::gdb_csr::csr_by_gdb_reg;
                 match csr_by_gdb_reg(r) {
                     Some(entry) => {
-                        let _ = self.cpu.csr.write(
+                        let profile = self.cpu.profile;
+                        let _ = self.cpu.csr.write_for_profile(
                             entry.addr,
                             v,
                             self.cpu.priv_level,
+                            &profile,
                         );
                     }
                     None => return false,

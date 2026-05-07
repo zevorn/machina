@@ -10,6 +10,7 @@ mod insn_decode;
 pub mod mmu;
 pub mod pmp;
 mod trans;
+pub mod vendor;
 
 use crate::{DisasContextBase, DisasJumpType, TranslatorOps};
 use cpu::{gpr_offset, LOAD_RES_OFFSET, LOAD_VAL_OFFSET, NUM_GPRS, PC_OFFSET};

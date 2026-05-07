@@ -2,6 +2,9 @@ use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::cpu_model::{
     RiscvCpuModel, RiscvVendor, THEAD_C908_MARCHID, THEAD_VENDOR_ID,
 };
+use machina_guest_riscv::riscv::csr::{
+    PrivLevel, CSR_MARCHID, CSR_MVENDORID, CSR_SATP,
+};
 
 #[test]
 fn c908_profile_has_qemu_identity() {
@@ -23,4 +26,16 @@ fn generic_profile_remains_default() {
     assert_eq!(profile.mvendorid, 0);
     assert_eq!(profile.marchid, 0);
     assert_eq!(profile.max_satp_mode, 8);
+}
+
+#[test]
+fn c908_profile_initializes_machine_id_csrs_and_sv48_satp_gate() {
+    let mut cpu = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
+    assert_eq!(cpu.csr_read(CSR_MVENDORID), THEAD_VENDOR_ID);
+    assert_eq!(cpu.csr_read(CSR_MARCHID), THEAD_C908_MARCHID);
+
+    cpu.csr
+        .write(CSR_SATP, 9 << 60, PrivLevel::Machine)
+        .unwrap();
+    assert_eq!(cpu.csr.satp >> 60, 9);
 }
