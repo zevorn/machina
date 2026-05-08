@@ -103,6 +103,45 @@ fn test_uart_dlab() {
 }
 
 #[test]
+fn test_uart_iir_reports_16550a_fifo_capability() {
+    let uart = Uart16550::new();
+
+    uart.write(2, 0x01);
+
+    assert_eq!(
+        uart.read(2) & 0xc0,
+        0xc0,
+        "IIR should expose 16550A FIFO capability when FCR enables FIFO"
+    );
+
+    uart.write(2, 0x00);
+    assert_eq!(
+        uart.read(2) & 0xc0,
+        0,
+        "IIR FIFO capability bits should clear when FIFO is disabled"
+    );
+}
+
+#[test]
+fn test_uart_fifo_tx_holds_thre_low_until_empty() {
+    let uart = Uart16550::new();
+
+    uart.write(2, 0x01);
+    uart.write(0, 0x41);
+
+    assert_eq!(
+        uart.read(5) & 0x20,
+        0x20,
+        "emulated transmit drains immediately, so THRE should reassert"
+    );
+    assert_eq!(
+        uart.read(2) & 0x0f,
+        0x01,
+        "without THRI enabled, FIFO mode should retain no pending IRQ ID"
+    );
+}
+
+#[test]
 fn test_uart16550_mmio_rejects_offsets_above_register_window() {
     let uart = Arc::new(Uart16550::new());
     let mmio = Uart16550Mmio(Arc::clone(&uart));
@@ -191,6 +230,53 @@ fn test_uart_irq_on_receive() {
 
     // Read the byte -- IRQ should clear.
     let _ = uart.read(0);
+    assert!(!uart.irq_pending());
+}
+
+#[test]
+fn test_uart_thr_empty_interrupt_clears_on_iir_read() {
+    let uart = Uart16550::new();
+
+    uart.write(1, 0x02);
+
+    assert!(uart.irq_pending(), "THR-empty IRQ should be pending");
+    assert_eq!(uart.read(2), 0x02, "IIR should report THR-empty");
+    assert!(
+        !uart.irq_pending(),
+        "IIR read should clear the latched THR-empty IRQ"
+    );
+    assert_eq!(uart.read(2), 0x01, "second IIR read should report no IRQ");
+}
+
+#[test]
+fn test_uart_thr_write_rearms_thr_empty_interrupt() {
+    let uart = Uart16550::new();
+
+    uart.write(1, 0x02);
+    assert_eq!(uart.read(2), 0x02);
+    assert!(!uart.irq_pending());
+
+    uart.write(0, 0x41);
+
+    assert!(uart.irq_pending(), "THR write should re-arm THR-empty IRQ");
+    assert_eq!(uart.read(2), 0x02);
+    assert!(!uart.irq_pending());
+}
+
+#[test]
+fn test_uart_rx_interrupt_has_priority_over_thr_empty() {
+    let uart = Uart16550::new();
+
+    uart.write(1, 0x03);
+    uart.receive(0x55);
+
+    assert_eq!(uart.read(2), 0x04, "RX available should win IIR priority");
+    assert_eq!(uart.read(0), 0x55);
+    assert_eq!(
+        uart.read(2),
+        0x02,
+        "latched THR-empty IRQ should surface after RX drains"
+    );
     assert!(!uart.irq_pending());
 }
 

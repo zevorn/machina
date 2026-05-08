@@ -236,6 +236,7 @@ fn test_aclint_msip_rejects_non_32_bit_accesses() {
 #[test]
 fn test_aclint_timer_compare() {
     let aclint = Aclint::new(2);
+    aclint.set_virtual_clock(true);
 
     // Set mtimecmp[0] = 100.
     aclint.write(0x4000, 8, 100);
@@ -250,6 +251,42 @@ fn test_aclint_timer_compare() {
 
     // Hart 1 has mtimecmp = u64::MAX, not pending.
     assert!(!aclint.timer_irq_pending(1));
+}
+
+#[test]
+fn test_aclint_virtual_clock_advances_only_by_tick() {
+    let aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti_irq = 7u32;
+    let exit_requested = Arc::new(AtomicBool::new(false));
+    let exit_seen = Arc::clone(&exit_requested);
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti_irq);
+    aclint.connect_mti(0, line);
+    aclint.connect_exit_request(
+        0,
+        Arc::new(move || {
+            exit_seen.store(true, Ordering::Release);
+        }),
+    );
+    aclint.set_virtual_clock(true);
+
+    aclint.write(0xBFF8, 8, 10);
+    let t0 = aclint.read(0xBFF8, 8);
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(aclint.read(0xBFF8, 8), t0);
+
+    aclint.write(0x4000, 8, 20);
+    aclint.tick(9);
+    assert_eq!(aclint.read(0xBFF8, 8), 19);
+    assert!(!sink.level(mti_irq));
+
+    aclint.tick(1);
+    assert_eq!(aclint.read(0xBFF8, 8), 20);
+    assert!(sink.level(mti_irq));
+    assert!(
+        exit_requested.load(Ordering::Acquire),
+        "virtual timer expiry should request an exec-loop exit"
+    );
 }
 
 #[test]
