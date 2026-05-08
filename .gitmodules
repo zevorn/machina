@@ -1,3 +1,3 @@
 [submodule "roms/rustsbi"]
 	path = roms/rustsbi
-	url = https://github.com/rustsbi/rustsbi.git
+	url = git@github.com:gevico/rustsbi.git
