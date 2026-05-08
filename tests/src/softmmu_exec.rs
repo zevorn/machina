@@ -15,11 +15,14 @@ use machina_accel::X86_64CodeGen;
 use machina_core::address::GPA;
 use machina_core::wfi::WfiWaker;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
+use machina_guest_riscv::riscv::cpu_model::RiscvCpuModel;
+use machina_guest_riscv::riscv::csr::CSR_TIME;
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::MemoryRegion;
 use machina_system::cpus::{
-    fault_cause_offset, fault_pc_offset, machina_mem_read, machina_mem_write,
-    tlb_offsets, tlb_ptr_offset, FullSystemCpu, SharedMip, TLB_SIZE,
+    fault_cause_offset, fault_pc_offset, machina_csr_op, machina_mem_read,
+    machina_mem_write, tlb_offsets, tlb_ptr_offset, FullSystemCpu, SharedMip,
+    TLB_SIZE,
 };
 
 /// Test RAM base address (matches RISC-V virt standard).
@@ -55,6 +58,19 @@ fn setup_fullsys(
     Box<AddressSpace>,
     *const u8,
 ) {
+    setup_fullsys_with_cpu(ram_size, code, RiscvCpu::new())
+}
+
+fn setup_fullsys_with_cpu(
+    ram_size: u64,
+    code: &[u8],
+    cpu: RiscvCpu,
+) -> (
+    ExecEnv<X86_64CodeGen>,
+    FullSystemCpu,
+    Box<AddressSpace>,
+    *const u8,
+) {
     let mut backend = X86_64CodeGen::new();
     backend.mmio = Some(test_mmu_config());
     let env = ExecEnv::new(backend);
@@ -83,7 +99,6 @@ fn setup_fullsys(
     let wfi_waker = Arc::new(WfiWaker::new());
     let stop_flag = Arc::new(AtomicBool::new(true));
 
-    let cpu = RiscvCpu::new();
     let fscpu = unsafe {
         FullSystemCpu::new(
             cpu,
@@ -153,6 +168,12 @@ fn addi(rd: u32, rs1: u32, imm: i32) -> u32 {
     (imm12 << 20) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x13
 }
 
+/// ANDI rd, rs1, imm12 (I-type)
+fn andi(rd: u32, rs1: u32, imm: i32) -> u32 {
+    let imm12 = (imm as u32) & 0xFFF;
+    (imm12 << 20) | (rs1 << 15) | (0b111 << 12) | (rd << 7) | 0x13
+}
+
 /// LUI rd, imm20 (U-type)
 fn lui(rd: u32, imm20: u32) -> u32 {
     (imm20 << 12) | (rd << 7) | 0x37
@@ -187,6 +208,23 @@ fn encode(insns: &[u32]) -> Vec<u8> {
     insns.iter().flat_map(|i| i.to_le_bytes()).collect()
 }
 
+fn th_memidx(
+    top5: u32,
+    imm2: u32,
+    rs2: u32,
+    rs1: u32,
+    funct3: u32,
+    rd: u32,
+) -> u32 {
+    (top5 << 27)
+        | (imm2 << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (funct3 << 12)
+        | (rd << 7)
+        | 0x0b
+}
+
 // ═══════════════════════════════════════════════════════
 // Full-system execution tests
 // ═══════════════════════════════════════════════════════
@@ -219,9 +257,6 @@ fn test_fullsys_ram_load_store() {
     // AUIPC rd, imm20: rd = PC + (imm20 << 12)
     // At PC=0x80000000, auipc x3, 0 → x3 = 0x80000000
     // Then addi x3, x3, 0x100 → x3 = 0x80000100
-    fn auipc(rd: u32, imm20: u32) -> u32 {
-        (imm20 << 12) | (rd << 7) | 0x17
-    }
     let code = encode(&[
         auipc(3, 0),       // x3 = PC = 0x80000000
         addi(3, 3, 0x100), // x3 += 0x100
@@ -302,6 +337,31 @@ fn test_fullsys_mmio_write_no_crash() {
 /// FENCE.I instruction encoding.
 fn fence_i() -> u32 {
     0x0000_100F
+}
+
+/// SFENCE.VMA rs1, rs2
+fn sfence_vma(rs1: u32, rs2: u32) -> u32 {
+    (0b0001001 << 25) | (rs2 << 20) | (rs1 << 15) | (0b000 << 12) | 0x73
+}
+
+/// LR.W rd, (rs1)
+fn lr_w(rd: u32, rs1: u32) -> u32 {
+    (0b00010 << 27) | (rs1 << 15) | (0b010 << 12) | (rd << 7) | 0x2f
+}
+
+/// SC.W rd, rs2, (rs1)
+fn sc_w(rd: u32, rs2: u32, rs1: u32) -> u32 {
+    (0b00011 << 27)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (0b010 << 12)
+        | (rd << 7)
+        | 0x2f
+}
+
+/// AMOADD.D rd, rs2, (rs1)
+fn amoadd_d(rd: u32, rs2: u32, rs1: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (0b011 << 12) | (rd << 7) | 0x2f
 }
 
 /// CSRRW rd, csr, rs1
@@ -592,6 +652,659 @@ fn test_fullsys_precise_fault_mepc() {
     );
 }
 
+/// Regression: a writable JIT TLB entry must not survive
+/// page-table permission downgrade plus sfence.vma.
+///
+/// This mirrors Linux fork/COW: the kernel clears PTE.W,
+/// executes sfence.vma, and the next user write must fault
+/// instead of hitting an old writable fast-path entry.
+#[test]
+fn test_fullsys_sfence_vma_evicts_stale_write_tlb_after_pte_wrprotect() {
+    use machina_guest_riscv::riscv::csr::{
+        PrivLevel, CSR_PMPADDR0, CSR_PMPCFG0,
+    };
+
+    const CODE_VA: u64 = 0x4000_0000;
+    const DATA_VA: u64 = 0x4000_1000;
+    const PTE_PAGE_VA: u64 = 0x4000_2000;
+    const ROOT_OFF: usize = 0x2000;
+    const L1_OFF: usize = 0x3000;
+    const L0_OFF: usize = 0x4000;
+    const ASID: u64 = 7;
+    const PTE_V: u64 = 1 << 0;
+    const PTE_R: u64 = 1 << 1;
+    const PTE_W: u64 = 1 << 2;
+    const PTE_X: u64 = 1 << 3;
+    const PTE_A: u64 = 1 << 6;
+    const PTE_D: u64 = 1 << 7;
+
+    fn pte(pa: u64, flags: u64) -> u64 {
+        ((pa >> 12) << 10) | flags
+    }
+
+    unsafe fn write_u64(ram: *const u8, off: usize, val: u64) {
+        (ram as *mut u8)
+            .add(off)
+            .copy_from_nonoverlapping(val.to_le_bytes().as_ptr(), 8);
+    }
+
+    let mut code = vec![0u8; 0x200];
+    let main = encode(&[
+        lui(3, (DATA_VA >> 12) as u32),     // x3 = data VA
+        addi(1, 0, 1),                      // x1 = first value
+        sd(1, 3, 0),                        // fill writable TLB entry
+        lui(6, (PTE_PAGE_VA >> 12) as u32), // x6 = mapped L0 PTE page
+        ld(4, 6, 8),                        // x4 = data page PTE
+        andi(4, 4, !4),                     // clear PTE.W
+        sd(4, 6, 8),                        // write-protect data PTE
+        addi(5, 0, ASID as i32),            // x5 = current ASID
+        sfence_vma(0, 5),                   // flush VA translations
+        addi(2, 0, 2),                      // x2 = second value
+        sd(2, 3, 0),                        // must fault, not fast-store
+        addi(7, 0, 1),                      // marker if fault is missed
+        ecall(),
+    ]);
+    code[..main.len()].copy_from_slice(&main);
+
+    let trap = encode(&[
+        csrrs(10, 0x342, 0), // mcause
+        csrrs(11, 0x343, 0), // mtval
+        csrrs(12, 0x341, 0), // mepc
+        ecall(),
+    ]);
+    code[0x100..0x100 + trap.len()].copy_from_slice(&trap);
+
+    let ram_size = 64 * 1024;
+    let (mut env, mut cpu, _as, ram) = setup_fullsys(ram_size, &code);
+
+    let root_pa = RAM_BASE + ROOT_OFF as u64;
+    let l1_pa = RAM_BASE + L1_OFF as u64;
+    let l0_pa = RAM_BASE + L0_OFF as u64;
+    let code_pa = RAM_BASE;
+    let data_pa = RAM_BASE + 0x1000;
+
+    let vpn2 = ((CODE_VA >> 30) & 0x1ff) as usize;
+    let vpn1 = ((CODE_VA >> 21) & 0x1ff) as usize;
+    unsafe {
+        write_u64(ram, ROOT_OFF + vpn2 * 8, pte(l1_pa, PTE_V));
+        write_u64(ram, L1_OFF + vpn1 * 8, pte(l0_pa, PTE_V));
+        write_u64(
+            ram,
+            L0_OFF,
+            pte(code_pa, PTE_V | PTE_R | PTE_X | PTE_A | PTE_D),
+        );
+        write_u64(
+            ram,
+            L0_OFF + 8,
+            pte(data_pa, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+        write_u64(
+            ram,
+            L0_OFF + 16,
+            pte(l0_pa, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+    }
+
+    let satp = (8u64 << 60) | (ASID << 44) | (root_pa >> 12);
+    cpu.cpu.priv_level = PrivLevel::Supervisor;
+    cpu.cpu
+        .csr
+        .write(CSR_PMPADDR0, 0x3fff_ffff_ffff, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .csr
+        .write(CSR_PMPCFG0, 0x0f, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .pmp
+        .sync_from_csr(&cpu.cpu.csr.pmpcfg, &cpu.cpu.csr.pmpaddr);
+    cpu.cpu.csr.satp = satp;
+    cpu.cpu.mmu.set_satp(satp);
+    cpu.cpu.csr.mtvec = RAM_BASE + 0x100;
+    cpu.cpu.pc = CODE_VA;
+
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(
+        cpu.cpu.gpr[10], 15,
+        "second store should raise StorePageFault, marker x7={}",
+        cpu.cpu.gpr[7],
+    );
+    assert_eq!(cpu.cpu.gpr[11], DATA_VA);
+    assert_eq!(cpu.cpu.gpr[12], CODE_VA + 10 * 4);
+    let data = unsafe { (ram as *const u64).add(0x1000 / 8).read_unaligned() };
+    assert_eq!(
+        data, 1,
+        "stale fast-path write must not update the data page",
+    );
+}
+
+/// Regression: SC must behave as a store for permission
+/// checks. After fork/COW write-protects a page, LR may
+/// still read it, but SC must fault instead of writing
+/// through a read-only TLB addend.
+#[test]
+fn test_fullsys_sc_faults_after_pte_wrprotect() {
+    use machina_guest_riscv::riscv::csr::{
+        PrivLevel, CSR_PMPADDR0, CSR_PMPCFG0,
+    };
+
+    const CODE_VA: u64 = 0x4000_0000;
+    const DATA_VA: u64 = 0x4000_1000;
+    const PTE_PAGE_VA: u64 = 0x4000_2000;
+    const ROOT_OFF: usize = 0x2000;
+    const L1_OFF: usize = 0x3000;
+    const L0_OFF: usize = 0x4000;
+    const ASID: u64 = 7;
+    const PTE_V: u64 = 1 << 0;
+    const PTE_R: u64 = 1 << 1;
+    const PTE_W: u64 = 1 << 2;
+    const PTE_X: u64 = 1 << 3;
+    const PTE_A: u64 = 1 << 6;
+    const PTE_D: u64 = 1 << 7;
+
+    fn pte(pa: u64, flags: u64) -> u64 {
+        ((pa >> 12) << 10) | flags
+    }
+
+    unsafe fn write_u64(ram: *const u8, off: usize, val: u64) {
+        (ram as *mut u8)
+            .add(off)
+            .copy_from_nonoverlapping(val.to_le_bytes().as_ptr(), 8);
+    }
+
+    let mut code = vec![0u8; 0x200];
+    let main = encode(&[
+        lui(3, (DATA_VA >> 12) as u32),     // x3 = data VA
+        addi(1, 0, 1),                      // x1 = first value
+        lr_w(8, 3),                         // reserve writable page
+        sc_w(9, 1, 3),                      // write 1, fill write TLB
+        lui(6, (PTE_PAGE_VA >> 12) as u32), // x6 = mapped L0 PTE page
+        ld(4, 6, 8),                        // x4 = data page PTE
+        andi(4, 4, !4),                     // clear PTE.W
+        sd(4, 6, 8),                        // write-protect data PTE
+        addi(5, 0, ASID as i32),            // x5 = current ASID
+        sfence_vma(0, 5),                   // flush VA translations
+        lr_w(8, 3),                         // read-only LR may succeed
+        addi(2, 0, 2),                      // x2 = second value
+        sc_w(9, 2, 3),                      // must fault, not write 2
+        addi(7, 0, 1),                      // marker if fault is missed
+        ecall(),
+    ]);
+    code[..main.len()].copy_from_slice(&main);
+
+    let trap = encode(&[
+        csrrs(10, 0x342, 0), // mcause
+        csrrs(11, 0x343, 0), // mtval
+        csrrs(12, 0x341, 0), // mepc
+        ecall(),
+    ]);
+    code[0x100..0x100 + trap.len()].copy_from_slice(&trap);
+
+    let ram_size = 64 * 1024;
+    let (mut env, mut cpu, _as, ram) = setup_fullsys(ram_size, &code);
+
+    let root_pa = RAM_BASE + ROOT_OFF as u64;
+    let l1_pa = RAM_BASE + L1_OFF as u64;
+    let l0_pa = RAM_BASE + L0_OFF as u64;
+    let code_pa = RAM_BASE;
+    let data_pa = RAM_BASE + 0x1000;
+
+    let vpn2 = ((CODE_VA >> 30) & 0x1ff) as usize;
+    let vpn1 = ((CODE_VA >> 21) & 0x1ff) as usize;
+    unsafe {
+        write_u64(ram, ROOT_OFF + vpn2 * 8, pte(l1_pa, PTE_V));
+        write_u64(ram, L1_OFF + vpn1 * 8, pte(l0_pa, PTE_V));
+        write_u64(
+            ram,
+            L0_OFF,
+            pte(code_pa, PTE_V | PTE_R | PTE_X | PTE_A | PTE_D),
+        );
+        write_u64(
+            ram,
+            L0_OFF + 8,
+            pte(data_pa, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+        write_u64(
+            ram,
+            L0_OFF + 16,
+            pte(l0_pa, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+    }
+
+    let satp = (8u64 << 60) | (ASID << 44) | (root_pa >> 12);
+    cpu.cpu.priv_level = PrivLevel::Supervisor;
+    cpu.cpu
+        .csr
+        .write(CSR_PMPADDR0, 0x3fff_ffff_ffff, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .csr
+        .write(CSR_PMPCFG0, 0x0f, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .pmp
+        .sync_from_csr(&cpu.cpu.csr.pmpcfg, &cpu.cpu.csr.pmpaddr);
+    cpu.cpu.csr.satp = satp;
+    cpu.cpu.mmu.set_satp(satp);
+    cpu.cpu.csr.mtvec = RAM_BASE + 0x100;
+    cpu.cpu.pc = CODE_VA;
+
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(
+        cpu.cpu.gpr[10], 15,
+        "SC to write-protected page should raise StorePageFault, marker x7={}",
+        cpu.cpu.gpr[7],
+    );
+    assert_eq!(cpu.cpu.gpr[11], DATA_VA);
+    assert_eq!(cpu.cpu.gpr[12], CODE_VA + 12 * 4);
+    let data = unsafe { (ram as *const u32).add(0x1000 / 4).read_unaligned() };
+    assert_eq!(data, 1, "SC must not write through a read-only TLB addend",);
+}
+
+/// Regression: LR/SC reservations are tied to the translated
+/// physical address, not just the guest virtual address.
+///
+/// If the same VA is remapped after LR, SC must fail even
+/// when the newly mapped page contains the same loaded value.
+#[test]
+fn test_fullsys_sc_fails_after_same_va_remaps_to_different_pa() {
+    use machina_guest_riscv::riscv::csr::{
+        PrivLevel, CSR_PMPADDR0, CSR_PMPCFG0,
+    };
+
+    const CODE_VA: u64 = 0x4000_0000;
+    const DATA_VA: u64 = 0x4000_1000;
+    const PTE_PAGE_VA: u64 = 0x4000_2000;
+    const ROOT_OFF: usize = 0x2000;
+    const L1_OFF: usize = 0x3000;
+    const L0_OFF: usize = 0x4000;
+    const DATA_A_OFF: usize = 0x5000;
+    const DATA_B_OFF: usize = 0x6000;
+    const ASID: u64 = 7;
+    const PTE_V: u64 = 1 << 0;
+    const PTE_R: u64 = 1 << 1;
+    const PTE_W: u64 = 1 << 2;
+    const PTE_X: u64 = 1 << 3;
+    const PTE_A: u64 = 1 << 6;
+    const PTE_D: u64 = 1 << 7;
+
+    fn pte(pa: u64, flags: u64) -> u64 {
+        ((pa >> 12) << 10) | flags
+    }
+
+    unsafe fn write_u64(ram: *const u8, off: usize, val: u64) {
+        (ram as *mut u8)
+            .add(off)
+            .copy_from_nonoverlapping(val.to_le_bytes().as_ptr(), 8);
+    }
+
+    let mut code = vec![0u8; 0x200];
+    let main = encode(&[
+        lui(3, (DATA_VA >> 12) as u32),     // x3 = data VA
+        lr_w(8, 3),                         // reserve old PA
+        lui(6, (PTE_PAGE_VA >> 12) as u32), // x6 = mapped L0 PTE page
+        ld(4, 6, 24),                       // x4 = replacement data PTE
+        sd(4, 6, 8),                        // remap DATA_VA to new PA
+        addi(5, 0, ASID as i32),            // x5 = current ASID
+        sfence_vma(0, 5),                   // flush VA translations
+        addi(2, 0, 7),                      // x2 = value SC would write
+        sc_w(9, 2, 3),                      // must fail without writing
+        ecall(),
+    ]);
+    code[..main.len()].copy_from_slice(&main);
+
+    let ram_size = 64 * 1024;
+    let (mut env, mut cpu, _as, ram) = setup_fullsys(ram_size, &code);
+
+    let root_pa = RAM_BASE + ROOT_OFF as u64;
+    let l1_pa = RAM_BASE + L1_OFF as u64;
+    let l0_pa = RAM_BASE + L0_OFF as u64;
+    let code_pa = RAM_BASE;
+    let data_a_pa = RAM_BASE + DATA_A_OFF as u64;
+    let data_b_pa = RAM_BASE + DATA_B_OFF as u64;
+
+    let vpn2 = ((CODE_VA >> 30) & 0x1ff) as usize;
+    let vpn1 = ((CODE_VA >> 21) & 0x1ff) as usize;
+    let data_flags = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+    unsafe {
+        write_u64(ram, ROOT_OFF + vpn2 * 8, pte(l1_pa, PTE_V));
+        write_u64(ram, L1_OFF + vpn1 * 8, pte(l0_pa, PTE_V));
+        write_u64(
+            ram,
+            L0_OFF,
+            pte(code_pa, PTE_V | PTE_R | PTE_X | PTE_A | PTE_D),
+        );
+        write_u64(ram, L0_OFF + 8, pte(data_a_pa, data_flags));
+        write_u64(
+            ram,
+            L0_OFF + 16,
+            pte(l0_pa, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+        write_u64(ram, L0_OFF + 24, pte(data_b_pa, data_flags));
+        write_u64(ram, DATA_A_OFF, 0);
+        write_u64(ram, DATA_B_OFF, 0);
+    }
+
+    let satp = (8u64 << 60) | (ASID << 44) | (root_pa >> 12);
+    cpu.cpu.priv_level = PrivLevel::Supervisor;
+    cpu.cpu
+        .csr
+        .write(CSR_PMPADDR0, 0x3fff_ffff_ffff, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .csr
+        .write(CSR_PMPCFG0, 0x0f, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .pmp
+        .sync_from_csr(&cpu.cpu.csr.pmpcfg, &cpu.cpu.csr.pmpaddr);
+    cpu.cpu.csr.satp = satp;
+    cpu.cpu.mmu.set_satp(satp);
+    cpu.cpu.pc = CODE_VA;
+
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+
+    assert_eq!(
+        r,
+        ExitReason::Ecall {
+            priv_level: PrivLevel::Supervisor as u8,
+        },
+    );
+    assert_eq!(cpu.cpu.gpr[8], 0, "LR should load old page value");
+    assert_eq!(cpu.cpu.gpr[9], 1, "SC should fail after remap");
+    let old_page =
+        unsafe { (ram as *const u32).add(DATA_A_OFF / 4).read_unaligned() };
+    let new_page =
+        unsafe { (ram as *const u32).add(DATA_B_OFF / 4).read_unaligned() };
+    assert_eq!(old_page, 0);
+    assert_eq!(new_page, 0, "SC must not write the remapped page");
+}
+
+/// Regression: RISC-V AMOs require natural alignment.
+///
+/// QEMU routes AMOs through its atomic TCG path with
+/// MO_ALIGN, so an unaligned AMO is a store/AMO
+/// address-misaligned trap, not a plain unaligned
+/// load+store.
+#[test]
+fn test_fullsys_amoadd_d_misaligned_traps() {
+    let mut code = vec![0u8; 0x200];
+    let misaligned = RAM_BASE + 0x181;
+    let main = encode(&[
+        auipc(3, 0), // x3 = RAM_BASE
+        addi(3, 3, (misaligned - RAM_BASE) as i32),
+        addi(1, 0, 1),     // x1 = addend
+        amoadd_d(5, 1, 3), // must trap before writing
+        ecall(),           // fallback if AMO is incorrectly allowed
+    ]);
+    code[..main.len()].copy_from_slice(&main);
+
+    let trap = encode(&[
+        csrrs(10, 0x342, 0), // mcause
+        csrrs(11, 0x343, 0), // mtval
+        csrrs(12, 0x341, 0), // mepc
+        ecall(),
+    ]);
+    code[0x100..0x100 + trap.len()].copy_from_slice(&trap);
+
+    let (mut env, mut cpu, _as, ram) = setup_fullsys(1024 * 1024, &code);
+    cpu.cpu.csr.mtvec = RAM_BASE + 0x100;
+    cpu.cpu.pc = RAM_BASE;
+
+    unsafe {
+        (ram as *mut u64).add(0x180 / 8).write_unaligned(0x10);
+    }
+
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[10], 6, "AMO.D should raise store misaligned");
+    assert_eq!(cpu.cpu.gpr[11], misaligned);
+    assert_eq!(cpu.cpu.gpr[12], RAM_BASE + 3 * 4);
+    let data = unsafe { (ram as *const u64).add(0x180 / 8).read_unaligned() };
+    assert_eq!(data, 0x10, "misaligned AMO must not update memory");
+    drop(
+        env.shared
+            .atomic_lock
+            .try_lock()
+            .expect("AMO trap must not leak the exec atomic lock"),
+    );
+}
+
+/// Regression: AMOs must probe write permission before
+/// read-modify-write.  This mirrors QEMU's
+/// atomic_mmu_lookup(), which checks the write TLB entry
+/// for AMOs rather than doing an ordinary read first.
+#[test]
+fn test_fullsys_amoadd_w_faults_after_pte_wrprotect() {
+    use machina_guest_riscv::riscv::csr::{
+        PrivLevel, CSR_PMPADDR0, CSR_PMPCFG0,
+    };
+
+    const CODE_VA: u64 = 0x4000_0000;
+    const DATA_VA: u64 = 0x4000_1000;
+    const PTE_PAGE_VA: u64 = 0x4000_2000;
+    const ROOT_OFF: usize = 0x2000;
+    const L1_OFF: usize = 0x3000;
+    const L0_OFF: usize = 0x4000;
+    const ASID: u64 = 7;
+    const PTE_V: u64 = 1 << 0;
+    const PTE_R: u64 = 1 << 1;
+    const PTE_W: u64 = 1 << 2;
+    const PTE_X: u64 = 1 << 3;
+    const PTE_A: u64 = 1 << 6;
+    const PTE_D: u64 = 1 << 7;
+
+    fn amoadd_w(rd: u32, rs2: u32, rs1: u32) -> u32 {
+        (rs2 << 20) | (rs1 << 15) | (0b010 << 12) | (rd << 7) | 0x2f
+    }
+
+    fn pte(pa: u64, flags: u64) -> u64 {
+        ((pa >> 12) << 10) | flags
+    }
+
+    unsafe fn write_u64(ram: *const u8, off: usize, val: u64) {
+        (ram as *mut u8)
+            .add(off)
+            .copy_from_nonoverlapping(val.to_le_bytes().as_ptr(), 8);
+    }
+
+    let mut code = vec![0u8; 0x200];
+    let main = encode(&[
+        lui(3, (DATA_VA >> 12) as u32),     // x3 = data VA
+        addi(1, 0, 1),                      // x1 = first addend
+        amoadd_w(8, 1, 3),                  // write 1, fill write TLB
+        lui(6, (PTE_PAGE_VA >> 12) as u32), // x6 = mapped L0 PTE page
+        ld(4, 6, 8),                        // x4 = data page PTE
+        andi(4, 4, !4),                     // clear PTE.W
+        sd(4, 6, 8),                        // write-protect data PTE
+        addi(5, 0, ASID as i32),            // x5 = current ASID
+        sfence_vma(0, 5),                   // flush VA translations
+        addi(2, 0, 2),                      // x2 = second addend
+        amoadd_w(9, 2, 3),                  // must fault, not write 2
+        addi(7, 0, 1),                      // marker if fault is missed
+        ecall(),
+    ]);
+    code[..main.len()].copy_from_slice(&main);
+
+    let trap = encode(&[
+        csrrs(10, 0x342, 0), // mcause
+        csrrs(11, 0x343, 0), // mtval
+        csrrs(12, 0x341, 0), // mepc
+        ecall(),
+    ]);
+    code[0x100..0x100 + trap.len()].copy_from_slice(&trap);
+
+    let ram_size = 64 * 1024;
+    let (mut env, mut cpu, _as, ram) = setup_fullsys(ram_size, &code);
+
+    let root_pa = RAM_BASE + ROOT_OFF as u64;
+    let l1_pa = RAM_BASE + L1_OFF as u64;
+    let l0_pa = RAM_BASE + L0_OFF as u64;
+    let code_pa = RAM_BASE;
+    let data_pa = RAM_BASE + 0x1000;
+
+    let vpn2 = ((CODE_VA >> 30) & 0x1ff) as usize;
+    let vpn1 = ((CODE_VA >> 21) & 0x1ff) as usize;
+    unsafe {
+        write_u64(ram, ROOT_OFF + vpn2 * 8, pte(l1_pa, PTE_V));
+        write_u64(ram, L1_OFF + vpn1 * 8, pte(l0_pa, PTE_V));
+        write_u64(
+            ram,
+            L0_OFF,
+            pte(code_pa, PTE_V | PTE_R | PTE_X | PTE_A | PTE_D),
+        );
+        write_u64(
+            ram,
+            L0_OFF + 8,
+            pte(data_pa, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+        write_u64(
+            ram,
+            L0_OFF + 16,
+            pte(l0_pa, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+    }
+
+    let satp = (8u64 << 60) | (ASID << 44) | (root_pa >> 12);
+    cpu.cpu.priv_level = PrivLevel::Supervisor;
+    cpu.cpu
+        .csr
+        .write(CSR_PMPADDR0, 0x3fff_ffff_ffff, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .csr
+        .write(CSR_PMPCFG0, 0x0f, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .pmp
+        .sync_from_csr(&cpu.cpu.csr.pmpcfg, &cpu.cpu.csr.pmpaddr);
+    cpu.cpu.csr.satp = satp;
+    cpu.cpu.mmu.set_satp(satp);
+    cpu.cpu.csr.mtvec = RAM_BASE + 0x100;
+    cpu.cpu.pc = CODE_VA;
+
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(
+        cpu.cpu.gpr[10], 15,
+        "AMO to write-protected page should raise StorePageFault, marker x7={}",
+        cpu.cpu.gpr[7],
+    );
+    assert_eq!(cpu.cpu.gpr[11], DATA_VA);
+    assert_eq!(cpu.cpu.gpr[12], CODE_VA + 10 * 4);
+    let data = unsafe { (ram as *const u32).add(0x1000 / 4).read_unaligned() };
+    assert_eq!(data, 1, "AMO must not write through a read-only TLB addend",);
+}
+
+/// Regression: when the code TLB has been flushed, a TB
+/// cached for the same virtual PC must not be reused until
+/// the current physical PC is known again.
+#[test]
+fn test_fullsys_code_tlb_miss_does_not_reuse_stale_tb_after_remap() {
+    use machina_guest_riscv::riscv::csr::{
+        PrivLevel, CSR_PMPADDR0, CSR_PMPCFG0,
+    };
+
+    const CODE_VA: u64 = 0x4000_0000;
+    const ROOT_OFF: usize = 0x2000;
+    const L1_OFF: usize = 0x3000;
+    const L0_OFF: usize = 0x4000;
+    const CODE_A_OFF: usize = 0x5000;
+    const CODE_B_OFF: usize = 0x6000;
+    const ASID: u64 = 7;
+    const PTE_V: u64 = 1 << 0;
+    const PTE_R: u64 = 1 << 1;
+    const PTE_W: u64 = 1 << 2;
+    const PTE_X: u64 = 1 << 3;
+    const PTE_A: u64 = 1 << 6;
+    const PTE_D: u64 = 1 << 7;
+
+    fn pte(pa: u64, flags: u64) -> u64 {
+        ((pa >> 12) << 10) | flags
+    }
+
+    unsafe fn write_u64(ram: *const u8, off: usize, val: u64) {
+        (ram as *mut u8)
+            .add(off)
+            .copy_from_nonoverlapping(val.to_le_bytes().as_ptr(), 8);
+    }
+
+    let mut code = vec![0u8; 0x7000];
+    let code_a = encode(&[addi(1, 0, 1), ecall()]);
+    let code_b = encode(&[addi(1, 0, 2), ecall()]);
+    code[CODE_A_OFF..CODE_A_OFF + code_a.len()].copy_from_slice(&code_a);
+    code[CODE_B_OFF..CODE_B_OFF + code_b.len()].copy_from_slice(&code_b);
+
+    let ram_size = 64 * 1024;
+    let (mut env, mut cpu, _as, ram) = setup_fullsys(ram_size, &code);
+
+    let root_pa = RAM_BASE + ROOT_OFF as u64;
+    let l1_pa = RAM_BASE + L1_OFF as u64;
+    let l0_pa = RAM_BASE + L0_OFF as u64;
+    let code_a_pa = RAM_BASE + CODE_A_OFF as u64;
+    let code_b_pa = RAM_BASE + CODE_B_OFF as u64;
+    let code_flags = PTE_V | PTE_R | PTE_X | PTE_A | PTE_D;
+    let vpn2 = ((CODE_VA >> 30) & 0x1ff) as usize;
+    let vpn1 = ((CODE_VA >> 21) & 0x1ff) as usize;
+
+    unsafe {
+        write_u64(ram, ROOT_OFF + vpn2 * 8, pte(l1_pa, PTE_V));
+        write_u64(ram, L1_OFF + vpn1 * 8, pte(l0_pa, PTE_V));
+        write_u64(ram, L0_OFF, pte(code_a_pa, code_flags));
+    }
+
+    let satp = (8u64 << 60) | (ASID << 44) | (root_pa >> 12);
+    cpu.cpu.priv_level = PrivLevel::Supervisor;
+    cpu.cpu
+        .csr
+        .write(CSR_PMPADDR0, 0x3fff_ffff_ffff, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .csr
+        .write(CSR_PMPCFG0, 0x0f, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .pmp
+        .sync_from_csr(&cpu.cpu.csr.pmpcfg, &cpu.cpu.csr.pmpaddr);
+    cpu.cpu.csr.satp = satp;
+    cpu.cpu.mmu.set_satp(satp);
+    cpu.cpu.pc = CODE_VA;
+
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+    assert_eq!(
+        r,
+        ExitReason::Ecall {
+            priv_level: PrivLevel::Supervisor as u8,
+        },
+    );
+    assert_eq!(cpu.cpu.gpr[1], 1);
+
+    unsafe {
+        write_u64(ram, L0_OFF, pte(code_b_pa, code_flags | PTE_W));
+    }
+    cpu.cpu.mmu.flush();
+    cpu.cpu.pc = CODE_VA;
+    cpu.cpu.gpr[1] = 0;
+
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+    assert_eq!(
+        r,
+        ExitReason::Ecall {
+            priv_level: PrivLevel::Supervisor as u8,
+        },
+    );
+    assert_eq!(
+        cpu.cpu.gpr[1], 2,
+        "stale TB for the previous physical page must not be reused",
+    );
+}
+
 // ═══════════════════════════════════════════════════════
 // AC-7: MMIO observable dispatch test
 // ═══════════════════════════════════════════════════════
@@ -739,6 +1452,120 @@ impl machina_memory::region::MmioOps for TestMmioDeviceWrapper {
     fn write(&self, offset: u64, size: u32, val: u64) {
         self.inner.write(offset, size, val);
     }
+}
+
+#[test]
+fn test_xtheadmemidx_indexed_load_store() {
+    let code = encode(&[
+        auipc(3, 0),                      // x3 = RAM_BASE
+        addi(4, 0, 0x100),                // x4 = byte offset
+        addi(1, 0, 0x55),                 // x1 = value
+        th_memidx(12, 0, 4, 3, 0b101, 1), // th.srd x1, (x3), x4, 0
+        th_memidx(12, 0, 4, 3, 0b100, 2), // th.lrd x2, (x3), x4, 0
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[2], 0x55);
+}
+
+#[test]
+fn test_xtheadmemidx_load_inc_updates_base() {
+    let mut code = vec![0u8; 0x200];
+    let insns = encode(&[
+        auipc(3, 0),                      // x3 = RAM_BASE
+        addi(3, 3, 0x100),                // x3 = RAM_BASE + 0x100
+        th_memidx(19, 0, 2, 3, 0b100, 1), // th.lbuia x1, (x3), 2, 0
+        ecall(),
+    ]);
+    code[..insns.len()].copy_from_slice(&insns);
+    code[0x100] = 0x5a;
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[1], 0x5a);
+    assert_eq!(cpu.cpu.gpr[3], RAM_BASE + 0x102);
+}
+
+#[test]
+fn test_xtheadfmemidx_indexed_double_load_store() {
+    let code = encode(&[
+        auipc(3, 0),                      // x3 = RAM_BASE
+        addi(4, 0, 0x100),                // x4 = byte offset
+        th_memidx(12, 0, 4, 3, 0b111, 1), // th.fsrd f1, (x3), x4, 0
+        th_memidx(12, 0, 4, 3, 0b110, 2), // th.flrd f2, (x3), x4, 0
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.csr.mstatus |= 0x3 << 13;
+    cpu.cpu.fpr[1] = 0x3ff0_0000_0000_0000;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.fpr[2], 0x3ff0_0000_0000_0000);
+}
+
+#[test]
+fn test_riscv_time_csr_uses_configured_mmio_addr() {
+    const K230_MTIME: u64 = 0x000f_0400_bff8;
+
+    let root = MemoryRegion::container("root", u64::MAX);
+    let device = Arc::new(TestMmioDevice::new());
+    device
+        .last_value
+        .store(0x1234_5678_9abc_def0, std::sync::atomic::Ordering::Relaxed);
+    let io_region = MemoryRegion::io(
+        "mtime",
+        8,
+        Arc::new(TestMmioDeviceWrapper {
+            inner: Arc::clone(&device),
+        }),
+    );
+
+    let mut addr_space = Box::new(AddressSpace::new(root));
+    addr_space
+        .root_mut()
+        .add_subregion(io_region, GPA::new(K230_MTIME));
+    addr_space.update_flat_view();
+
+    let mut cpu = RiscvCpu::new();
+    cpu.as_ptr = &*addr_space as *const AddressSpace as u64;
+    cpu.time_mmio_addr = K230_MTIME;
+
+    let old = unsafe {
+        machina_csr_op(
+            &mut cpu as *mut RiscvCpu as *mut u8,
+            u64::from(CSR_TIME),
+            0,
+            0,
+            2,
+        )
+    };
+    assert_eq!(old, 0x1234_5678_9abc_def0);
 }
 
 // ── Regression: slow-path register corruption ──────
@@ -1014,6 +1841,31 @@ fn test_fullsys_priv_csr_execution() {
     // x1 should have some value from mcycle
     // (just verify it was written, not a specific value).
     // mcycle is typically 0 in our emulator.
+}
+
+#[test]
+fn test_fullsys_csrrs_x0_does_not_write_privileged_csr() {
+    use machina_guest_riscv::riscv::csr::CSR_STVEC;
+
+    let code = encode(&[
+        csrrs(1, CSR_STVEC, 0), // read-only CSRRS form
+        addi(2, 0, 42),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys(1024 * 1024, &code);
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.csr.stvec = 0x1234_5678;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[1], 0x1234_5678);
+    assert_eq!(cpu.cpu.gpr[2], 42);
+    assert_eq!(
+        cpu.cpu.csr.stvec, 0x1234_5678,
+        "CSRRS with rs1=x0 must not write stvec",
+    );
 }
 
 /// AC-6: verify that handle_priv_csr emits a CSR trace

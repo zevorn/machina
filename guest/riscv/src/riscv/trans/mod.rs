@@ -18,6 +18,7 @@ mod gen_priv;
 mod gen_rva;
 mod gen_rvi;
 mod gen_rvm;
+mod gen_xthead;
 mod gen_zba;
 mod gen_zbb;
 mod gen_zbc;
@@ -26,6 +27,7 @@ mod gen_zbkx;
 mod gen_zbs;
 mod helpers;
 
+use self::gen_rva::{AMO_ADD, AMO_AND, AMO_OR, AMO_XOR};
 use super::ext::MisaExt;
 use super::fpu;
 use super::insn_decode::*;
@@ -71,6 +73,14 @@ pub(super) fn decode_vendor_thead(
     if is_xthead_cmo_hint(ctx, insn) {
         return true;
     }
+    if is_xthead_sfence_vmas(ctx, insn) {
+        let next = ctx.base.pc_next + ctx.cur_insn_len as u64;
+        let pc = ir.new_const(Type::I64, next);
+        ir.gen_mov(Type::I64, ctx.pc, pc);
+        ir.gen_exit_tb(EXCP_RISCV_SFENCE_VMA);
+        ctx.base.is_jmp = DisasJumpType::NoReturn;
+        return true;
+    }
     if is_xthead_sync_hint(ctx, insn) {
         let next = ctx.base.pc_next + ctx.cur_insn_len as u64;
         let pc = ir.new_const(Type::I64, next);
@@ -80,7 +90,7 @@ pub(super) fn decode_vendor_thead(
         return true;
     }
 
-    false
+    gen_xthead::decode_xthead(ctx, ir, insn)
 }
 
 fn is_xthead_custom0_base(insn: u32) -> bool {
@@ -107,6 +117,15 @@ fn is_xthead_cmo_hint(ctx: &RiscvDisasContext, insn: u32) -> bool {
     }
 }
 
+fn is_xthead_sfence_vmas(ctx: &RiscvDisasContext, insn: u32) -> bool {
+    if !ctx.cfg.ext_xtheadsync || !is_xthead_custom0_base(insn) {
+        return false;
+    }
+
+    let funct7 = (insn >> 25) & 0x7f;
+    funct7 == 2
+}
+
 fn is_xthead_sync_hint(ctx: &RiscvDisasContext, insn: u32) -> bool {
     if !ctx.cfg.ext_xtheadsync || !is_xthead_custom0_base(insn) {
         return false;
@@ -117,7 +136,6 @@ fn is_xthead_sync_hint(ctx: &RiscvDisasContext, insn: u32) -> bool {
     let funct7 = (insn >> 25) & 0x7f;
     match funct7 {
         0 => rs1 == 0 && matches!(rs2, 24..=27),
-        2 => true,
         _ => false,
     }
 }
@@ -414,6 +432,13 @@ impl Decode<Context> for RiscvDisasContext {
         true
     }
 
+    fn trans_sinval_vma(&mut self, ir: &mut Context, _a: &ArgsR) -> bool {
+        require_cfg!(self, ext_svinval);
+        // QEMU currently treats Svinval's page invalidation
+        // like sfence.vma.
+        self.trans_sfence_vma(ir, _a)
+    }
+
     // ── Zicsr: CSR access ────────────────────────────
 
     fn trans_csrrw(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
@@ -423,7 +448,7 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let rs1 = self.gpr_or_zero(ir, a.rs1);
-                    self.gen_csr_helper(ir, a.csr, rs1, 1, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 1, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -433,7 +458,7 @@ impl Decode<Context> for RiscvDisasContext {
         let rs1 = self.gpr_or_zero(ir, a.rs1);
         if !self.gen_csr_write(ir, a.csr, rs1) {
             if self.csr_helper != 0 {
-                self.gen_csr_helper(ir, a.csr, rs1, 1, a.rd);
+                self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 1, a.rd);
                 return true;
             }
             self.gen_priv_csr_exit(ir);
@@ -450,7 +475,7 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let rs1 = self.gpr_or_zero(ir, a.rs1);
-                    self.gen_csr_helper(ir, a.csr, rs1, 2, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 2, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -463,7 +488,7 @@ impl Decode<Context> for RiscvDisasContext {
             ir.gen_or(Type::I64, new, old, rs1);
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
-                    self.gen_csr_helper(ir, a.csr, rs1, 2, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 2, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -481,7 +506,7 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let rs1 = self.gpr_or_zero(ir, a.rs1);
-                    self.gen_csr_helper(ir, a.csr, rs1, 3, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 3, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -496,7 +521,7 @@ impl Decode<Context> for RiscvDisasContext {
             ir.gen_and(Type::I64, new, old, inv);
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
-                    self.gen_csr_helper(ir, a.csr, rs1, 3, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 3, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -514,7 +539,7 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let z = ir.new_const(Type::I64, a.rs1 as u64);
-                    self.gen_csr_helper(ir, a.csr, z, 5, a.rd);
+                    self.gen_csr_helper(ir, a.csr, z, a.rs1, 5, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -524,7 +549,7 @@ impl Decode<Context> for RiscvDisasContext {
         let zimm = ir.new_const(Type::I64, a.rs1 as u64);
         if !self.gen_csr_write(ir, a.csr, zimm) {
             if self.csr_helper != 0 {
-                self.gen_csr_helper(ir, a.csr, zimm, 5, a.rd);
+                self.gen_csr_helper(ir, a.csr, zimm, a.rs1, 5, a.rd);
                 return true;
             }
             self.gen_priv_csr_exit(ir);
@@ -541,7 +566,7 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let z = ir.new_const(Type::I64, a.rs1 as u64);
-                    self.gen_csr_helper(ir, a.csr, z, 6, a.rd);
+                    self.gen_csr_helper(ir, a.csr, z, a.rs1, 6, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -554,7 +579,7 @@ impl Decode<Context> for RiscvDisasContext {
             ir.gen_or(Type::I64, new, old, zimm);
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
-                    self.gen_csr_helper(ir, a.csr, zimm, 6, a.rd);
+                    self.gen_csr_helper(ir, a.csr, zimm, a.rs1, 6, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -572,7 +597,7 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let z = ir.new_const(Type::I64, a.rs1 as u64);
-                    self.gen_csr_helper(ir, a.csr, z, 7, a.rd);
+                    self.gen_csr_helper(ir, a.csr, z, a.rs1, 7, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -587,7 +612,7 @@ impl Decode<Context> for RiscvDisasContext {
             ir.gen_and(Type::I64, new, old, inv);
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
-                    self.gen_csr_helper(ir, a.csr, zimm, 7, a.rd);
+                    self.gen_csr_helper(ir, a.csr, zimm, a.rs1, 7, a.rd);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -709,19 +734,19 @@ impl Decode<Context> for RiscvDisasContext {
     }
     fn trans_amoadd_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_add, MemOp::sl())
+        self.gen_amo(ir, a, AMO_ADD, MemOp::sl())
     }
     fn trans_amoxor_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_xor, MemOp::sl())
+        self.gen_amo(ir, a, AMO_XOR, MemOp::sl())
     }
     fn trans_amoand_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_and, MemOp::sl())
+        self.gen_amo(ir, a, AMO_AND, MemOp::sl())
     }
     fn trans_amoor_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_or, MemOp::sl())
+        self.gen_amo(ir, a, AMO_OR, MemOp::sl())
     }
     fn trans_amomin_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
@@ -754,19 +779,19 @@ impl Decode<Context> for RiscvDisasContext {
     }
     fn trans_amoadd_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_add, MemOp::uq())
+        self.gen_amo(ir, a, AMO_ADD, MemOp::uq())
     }
     fn trans_amoxor_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_xor, MemOp::uq())
+        self.gen_amo(ir, a, AMO_XOR, MemOp::uq())
     }
     fn trans_amoand_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_and, MemOp::uq())
+        self.gen_amo(ir, a, AMO_AND, MemOp::uq())
     }
     fn trans_amoor_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_or, MemOp::uq())
+        self.gen_amo(ir, a, AMO_OR, MemOp::uq())
     }
     fn trans_amomin_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);

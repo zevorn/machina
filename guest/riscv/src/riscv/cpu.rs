@@ -10,6 +10,8 @@ use super::csr::{CsrFile, PrivLevel};
 pub const NUM_GPRS: usize = 32;
 /// Number of floating-point registers (f0-f31).
 pub const NUM_FPRS: usize = 32;
+/// Default RISC-V virt/ref ACLINT mtime MMIO address.
+pub const DEFAULT_TIME_MMIO_ADDR: u64 = 0x0200_BFF8;
 
 /// RISC-V CPU architectural state (RV64).
 ///
@@ -84,6 +86,9 @@ pub struct RiscvCpu {
     /// dispatch from JIT helpers. Cast from *const
     /// AddressSpace. Zero means not initialized.
     pub as_ptr: u64,
+    /// Physical MMIO address backing CSR_TIME/rdtime.
+    /// Zero means no machine timer source is configured.
+    pub time_mmio_addr: u64,
     /// Start of the RAM window (board-specific, e.g.
     /// 0x8000_0000 for RISC-V virt). Set by the system
     /// layer at CPU creation; JIT helpers use this to
@@ -235,6 +240,7 @@ impl RiscvCpu {
             mem_fault_cause: 0,
             mem_fault_tval: 0,
             as_ptr: 0,
+            time_mmio_addr: DEFAULT_TIME_MMIO_ADDR,
             ram_base: 0,
             ram_end: 0,
             code_pages_ptr: 0,

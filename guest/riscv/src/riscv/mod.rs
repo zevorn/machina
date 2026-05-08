@@ -62,6 +62,12 @@ pub struct RiscvDisasContext {
     pub guest_base: *const u8,
     /// Address of the CSR helper function for JIT call.
     pub csr_helper: u64,
+    /// Address of the full-system LR helper function.
+    pub lr_helper: u64,
+    /// Address of the full-system SC helper function.
+    pub sc_helper: u64,
+    /// Address of the full-system AMO helper function.
+    pub amo_helper: u64,
 }
 
 impl RiscvDisasContext {
@@ -91,6 +97,9 @@ impl RiscvDisasContext {
             cur_insn_len: 4,
             guest_base,
             csr_helper: 0,
+            lr_helper: 0,
+            sc_helper: 0,
+            amo_helper: 0,
         }
     }
 

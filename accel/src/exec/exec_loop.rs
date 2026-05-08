@@ -164,13 +164,7 @@ where
             continue;
         }
 
-        let _atomic_guard = if shared.tb_store.get(tb_idx).contains_atomic {
-            Some(shared.atomic_lock.lock().unwrap())
-        } else {
-            None
-        };
         let raw_exit = cpu_tb_exec(shared, cpu, tb_idx);
-        drop(_atomic_guard);
         let (last_tb, exit_code) = decode_tb_exit(raw_exit);
 
         let src_tb = last_tb.unwrap_or(tb_idx);
@@ -428,8 +422,15 @@ where
     // validation. After sfence.vma, the TLB is flushed
     // so this triggers a page walk in gen_code.
     // cur_phys == pc means bare/M-mode (no translation).
-    // cur_phys == u64::MAX means unknown (skip check).
+    // cur_phys == u64::MAX means the code TLB does not
+    // currently know this VA's physical page; do not reuse
+    // a cached TB for the same VA because the mapping may
+    // have changed after sfence.vma/satp activity.
     let cur_phys = cpu.translate_pc(pc);
+    if cur_phys == u64::MAX {
+        per_cpu.stats.translate += 1;
+        return tb_gen_code(shared, per_cpu, cpu, pc, flags, 0);
+    }
 
     // Fast path: jump cache (per-CPU, no lock needed)
     if let Some(idx) = per_cpu.jump_cache.lookup(pc) {
@@ -438,7 +439,7 @@ where
             && tb.gen.load(Ordering::Acquire) == shared.tb_store.global_gen()
             && tb.pc == pc
             && tb.flags == flags
-            && (cur_phys == u64::MAX || tb.phys_pc == cur_phys)
+            && tb.phys_pc == cur_phys
         {
             per_cpu.stats.jc_hit += 1;
             return Some(idx);
@@ -448,7 +449,7 @@ where
     // Slow path: hash table.
     if let Some(idx) = shared.tb_store.lookup(pc, flags) {
         let tb = shared.tb_store.get(idx);
-        if cur_phys == u64::MAX || tb.phys_pc == cur_phys {
+        if tb.phys_pc == cur_phys {
             per_cpu.jump_cache.insert(pc, idx);
             per_cpu.stats.ht_hit += 1;
             return Some(idx);
@@ -490,8 +491,12 @@ where
     // PC while we waited for the lock.
     if !ephemeral {
         if let Some(idx) = shared.tb_store.lookup(pc, flags) {
-            per_cpu.jump_cache.insert(pc, idx);
-            return Some(idx);
+            let cur_phys = cpu.translate_pc(pc);
+            let tb = shared.tb_store.get(idx);
+            if cur_phys != u64::MAX && tb.phys_pc == cur_phys {
+                per_cpu.jump_cache.insert(pc, idx);
+                return Some(idx);
+            }
         }
     }
 
