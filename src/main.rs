@@ -25,7 +25,7 @@ use machina_hw_intc::aclint::Aclint;
 use machina_hw_loongarch::virt_machine::LoongArchVirtMachine;
 use machina_hw_riscv::k230::{K230Machine, K230MemMap, K230_MEMMAP};
 use machina_hw_riscv::ref_machine::{
-    RefMachine, MROM_BASE, MROM_SIZE, RAM_BASE,
+    RefMachine, RefMemMap, MROM_BASE, MROM_SIZE, RAM_BASE, REF_MEMMAP,
 };
 use machina_hw_riscv::sbi::SbiBackend;
 use machina_hw_riscv::sifive_test::ShutdownReason;
@@ -316,6 +316,7 @@ fn parse_args() -> Result<CliArgs, String> {
 trait RiscvRuntimeMachine: Machine {
     fn take_cpu(&self, idx: usize) -> Option<RiscvCpu>;
     fn ram_base(&self) -> u64;
+    fn time_mmio_addr(&self) -> u64;
     fn ram_ptr(&self) -> *const u8;
     fn bootrom_ptr(&self) -> *const u8;
     fn bootrom_base(&self) -> u64;
@@ -351,6 +352,10 @@ impl RiscvRuntimeMachine for RefMachine {
 
     fn ram_base(&self) -> u64 {
         RAM_BASE
+    }
+
+    fn time_mmio_addr(&self) -> u64 {
+        REF_MEMMAP[RefMemMap::Aclint as usize].base + 0xBFF8
     }
 
     fn ram_ptr(&self) -> *const u8 {
@@ -427,6 +432,10 @@ impl RiscvRuntimeMachine for K230Machine {
 
     fn ram_base(&self) -> u64 {
         K230_MEMMAP[K230MemMap::Ddr as usize].base
+    }
+
+    fn time_mmio_addr(&self) -> u64 {
+        K230_MEMMAP[K230MemMap::Clint as usize].base + 0xBFF8
     }
 
     fn ram_ptr(&self) -> *const u8 {
@@ -656,6 +665,7 @@ fn run_machine_cycle(
             Arc::clone(&stop_flag),
         )
     };
+    fs_cpu.cpu.time_mmio_addr = machine.time_mmio_addr();
     fs_cpu.set_mrom(
         machine.bootrom_ptr(),
         machine.bootrom_base(),
@@ -927,9 +937,7 @@ fn main() {
         cli.ram_mib
     };
     let ram_size = ram_mib * 1024 * 1024;
-    let k230_default_sbi_boot =
-        cli.machine == "k230" && cli.bios.is_none() && cli.dtb.is_some();
-    let bios_builtin = cli.bios_builtin || k230_default_sbi_boot;
+    let bios_builtin = cli.bios_builtin;
     let opts = MachineOpts {
         ram_size,
         cpu_count: 1,

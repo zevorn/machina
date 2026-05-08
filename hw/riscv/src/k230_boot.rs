@@ -3,13 +3,30 @@ use machina_core::machine::Machine;
 use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_hw_core::loader;
 
+use crate::boot::{
+    self, BiosSource, DynamicInfo, K230_EMBEDDED_FW, K230_FW_FILENAME,
+};
 use crate::k230::{K230Machine, K230MemMap, K230_MEMMAP};
-use crate::k230_dtb::fixup_k230_dtb;
+use crate::k230_dtb::{
+    dtb_first_memory_region, fixup_k230_dtb, FdtMemoryRegion,
+};
 
 pub const K230_BOOTROM_BASE: u64 =
     K230_MEMMAP[K230MemMap::Bootrom as usize].base;
 pub const K230_BOOTROM_SIZE: u64 =
     K230_MEMMAP[K230MemMap::Bootrom as usize].size;
+
+struct LoadedImage {
+    entry: u64,
+    low_addr: u64,
+    high_addr: u64,
+}
+
+struct LoadedFirmware {
+    entry: u64,
+    high_addr: u64,
+    has_firmware: bool,
+}
 
 pub fn boot_k230(
     machine: &mut K230Machine,
@@ -22,11 +39,19 @@ pub fn boot_k230(
         return Err("-initrd requires -dtb for the k230 machine".into());
     }
 
-    let start_addr = load_bios_or_kernel(machine)?;
-    let initrd_range = load_initrd(machine)?;
-    let fdt_addr = load_and_fix_user_dtb(machine, initrd_range)?;
+    let linux_mem = load_linux_memory_window(machine)?;
+    let firmware = load_firmware(machine)?;
+    let kernel = load_kernel(machine, &firmware, linux_mem)?;
+    let initrd_range = load_initrd(machine, kernel.as_ref(), linux_mem)?;
+    let fdt_addr = load_and_fix_user_dtb(machine, initrd_range, linux_mem)?;
     apply_loaders(machine)?;
-    write_k230_reset_vec(machine, start_addr, fdt_addr);
+    write_k230_reset_vec(
+        machine,
+        firmware.entry,
+        fdt_addr,
+        kernel.as_ref().map_or(0, |image| image.entry),
+        firmware.has_firmware,
+    );
     machine.set_boot_cpu_pc(K230_BOOTROM_BASE, PrivLevel::Machine);
     Ok(())
 }
@@ -38,88 +63,208 @@ fn boot_k230_builtin(
         return Err("-initrd requires -dtb for the k230 machine".into());
     }
 
-    let entry = load_kernel_at_ddr(machine)?;
-    let initrd_range = load_initrd(machine)?;
-    let fdt_addr = load_and_fix_user_dtb(machine, initrd_range)?;
+    let linux_mem = load_linux_memory_window(machine)?;
+    let kernel = load_kernel_for_builtin(machine, linux_mem)?;
+    let initrd_range = load_initrd(machine, Some(&kernel), linux_mem)?;
+    let fdt_addr = load_and_fix_user_dtb(machine, initrd_range, linux_mem)?;
     apply_loaders(machine)?;
     write_k230_halt(machine);
-    configure_builtin_sbi_entry(machine, entry, fdt_addr);
+    configure_builtin_sbi_entry(machine, kernel.entry, fdt_addr);
     Ok(())
 }
 
-fn load_kernel_at_ddr(
+fn load_kernel_for_builtin(
     machine: &K230Machine,
-) -> Result<u64, Box<dyn std::error::Error>> {
+    linux_mem: Option<FdtMemoryRegion>,
+) -> Result<LoadedImage, Box<dyn std::error::Error>> {
     let Some(path) = machine.kernel_path() else {
         return Err("builtin K230 boot requires -kernel".into());
     };
-    load_image_at_ddr(machine, path)
+    let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
+    let load_addr = linux_mem.map_or(ddr.base, |mem| mem.base);
+    load_image_at(machine, path, load_addr)
 }
 
-fn load_image_at_ddr(
+fn load_firmware(
+    machine: &K230Machine,
+) -> Result<LoadedFirmware, Box<dyn std::error::Error>> {
+    let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
+    match boot::resolve_bios(&machine.bios_path) {
+        BiosSource::None => Ok(LoadedFirmware {
+            entry: ddr.base,
+            high_addr: ddr.base,
+            has_firmware: false,
+        }),
+        BiosSource::File(path) => {
+            let image = load_firmware_data(machine, &std::fs::read(path)?)?;
+            Ok(LoadedFirmware {
+                entry: image.entry,
+                high_addr: image.high_addr,
+                has_firmware: true,
+            })
+        }
+        BiosSource::Embedded => {
+            if !K230_EMBEDDED_FW.is_empty() {
+                let image = load_firmware_data(machine, K230_EMBEDDED_FW)?;
+                Ok(LoadedFirmware {
+                    entry: image.entry,
+                    high_addr: image.high_addr,
+                    has_firmware: true,
+                })
+            } else if let Some(path) = boot::find_firmware(K230_FW_FILENAME) {
+                let image = load_firmware_data(machine, &std::fs::read(path)?)?;
+                Ok(LoadedFirmware {
+                    entry: image.entry,
+                    high_addr: image.high_addr,
+                    has_firmware: true,
+                })
+            } else {
+                Err("no firmware found; use -bios <path>, set \
+                     $MACHINA_DATADIR, or build with \
+                     embed-firmware feature"
+                    .into())
+            }
+        }
+    }
+}
+
+fn load_image_at(
     machine: &K230Machine,
     path: &std::path::Path,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
+    load_addr: u64,
+) -> Result<LoadedImage, Box<dyn std::error::Error>> {
     let data = std::fs::read(path)?;
     if data.starts_with(b"\x7fELF") {
-        let info = loader::load_elf(&data, ddr.base, machine.address_space())
+        let info = loader::load_elf(&data, load_addr, machine.address_space())
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        Ok(info.entry.0)
+        Ok(LoadedImage {
+            entry: info.entry.0,
+            low_addr: info.entry.0,
+            high_addr: info.high_addr,
+        })
     } else {
-        loader::load_binary(
+        let info = loader::load_binary(
             &data,
-            GPA::new(ddr.base),
+            GPA::new(load_addr),
             machine.address_space(),
         )?;
-        Ok(ddr.base)
+        Ok(LoadedImage {
+            entry: info.entry.0,
+            low_addr: load_addr,
+            high_addr: info.high_addr,
+        })
     }
 }
 
-fn load_bios_or_kernel(
+fn load_firmware_data(
     machine: &K230Machine,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    if let Some(path) = machine
-        .bios_path()
-        .filter(|path| path.to_str() != Some("none"))
-    {
-        return load_image_at_ddr(machine, path);
-    }
-
-    if let Some(path) = machine.kernel_path() {
-        return load_image_at_ddr(machine, path);
-    }
-
+    data: &[u8],
+) -> Result<LoadedImage, Box<dyn std::error::Error>> {
     let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
-    Ok(ddr.base)
+    load_firmware_blob(machine, data, ddr.base)
+}
+
+fn load_firmware_blob(
+    machine: &K230Machine,
+    data: &[u8],
+    load_addr: u64,
+) -> Result<LoadedImage, Box<dyn std::error::Error>> {
+    if boot::is_elf(data) {
+        let info = loader::load_elf(data, load_addr, machine.address_space())
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        Ok(LoadedImage {
+            entry: info.entry.0,
+            low_addr: info.entry.0,
+            high_addr: info.high_addr,
+        })
+    } else {
+        let info = loader::load_binary(
+            data,
+            GPA::new(load_addr),
+            machine.address_space(),
+        )?;
+        Ok(LoadedImage {
+            entry: load_addr,
+            low_addr: load_addr,
+            high_addr: info.high_addr,
+        })
+    }
+}
+
+fn load_kernel(
+    machine: &K230Machine,
+    firmware: &LoadedFirmware,
+    linux_mem: Option<FdtMemoryRegion>,
+) -> Result<Option<LoadedImage>, Box<dyn std::error::Error>> {
+    let Some(path) = machine.kernel_path() else {
+        return Ok(None);
+    };
+    let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
+    let mem_base = linux_mem.map_or(ddr.base, |mem| mem.base);
+    let load_addr = if firmware.has_firmware {
+        align_up_2m(firmware.high_addr).max(mem_base)
+    } else {
+        mem_base
+    };
+    Ok(Some(load_image_at(machine, path, load_addr)?))
 }
 
 fn load_initrd(
     machine: &K230Machine,
+    kernel: Option<&LoadedImage>,
+    linux_mem: Option<FdtMemoryRegion>,
 ) -> Result<Option<(u64, u64)>, Box<dyn std::error::Error>> {
     let Some(path) = machine.initrd_path() else {
         return Ok(None);
     };
+    let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
+    let mem_base = linux_mem.map_or(ddr.base, |mem| mem.base);
+    let mem_size = linux_mem.map_or(machine.ram_size(), |mem| mem.size);
+    let mem_end = mem_base
+        .checked_add(mem_size)
+        .ok_or("K230 Linux memory window end overflows u64")?;
     let data = std::fs::read(path)?;
-    let start = 0x0a10_0000;
-    let end = start + data.len() as u64;
-    if end > machine.ram_size() {
-        return Err("K230 initrd exceeds DDR".into());
+
+    let start = if let Some(kernel) = kernel {
+        let base = kernel
+            .low_addr
+            .checked_add((mem_size / 2).min(512 * 1024 * 1024))
+            .ok_or("K230 initrd start overflows u64")?;
+        align_up_4k(base.max(kernel.high_addr).max(mem_base))
+    } else {
+        0x0a10_0000
+    };
+    let end = start
+        .checked_add(data.len() as u64)
+        .ok_or("K230 initrd range end overflows u64")?;
+    if start < mem_base || end > mem_end {
+        return Err("K230 initrd exceeds Linux memory window".into());
     }
     loader::load_binary(&data, GPA::new(start), machine.address_space())?;
     Ok(Some((start, end)))
 }
 
+fn load_linux_memory_window(
+    machine: &K230Machine,
+) -> Result<Option<FdtMemoryRegion>, Box<dyn std::error::Error>> {
+    let Some(path) = machine.dtb_path() else {
+        return Ok(None);
+    };
+    let blob = std::fs::read(path)?;
+    Ok(dtb_first_memory_region(&blob)?)
+}
+
 fn load_and_fix_user_dtb(
     machine: &mut K230Machine,
     initrd_range: Option<(u64, u64)>,
+    linux_mem: Option<FdtMemoryRegion>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let Some(path) = machine.dtb_path() else {
         return Ok(0);
     };
     let blob = std::fs::read(path)?;
     let fixed = fixup_k230_dtb(&blob, initrd_range, machine.kernel_cmdline())?;
-    let addr = place_dtb(machine, &fixed)?;
+    let addr = place_dtb(machine, &fixed, linux_mem)?;
     machine.set_dtb_blob(fixed);
     Ok(addr)
 }
@@ -157,9 +302,30 @@ fn apply_loaders(
 fn place_dtb(
     machine: &K230Machine,
     blob: &[u8],
+    linux_mem: Option<FdtMemoryRegion>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
     let len = blob.len() as u64;
+    if let Some(mem) = linux_mem {
+        if len > mem.size {
+            return Err("K230 DTB blob larger than Linux memory window".into());
+        }
+        let mem_end = mem
+            .base
+            .checked_add(mem.size)
+            .ok_or("K230 Linux memory window end overflows u64")?;
+        let addr = align_down_2m(
+            mem_end
+                .checked_sub(len)
+                .ok_or("K230 DTB does not fit in Linux memory window")?,
+        );
+        if addr < mem.base {
+            return Err("K230 DTB does not fit in Linux memory window".into());
+        }
+        loader::load_binary(blob, GPA::new(addr), machine.address_space())?;
+        return Ok(addr);
+    }
+
     if len > machine.ram_size() {
         return Err("K230 DTB blob larger than DDR".into());
     }
@@ -174,7 +340,25 @@ fn place_dtb(
     Ok(addr)
 }
 
-fn write_k230_reset_vec(machine: &K230Machine, start_addr: u64, fdt_addr: u64) {
+fn align_up_4k(value: u64) -> u64 {
+    (value + 0xfff) & !0xfff
+}
+
+fn align_up_2m(value: u64) -> u64 {
+    (value + 0x1f_ffff) & !0x1f_ffff
+}
+
+fn align_down_2m(value: u64) -> u64 {
+    value & !0x1f_ffff
+}
+
+fn write_k230_reset_vec(
+    machine: &K230Machine,
+    start_addr: u64,
+    fdt_addr: u64,
+    kernel_entry: u64,
+    has_firmware: bool,
+) {
     let reset_vec: [u32; 10] = [
         0x0000_0297,
         0x0282_8613,
@@ -196,6 +380,13 @@ fn write_k230_reset_vec(machine: &K230Machine, start_addr: u64, fdt_addr: u64) {
             let dst = ptr.add(index * 4);
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, 4);
         }
+    }
+
+    let next_mode = if has_firmware { 1 } else { 3 };
+    let dynamic = DynamicInfo::new(kernel_entry, next_mode);
+    let bytes = dynamic.to_bytes();
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(40), bytes.len());
     }
 }
 

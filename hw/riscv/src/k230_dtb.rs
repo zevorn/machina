@@ -26,6 +26,12 @@ pub struct FdtReservation {
     pub size: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FdtMemoryRegion {
+    pub base: u64,
+    pub size: u64,
+}
+
 struct FdtBlocks<'a> {
     structure: &'a [u8],
     strings: &'a [u8],
@@ -112,6 +118,19 @@ pub fn dtb_mem_reservations(
     }
 
     Ok(reservations)
+}
+
+pub fn dtb_first_memory_region(
+    blob: &[u8],
+) -> Result<Option<FdtMemoryRegion>, String> {
+    let root = parse_dtb(blob)?;
+    let address_cells = node_u32_prop(&root, "#address-cells")?.unwrap_or(2);
+    let size_cells = node_u32_prop(&root, "#size-cells")?.unwrap_or(1);
+    if !(1..=2).contains(&address_cells) || !(1..=2).contains(&size_cells) {
+        return Err("unsupported DTB memory address or size cells".into());
+    }
+
+    find_first_memory_region(&root, address_cells, size_cells)
 }
 
 pub fn test_fixture_dtb_with_sdhci_nodes() -> Vec<u8> {
@@ -246,6 +265,64 @@ fn find_node_mut<'a>(
             .find(|child| child.name == part)?;
     }
     Some(current)
+}
+
+fn find_first_memory_region(
+    node: &FdtNode,
+    address_cells: u32,
+    size_cells: u32,
+) -> Result<Option<FdtMemoryRegion>, String> {
+    if node.name.split('@').next() == Some("memory") {
+        if let Some(prop) = node.props.iter().find(|prop| prop.name == "reg") {
+            let tuple_cells = address_cells + size_cells;
+            if prop.data.len() < tuple_cells as usize * 4 {
+                return Ok(None);
+            }
+            let mut cursor = 0;
+            let base = read_cells(&prop.data, &mut cursor, address_cells)?;
+            let size = read_cells(&prop.data, &mut cursor, size_cells)?;
+            if size != 0 {
+                return Ok(Some(FdtMemoryRegion { base, size }));
+            }
+        }
+    }
+
+    for child in &node.children {
+        if let Some(region) =
+            find_first_memory_region(child, address_cells, size_cells)?
+        {
+            return Ok(Some(region));
+        }
+    }
+
+    Ok(None)
+}
+
+fn node_u32_prop(node: &FdtNode, name: &str) -> Result<Option<u32>, String> {
+    let Some(prop) = node.props.iter().find(|prop| prop.name == name) else {
+        return Ok(None);
+    };
+    if prop.data.len() != 4 {
+        return Err(format!("DTB property {name} must be a u32"));
+    }
+    Ok(Some(u32::from_be_bytes(prop.data[..4].try_into().unwrap())))
+}
+
+fn read_cells(
+    data: &[u8],
+    cursor: &mut usize,
+    cells: u32,
+) -> Result<u64, String> {
+    let mut value = 0u64;
+    for _ in 0..cells {
+        let word = checked_slice(data, *cursor, 4)?;
+        value =
+            (value << 32) | u32::from_be_bytes(word.try_into().unwrap()) as u64;
+        *cursor = cursor
+            .checked_add(4)
+            .ok_or("DTB memory reg offset overflow")?;
+    }
+    Ok(value)
 }
 
 fn ensure_child<'a>(node: &'a mut FdtNode, name: &str) -> &'a mut FdtNode {

@@ -2,6 +2,7 @@ use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts};
 use machina_guest_riscv::riscv::cpu_model::RiscvVendor;
 use machina_guest_riscv::riscv::csr::PrivLevel;
+use machina_hw_core::fdt::FdtBuilder;
 use machina_hw_riscv::k230::{
     K230IrqMap, K230Machine, K230MemMap, K230WdtIndex, K230_MEMMAP,
     K230_PLIC_NUM_SOURCES,
@@ -134,4 +135,111 @@ fn k230_builtin_boot_enters_kernel_in_supervisor_mode() {
     assert_eq!(cpu.gpr[10], 0);
     assert_eq!(cpu.csr.medeleg, 0xb1ff);
     assert_eq!(cpu.csr.mideleg, 0x0222);
+}
+
+#[test]
+fn k230_builtin_boot_places_kernel_in_sdk_dtb_memory_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = dir.path().join("Image");
+    let dtb = dir.path().join("k230.dtb");
+    std::fs::write(&kernel, [0x13, 0x00, 0x00, 0x00]).unwrap();
+    std::fs::write(&dtb, sdk_memory_window_dtb()).unwrap();
+
+    let mut machine = K230Machine::new();
+    machine
+        .init(&MachineOpts {
+            kernel: Some(kernel),
+            dtb: Some(dtb),
+            bios: None,
+            bios_builtin: true,
+            ..opts()
+        })
+        .unwrap();
+    machine.boot().unwrap();
+
+    let cpus = machine.cpus_lock();
+    let cpu = cpus[0].as_ref().unwrap();
+    assert_eq!(cpu.pc, 0x0820_0000);
+    assert_eq!(cpu.priv_level, PrivLevel::Supervisor);
+    assert_eq!(cpu.gpr[10], 0);
+    assert_eq!(cpu.gpr[11], 0x0fe0_0000);
+    assert_eq!(
+        machine.read_ram_bytes(0x0820_0000, 4).unwrap(),
+        vec![0x13, 0x00, 0x00, 0x00]
+    );
+}
+
+#[test]
+fn k230_default_bios_loads_rustsbi_and_dynamic_info_for_sdk_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = dir.path().join("Image");
+    let dtb = dir.path().join("k230.dtb");
+    std::fs::write(&kernel, [0x13, 0x00, 0x00, 0x00]).unwrap();
+    std::fs::write(&dtb, sdk_memory_window_dtb()).unwrap();
+
+    let mut machine = K230Machine::new();
+    machine
+        .init(&MachineOpts {
+            kernel: Some(kernel),
+            dtb: Some(dtb),
+            bios: None,
+            bios_builtin: false,
+            ..opts()
+        })
+        .unwrap();
+    machine.boot().unwrap();
+
+    let bootrom = K230_MEMMAP[K230MemMap::Bootrom as usize].base;
+    let cpus = machine.cpus_lock();
+    let cpu = cpus[0].as_ref().unwrap();
+    assert_eq!(cpu.pc, bootrom);
+    assert_eq!(cpu.priv_level, PrivLevel::Machine);
+    drop(cpus);
+
+    assert_ne!(machine.read_ram_bytes(0, 4).unwrap(), vec![0, 0, 0, 0]);
+    assert_eq!(
+        machine.read_ram_bytes(0x0820_0000, 4).unwrap(),
+        vec![0x13, 0x00, 0x00, 0x00]
+    );
+    assert_eq!(machine.address_space().read(GPA::new(bootrom + 24), 8), 0);
+    assert_eq!(
+        machine.address_space().read(GPA::new(bootrom + 32), 8),
+        0x0fe0_0000
+    );
+    assert_eq!(
+        machine.address_space().read(GPA::new(bootrom + 40), 8),
+        0x4942_534f
+    );
+    assert_eq!(
+        machine.address_space().read(GPA::new(bootrom + 56), 8),
+        0x0820_0000
+    );
+    assert_eq!(machine.address_space().read(GPA::new(bootrom + 64), 8), 1);
+}
+
+fn sdk_memory_window_dtb() -> Vec<u8> {
+    let mut fdt = FdtBuilder::new();
+    fdt.begin_node("");
+    fdt.property_u32("#address-cells", 2);
+    fdt.property_u32("#size-cells", 2);
+
+    fdt.begin_node("chosen");
+    fdt.end_node();
+
+    fdt.begin_node("memory@0");
+    fdt.property_string("device_type", "memory");
+    fdt.property_u32_list("reg", &[0, 0x0820_0000, 0, 0x07df_f000]);
+    fdt.end_node();
+
+    fdt.begin_node("soc");
+    fdt.begin_node("sdhci0@91580000");
+    fdt.property_string("status", "okay");
+    fdt.end_node();
+    fdt.begin_node("sdhci1@91581000");
+    fdt.property_string("status", "okay");
+    fdt.end_node();
+    fdt.end_node();
+
+    fdt.end_node();
+    fdt.finish()
 }
