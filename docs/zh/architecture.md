@@ -988,6 +988,10 @@ UART -----> PLIC source 10
 UART、2 个 K230 watchdog，以及 SDK 地址图中的 unimplemented window，使
 Linux、OpenSBI 和 SDK U-Boot 看到预期内存布局。
 
+当前 Machina 目标要求 K230 Linux 使用标准 RISC-V PTE 属性。T-HEAD
+MAEE PTE 属性属于厂商扩展，后续再单独建模；第一阶段 K230 Linux 切片
+保持和 QEMU K230 模型一致，即用 `QEMU_NO_THEAD_MAEE` 编译 SDK 内核。
+
 #### boot.rs -- 启动设置
 
 `hw/riscv/src/boot.rs` 负责加载 bios/kernel 并初始化启动上下文：

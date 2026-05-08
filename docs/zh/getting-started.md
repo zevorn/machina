@@ -56,6 +56,65 @@ Machina 当前暴露三个用户可见机器：
 ./target/release/machina -M ?
 ```
 
+## 启动 K230 SDK Linux
+
+`k230` machine 对齐 QEMU 的 K230 SDK 兼容启动约定：Machina 不生成 K230
+设备树。Linux direct boot 需要传入 SDK DTB，固件用它把板级拓扑交给
+Linux，Machina 也会基于它更新 `/chosen` 里的 `-append` 和 `-initrd`
+信息。
+
+请把 SDK Linux 编译成标准 RISC-V PTE。当前 Machina K230 路径暂不建模
+T-HEAD MAEE 页属性位，这一点和作为 oracle 的 QEMU K230 路径保持一致。
+在 Kendryte SDK 源码树里，重编 little-core Linux 时传入
+`-DQEMU_NO_THEAD_MAEE`：
+
+```bash
+cd ~/k230_sdk
+make CONF=k230_canmv_defconfig linux-clean
+make CONF=k230_canmv_defconfig \
+    KCFLAGS="-DDBGLV=0 -DQEMU_NO_THEAD_MAEE" \
+    linux-rebuild
+cp output/k230_canmv_defconfig/little/linux/arch/riscv/boot/Image \
+   output/k230_canmv_defconfig/images/little-core/Image
+```
+
+Linux direct boot 使用 SDK 的 `Image`、`k230.dtb` 和 initramfs：
+
+```bash
+SDK=~/k230_sdk/output/k230_canmv_defconfig
+./target/release/machina -M k230 \
+    -kernel "$SDK/images/little-core/Image" \
+    -dtb "$SDK/images/little-core/k230.dtb" \
+    -initrd "$SDK/images/little-core/rootfs.cpio.gz" \
+    -append "console=ttyS0,115200 earlycon=sbi cma=0" \
+    -nographic
+```
+
+SDK U-Boot 流程用 `-bios` 从 M-mode 启动 U-Boot。在 SDK 存储路径建模前，
+先通过 loader device 把 OpenSBI、Linux、initrd 和 DTB 放入内存，然后在
+U-Boot 里手动执行 `bootm`：
+
+```bash
+SDK=~/k230_sdk/output/k230_canmv_defconfig
+IMAGE=$SDK/images/little-core/Image
+INITRD=$SDK/images/little-core/rootfs.cpio.gz
+DTB=$SDK/images/little-core/k230.dtb
+FWJUMP_UIMAGE=/tmp/k230-fw-jump.uImage
+
+"$SDK/little/buildroot-ext/host/bin/mkimage" \
+    -A riscv -O linux -T kernel -C none \
+    -a 0x08000000 -e 0x08000000 -n opensbi \
+    -d "$SDK/images/little-core/fw_jump.bin" "$FWJUMP_UIMAGE"
+
+./target/release/machina -M k230 \
+    -bios "$SDK/little/uboot/u-boot" \
+    -device loader,file="$FWJUMP_UIMAGE",addr=0x0c100000,force-raw=on \
+    -device loader,file="$IMAGE",addr=0x08200000,force-raw=on \
+    -device loader,file="$INITRD",addr=0x0a100000,force-raw=on \
+    -device loader,file="$DTB",addr=0x0a000000,force-raw=on \
+    -nographic
+```
+
 ## 在 Machina 上启动 RISC-V Linux 内核
 
 本文档介绍如何在 machina `riscv64-ref` 平台上启动标准

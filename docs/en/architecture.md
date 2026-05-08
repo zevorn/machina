@@ -990,6 +990,11 @@ SDK-compatible board. It wires one T-HEAD C908 CPU profile, PLIC, ACLINT, five
 UARTs, two K230 watchdogs, and unimplemented SDK address windows so Linux,
 OpenSBI, and SDK U-Boot see the expected memory map.
 
+K230 Linux should be built with standard RISC-V PTE attributes for the current
+Machina target. T-HEAD MAEE PTE attributes are vendor-specific and are left as
+future work; this keeps the first K230 Linux slice aligned with QEMU's K230
+model, which also runs the SDK kernel with `QEMU_NO_THEAD_MAEE`.
+
 #### boot.rs -- Boot Setup
 
 `hw/riscv/src/boot.rs` handles loading bios/kernel and initializing the boot context:

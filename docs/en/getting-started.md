@@ -57,6 +57,65 @@ List supported machines with:
 ./target/release/machina -M ?
 ```
 
+## Booting K230 SDK Linux
+
+The `k230` machine follows QEMU's SDK-compatible K230 boot contract: Machina
+does not synthesize a K230 device tree. Linux direct boot requires the SDK DTB
+so firmware can pass the board topology to Linux and Machina can update
+`/chosen` for `-append` and `-initrd`.
+
+Build the SDK Linux kernel with standard RISC-V PTE bits. Current Machina K230
+support intentionally does not model T-HEAD MAEE page attributes yet, matching
+the QEMU K230 path used as the oracle. In a Kendryte SDK tree, pass
+`-DQEMU_NO_THEAD_MAEE` when rebuilding the little-core Linux kernel:
+
+```bash
+cd ~/k230_sdk
+make CONF=k230_canmv_defconfig linux-clean
+make CONF=k230_canmv_defconfig \
+    KCFLAGS="-DDBGLV=0 -DQEMU_NO_THEAD_MAEE" \
+    linux-rebuild
+cp output/k230_canmv_defconfig/little/linux/arch/riscv/boot/Image \
+   output/k230_canmv_defconfig/images/little-core/Image
+```
+
+Direct Linux boot uses the SDK `Image`, `k230.dtb`, and initramfs:
+
+```bash
+SDK=~/k230_sdk/output/k230_canmv_defconfig
+./target/release/machina -M k230 \
+    -kernel "$SDK/images/little-core/Image" \
+    -dtb "$SDK/images/little-core/k230.dtb" \
+    -initrd "$SDK/images/little-core/rootfs.cpio.gz" \
+    -append "console=ttyS0,115200 earlycon=sbi cma=0" \
+    -nographic
+```
+
+The SDK U-Boot flow starts U-Boot in M-mode with `-bios`. Until the SDK
+storage path is modeled, place OpenSBI, Linux, initrd, and DTB in RAM with
+loader devices and run `bootm` manually from U-Boot:
+
+```bash
+SDK=~/k230_sdk/output/k230_canmv_defconfig
+IMAGE=$SDK/images/little-core/Image
+INITRD=$SDK/images/little-core/rootfs.cpio.gz
+DTB=$SDK/images/little-core/k230.dtb
+FWJUMP_UIMAGE=/tmp/k230-fw-jump.uImage
+
+"$SDK/little/buildroot-ext/host/bin/mkimage" \
+    -A riscv -O linux -T kernel -C none \
+    -a 0x08000000 -e 0x08000000 -n opensbi \
+    -d "$SDK/images/little-core/fw_jump.bin" "$FWJUMP_UIMAGE"
+
+./target/release/machina -M k230 \
+    -bios "$SDK/little/uboot/u-boot" \
+    -device loader,file="$FWJUMP_UIMAGE",addr=0x0c100000,force-raw=on \
+    -device loader,file="$IMAGE",addr=0x08200000,force-raw=on \
+    -device loader,file="$INITRD",addr=0x0a100000,force-raw=on \
+    -device loader,file="$DTB",addr=0x0a000000,force-raw=on \
+    -nographic
+```
+
 ## Booting RISC-V Linux on Machina
 
 This section describes how to boot a standard RISC-V Linux
