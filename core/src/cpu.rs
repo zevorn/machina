@@ -12,6 +12,7 @@ pub enum ArchExitAction {
     FlushAllTb,
     FlushDirtyTbPages(Vec<u64>),
     FlushPendingTb,
+    FlushPendingTbNonRetired(u16),
 }
 
 /// Trait for guest CPU state used by the execution loop.

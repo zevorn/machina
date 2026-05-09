@@ -350,6 +350,24 @@ fn test_fullsys_illegal_tail_does_not_increment_instret() {
 }
 
 #[test]
+fn test_fullsys_illegal_priv_csr_tail_does_not_increment_instret() {
+    let (code, handler) = c_nop_tail_trap_with_handler(csrrs(1, 0x7ff, 0));
+
+    let cpu_model = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
+    let (mut env, mut cpu, _as, _ram) =
+        setup_fullsys_with_cpu(1024 * 1024, &code, cpu_model);
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.csr.mtvec = handler;
+    cpu.cpu.csr.instret = u64::MAX - 1;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.csr.mcause, 2);
+    assert_eq!(cpu.cpu.csr.instret, u64::MAX);
+}
+
+#[test]
 fn test_fullsys_minstret_write_suppresses_increment() {
     let code = encode(&[
         csrwi(0xb02, 0),     // minstret = 0
