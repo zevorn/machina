@@ -236,8 +236,28 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "-initrd" => {
                 i += 1;
-                let s = args.get(i).ok_or("-initrd requires argument")?;
-                cli.initrd = Some(PathBuf::from(s));
+                let path: PathBuf = args
+                    .get(i)
+                    .ok_or("-initrd requires argument")?
+                    .clone()
+                    .into();
+                match path.try_exists() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(format!(
+                            "-initrd: file not found: {}",
+                            path.display()
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "-initrd: cannot access {}: {}",
+                            path.display(),
+                            e
+                        ));
+                    }
+                }
+                cli.initrd = Some(path);
             }
             "-monitor" => {
                 i += 1;
