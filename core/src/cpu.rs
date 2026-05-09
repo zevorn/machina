@@ -12,6 +12,7 @@ pub enum ArchExitAction {
     FlushAllTb,
     FlushDirtyTbPages(Vec<u64>),
     FlushPendingTb,
+    FlushPendingTbInstretDiscarded,
     FlushPendingTbNonRetired(u16),
 }
 
@@ -77,6 +78,9 @@ pub trait GuestCpu {
     /// decodes it, and executes the CSR operation. Returns
     /// true if successful, false if illegal instruction.
     fn handle_priv_csr(&mut self) -> bool {
+        false
+    }
+    fn take_instret_write_suppression(&mut self) -> bool {
         false
     }
 

@@ -56,6 +56,18 @@ fn should_flush_data_tlb_on_status_write(csr_addr: u16) -> bool {
     matches!(csr_addr, CSR_MSTATUS | CSR_SSTATUS)
 }
 
+fn writes_instret_counter(csr_addr: u16, funct3: u32, rs1_idx: usize) -> bool {
+    use machina_guest_riscv::riscv::csr::{CSR_INSTRET, CSR_MINSTRET};
+    const CSR_MINSTRETH: u16 = 0xB82;
+
+    let writes = match funct3 {
+        1 | 5 => true,
+        2 | 3 | 6 | 7 => rs1_idx != 0,
+        _ => false,
+    };
+    writes && matches!(csr_addr, CSR_INSTRET | CSR_MINSTRET | CSR_MINSTRETH)
+}
+
 /// Compute the byte offset of the TLB Box pointer from
 /// the start of RiscvCpu (env pointer). Used by the JIT
 /// to emit inline TLB lookups.
@@ -134,6 +146,7 @@ pub struct FullSystemCpu {
     /// in handle_interrupt so S-mode sees STI instead of
     /// a raw M-mode timer interrupt.  Set by builtin mode.
     pub builtin_mode: bool,
+    instret_write_suppression: bool,
 }
 
 // SAFETY: ram_ptr points to mmap'd memory owned by
@@ -179,6 +192,7 @@ impl FullSystemCpu {
             htif_tohost_off: None,
             htif_exit_code: Arc::new(AtomicU64::new(0)),
             builtin_mode: false,
+            instret_write_suppression: false,
         }
     }
 
@@ -989,6 +1003,7 @@ impl GuestCpu for FullSystemCpu {
 
     fn handle_priv_csr(&mut self) -> bool {
         let pc = self.cpu.pc;
+        self.instret_write_suppression = false;
         self.cpu.fault_pc = 0;
         let phys_pc = self.translate_pc(pc);
         if phys_pc == u64::MAX {
@@ -1075,6 +1090,9 @@ impl GuestCpu for FullSystemCpu {
             {
                 return false;
             }
+            if writes_instret_counter(csr_addr, funct3, rs1_idx) {
+                self.instret_write_suppression = true;
+            }
         }
 
         if do_write {
@@ -1118,6 +1136,12 @@ impl GuestCpu for FullSystemCpu {
 
         self.cpu.pc += 4;
         true
+    }
+
+    fn take_instret_write_suppression(&mut self) -> bool {
+        let suppression = self.instret_write_suppression;
+        self.instret_write_suppression = false;
+        suppression
     }
 }
 

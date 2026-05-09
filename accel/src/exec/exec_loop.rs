@@ -324,13 +324,18 @@ where
                 per_cpu.stats.real_exit += 1;
                 let action = cpu.handle_arch_exit(v as u64);
                 if account_after_arch_exit {
-                    let post_nonretired = match &action {
-                        ArchExitAction::FlushPendingTbNonRetired(n) => *n,
-                        _ => 0,
+                    let (post_discarded, post_nonretired) = match &action {
+                        ArchExitAction::FlushPendingTbInstretDiscarded => {
+                            (tb.icount, 0)
+                        }
+                        ArchExitAction::FlushPendingTbNonRetired(n) => (0, *n),
+                        _ => (0, 0),
                     };
                     cpu.on_tb_executed(
                         tb_size,
-                        instret.saturating_sub(post_nonretired),
+                        instret
+                            .saturating_sub(post_discarded)
+                            .saturating_sub(post_nonretired),
                     );
                 }
                 match action {
@@ -368,6 +373,7 @@ where
                         next_tb_hint = None;
                     }
                     ArchExitAction::FlushPendingTb
+                    | ArchExitAction::FlushPendingTbInstretDiscarded
                     | ArchExitAction::FlushPendingTbNonRetired(_) => {
                         flush_pending_tbs(
                             shared,

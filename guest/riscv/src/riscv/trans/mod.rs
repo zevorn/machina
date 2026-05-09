@@ -458,13 +458,13 @@ impl Decode<Context> for RiscvDisasContext {
 
     fn trans_csrrw(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
-        self.suppress_instret_write_increment(ir, a.csr, 1, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
                 if self.csr_helper != 0 {
                     let rs1 = self.gpr_or_zero(ir, a.rs1);
                     self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 1, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 1, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -475,24 +475,26 @@ impl Decode<Context> for RiscvDisasContext {
         if !self.gen_csr_write(ir, a.csr, rs1) {
             if self.csr_helper != 0 {
                 self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 1, a.rd);
+                self.suppress_instret_write_increment(ir, a.csr, 1, a.rs1);
                 return true;
             }
             self.gen_priv_csr_exit(ir);
             return true;
         }
+        self.suppress_instret_write_increment(ir, a.csr, 1, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
 
     fn trans_csrrs(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
-        self.suppress_instret_write_increment(ir, a.csr, 2, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
                 if self.csr_helper != 0 {
                     let rs1 = self.gpr_or_zero(ir, a.rs1);
                     self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 2, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 2, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -506,25 +508,27 @@ impl Decode<Context> for RiscvDisasContext {
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
                     self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 2, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 2, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
                 return true;
             }
         }
+        self.suppress_instret_write_increment(ir, a.csr, 2, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
 
     fn trans_csrrc(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
-        self.suppress_instret_write_increment(ir, a.csr, 3, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
                 if self.csr_helper != 0 {
                     let rs1 = self.gpr_or_zero(ir, a.rs1);
                     self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 3, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 3, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -540,25 +544,27 @@ impl Decode<Context> for RiscvDisasContext {
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
                     self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 3, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 3, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
                 return true;
             }
         }
+        self.suppress_instret_write_increment(ir, a.csr, 3, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
 
     fn trans_csrrwi(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
-        self.suppress_instret_write_increment(ir, a.csr, 5, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
                 if self.csr_helper != 0 {
                     let z = ir.new_const(Type::I64, a.rs1 as u64);
                     self.gen_csr_helper(ir, a.csr, z, a.rs1, 5, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 5, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -569,24 +575,26 @@ impl Decode<Context> for RiscvDisasContext {
         if !self.gen_csr_write(ir, a.csr, zimm) {
             if self.csr_helper != 0 {
                 self.gen_csr_helper(ir, a.csr, zimm, a.rs1, 5, a.rd);
+                self.suppress_instret_write_increment(ir, a.csr, 5, a.rs1);
                 return true;
             }
             self.gen_priv_csr_exit(ir);
             return true;
         }
+        self.suppress_instret_write_increment(ir, a.csr, 5, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
 
     fn trans_csrrsi(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
-        self.suppress_instret_write_increment(ir, a.csr, 6, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
                 if self.csr_helper != 0 {
                     let z = ir.new_const(Type::I64, a.rs1 as u64);
                     self.gen_csr_helper(ir, a.csr, z, a.rs1, 6, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 6, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -600,25 +608,27 @@ impl Decode<Context> for RiscvDisasContext {
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
                     self.gen_csr_helper(ir, a.csr, zimm, a.rs1, 6, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 6, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
                 return true;
             }
         }
+        self.suppress_instret_write_increment(ir, a.csr, 6, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
 
     fn trans_csrrci(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
-        self.suppress_instret_write_increment(ir, a.csr, 7, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
                 if self.csr_helper != 0 {
                     let z = ir.new_const(Type::I64, a.rs1 as u64);
                     self.gen_csr_helper(ir, a.csr, z, a.rs1, 7, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 7, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -634,12 +644,14 @@ impl Decode<Context> for RiscvDisasContext {
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
                     self.gen_csr_helper(ir, a.csr, zimm, a.rs1, 7, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 7, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
                 return true;
             }
         }
+        self.suppress_instret_write_increment(ir, a.csr, 7, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }

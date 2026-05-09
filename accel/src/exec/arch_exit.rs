@@ -59,6 +59,9 @@ pub fn handle_riscv_arch_exit<C: GuestCpu>(
                 cpu.handle_exception(2, 0);
                 return ArchExitAction::FlushPendingTbNonRetired(1);
             }
+            if cpu.take_instret_write_suppression() {
+                return ArchExitAction::FlushPendingTbInstretDiscarded;
+            }
             ArchExitAction::FlushPendingTb
         }
         EXCP_RISCV_EBREAK => {

@@ -368,6 +368,40 @@ fn test_fullsys_illegal_priv_csr_tail_does_not_increment_instret() {
 }
 
 #[test]
+fn test_fullsys_illegal_minstret_write_counts_prior_instructions() {
+    use machina_guest_riscv::riscv::csr::{
+        PrivLevel, CSR_PMPADDR0, CSR_PMPCFG0,
+    };
+
+    let (code, handler) = c_nop_tail_trap_with_handler(csrwi(0xb02, 0));
+
+    let cpu_model = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
+    let (mut env, mut cpu, _as, _ram) =
+        setup_fullsys_with_cpu(1024 * 1024, &code, cpu_model);
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.priv_level = PrivLevel::Supervisor;
+    cpu.cpu
+        .csr
+        .write(CSR_PMPADDR0, 0x3fff_ffff_ffff, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .csr
+        .write(CSR_PMPCFG0, 0x0f, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .pmp
+        .sync_from_csr(&cpu.cpu.csr.pmpcfg, &cpu.cpu.csr.pmpaddr);
+    cpu.cpu.csr.mtvec = handler;
+    cpu.cpu.csr.instret = u64::MAX - 1;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.csr.mcause, 2);
+    assert_eq!(cpu.cpu.csr.instret, u64::MAX);
+}
+
+#[test]
 fn test_fullsys_minstret_write_suppresses_increment() {
     let code = encode(&[
         csrwi(0xb02, 0),     // minstret = 0
