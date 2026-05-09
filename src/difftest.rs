@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use machina_accel::exec::ExecEnv;
+use machina_accel::ir::opcode::Opcode;
 use machina_accel::ir::tb::{
     decode_tb_exit, EXCP_ECALL, EXCP_FENCE_I, EXCP_MRET, EXCP_PRIV_CSR,
     EXCP_SFENCE_VMA, EXCP_SRET, EXCP_WFI, TB_EXIT_NOCHAIN,
@@ -653,6 +654,8 @@ fn tb_gen_single<B: HostCodeGen>(
     unsafe {
         let tb = shared.tb_store.get_mut(tb_idx);
         tb.size = guest_size;
+        tb.icount = count_guest_insns(&guard.ir_ctx);
+        tb.instret_discarded = guard.ir_ctx.instret_discarded;
         tb.phys_pc = cpu.last_phys_pc();
     }
 
@@ -684,6 +687,15 @@ fn tb_gen_single<B: HostCodeGen>(
     per_cpu.jump_cache.insert(pc, tb_idx);
 
     Some(tb_idx)
+}
+
+fn count_guest_insns(ir: &machina_accel::ir::context::Context) -> u16 {
+    let count = ir
+        .ops()
+        .iter()
+        .filter(|op| op.opc == Opcode::InsnStart)
+        .count();
+    u16::try_from(count).unwrap_or(u16::MAX).max(1)
 }
 
 /// Check if an IO error is a connection reset.

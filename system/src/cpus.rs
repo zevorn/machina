@@ -876,10 +876,11 @@ impl GuestCpu for FullSystemCpu {
         }
     }
 
-    fn on_tb_executed(&mut self, guest_size: u32) {
-        let ticks = u64::from(guest_size).max(1);
-        self.cpu.csr.cycle = self.cpu.csr.cycle.wrapping_add(ticks);
-        self.cpu.csr.instret = self.cpu.csr.instret.wrapping_add(ticks);
+    fn on_tb_executed(&mut self, guest_size: u32, guest_insns: u16) {
+        let cycles = u64::from(guest_size).max(1);
+        let insns = u64::from(guest_insns);
+        self.cpu.csr.cycle = self.cpu.csr.cycle.wrapping_add(cycles);
+        self.cpu.csr.instret = self.cpu.csr.instret.wrapping_add(insns);
     }
 
     fn take_tb_flush_pending(&mut self) -> bool {
@@ -1036,7 +1037,6 @@ impl GuestCpu for FullSystemCpu {
                 Err(_) => return false,
             },
         };
-
         // Compute new value based on funct3.
         let new_val = match funct3 {
             1 | 5 => rs1_val,        // CSRRW / CSRRWI

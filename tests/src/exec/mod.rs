@@ -133,7 +133,7 @@ impl GuestCpu for TestCpu {
         self.cpu.mmu.flush();
     }
 
-    fn on_tb_executed(&mut self, _guest_size: u32) {
+    fn on_tb_executed(&mut self, _guest_size: u32, _guest_insns: u16) {
         self.executed_tbs = self.executed_tbs.wrapping_add(1);
     }
 }

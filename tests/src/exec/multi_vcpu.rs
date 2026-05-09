@@ -120,6 +120,7 @@ fn new_per_cpu() -> PerCpuState {
     PerCpuState {
         jump_cache: machina_accel::ir::tb::JumpCache::new(),
         stats: machina_accel::exec::ExecStats::default(),
+        atomic_lock_held: false,
     }
 }
 

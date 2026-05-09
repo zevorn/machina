@@ -18,6 +18,7 @@ pub use tb_store::TbStore;
 
 use std::cell::UnsafeCell;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::code_buffer::CodeBuffer;
@@ -107,7 +108,7 @@ pub struct SharedState<B: HostCodeGen> {
     pub code_gen_start: usize,
     /// Serializes code generation (IR + emit).
     pub translate_lock: Mutex<TranslateGuard>,
-    pub atomic_lock: Mutex<()>,
+    pub atomic_lock: AtomicTbLock,
 }
 
 // SAFETY: code_buf emit is serialized by translate_lock;
@@ -133,10 +134,70 @@ impl<B: HostCodeGen> SharedState<B> {
     }
 }
 
+/// Spin lock used only to serialize translated atomic TB execution.
+///
+/// It can be force-unlocked after helper longjmp because Rust destructors are
+/// skipped by that control transfer.
+pub struct AtomicTbLock {
+    locked: AtomicBool,
+}
+
+pub struct AtomicTbLockGuard<'a> {
+    lock: &'a AtomicTbLock,
+}
+
+impl AtomicTbLock {
+    pub fn new() -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+        }
+    }
+
+    pub fn lock(&self) -> AtomicTbLockGuard<'_> {
+        let mut spins = 0usize;
+        while self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+            spins = spins.wrapping_add(1);
+            if spins.is_multiple_of(64) {
+                std::thread::yield_now();
+            }
+        }
+        AtomicTbLockGuard { lock: self }
+    }
+
+    pub fn try_lock(&self) -> Result<AtomicTbLockGuard<'_>, &'static str> {
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map(|_| AtomicTbLockGuard { lock: self })
+            .map_err(|_| "WouldBlock")
+    }
+
+    pub(crate) fn force_unlock(&self) {
+        self.locked.store(false, Ordering::Release);
+    }
+}
+
+impl Default for AtomicTbLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for AtomicTbLockGuard<'_> {
+    fn drop(&mut self) {
+        self.lock.force_unlock();
+    }
+}
+
 /// Per-vCPU state (not shared across threads).
 pub struct PerCpuState {
     pub jump_cache: JumpCache,
     pub stats: ExecStats,
+    pub atomic_lock_held: bool,
 }
 
 impl PerCpuState {
@@ -144,6 +205,7 @@ impl PerCpuState {
         Self {
             jump_cache: JumpCache::new(),
             stats: ExecStats::default(),
+            atomic_lock_held: false,
         }
     }
 }
@@ -181,7 +243,7 @@ impl<B: HostCodeGen> ExecEnv<B> {
             backend,
             code_gen_start,
             translate_lock: Mutex::new(TranslateGuard { ir_ctx }),
-            atomic_lock: Mutex::new(()),
+            atomic_lock: AtomicTbLock::new(),
         });
 
         Self {
@@ -189,6 +251,7 @@ impl<B: HostCodeGen> ExecEnv<B> {
             per_cpu: PerCpuState {
                 jump_cache: JumpCache::new(),
                 stats: ExecStats::default(),
+                atomic_lock_held: false,
             },
         }
     }

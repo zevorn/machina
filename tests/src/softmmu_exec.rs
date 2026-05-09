@@ -278,6 +278,41 @@ fn test_fullsys_basic_exec() {
     assert_eq!(cpu.cpu.gpr[2], 99);
 }
 
+#[test]
+fn test_fullsys_rvc_instret_counts_retired_instructions() {
+    let mut code = Vec::new();
+    push16(&mut code, 0x0001); // c.nop
+    push32(&mut code, ecall());
+
+    let cpu_model = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
+    let (mut env, mut cpu, _as, _ram) =
+        setup_fullsys_with_cpu(1024 * 1024, &code, cpu_model);
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.csr.instret = u64::MAX - 1;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.csr.instret, 0);
+}
+
+#[test]
+fn test_fullsys_minstret_write_suppresses_increment() {
+    let code = encode(&[
+        csrwi(0xb02, 0),     // minstret = 0
+        csrrs(10, 0xb02, 0), // a0 = minstret
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys(1024 * 1024, &code);
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[10], 0);
+}
+
 /// Test: RAM load/store through TLB in M-mode BARE.
 /// Stores a value then loads it back.
 #[test]
@@ -401,6 +436,11 @@ fn csrrw(rd: u32, csr: u16, rs1: u32) -> u32 {
 /// CSRRS rd, csr, rs1 (read-set; rs1=0 = read-only)
 fn csrrs(rd: u32, csr: u16, rs1: u32) -> u32 {
     ((csr as u32) << 20) | (rs1 << 15) | (0b010 << 12) | (rd << 7) | 0x73
+}
+
+/// CSRRWI x0, csr, imm
+fn csrwi(csr: u16, imm: u32) -> u32 {
+    ((csr as u32) << 20) | (imm << 15) | (0b101 << 12) | 0x73
 }
 
 /// JAL rd, offset (J-type, offset in bytes)

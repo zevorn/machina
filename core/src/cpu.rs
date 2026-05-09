@@ -116,8 +116,11 @@ pub trait GuestCpu {
     }
 
     /// Advance architecture runtime state after one translated TB executed.
+    ///
     /// `guest_size` is the translated guest byte span for the TB.
-    fn on_tb_executed(&mut self, _guest_size: u32) {}
+    /// `guest_insns` is the guest instruction count for retired-instruction
+    /// accounting after architecture-specific suppressions.
+    fn on_tb_executed(&mut self, _guest_size: u32, _guest_insns: u16) {}
 
     /// Returns true if all TBs should be invalidated
     /// (e.g. after satp write). Clears the flag.

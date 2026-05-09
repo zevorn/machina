@@ -53,6 +53,7 @@ pub struct Context {
     /// chaining.
     pub tb_idx: u32,
     pub contains_atomic: bool,
+    pub instret_discarded: u16,
 }
 
 impl Context {
@@ -71,6 +72,7 @@ impl Context {
             gen_insn_end_off: Vec::with_capacity(MAX_INSNS),
             tb_idx: 0,
             contains_atomic: false,
+            instret_discarded: 0,
         }
     }
 
@@ -102,6 +104,7 @@ impl Context {
         self.gen_insn_end_off.clear();
         self.frame_alloc_end = self.frame_start;
         self.contains_atomic = false;
+        self.instret_discarded = 0;
     }
 
     // -- Temp allocation --
@@ -299,6 +302,7 @@ impl Context {
             gen_insn_end_off: Vec::new(),
             tb_idx: 0,
             contains_atomic: false,
+            instret_discarded: 0,
         }
     }
 }

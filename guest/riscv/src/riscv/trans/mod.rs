@@ -458,6 +458,7 @@ impl Decode<Context> for RiscvDisasContext {
 
     fn trans_csrrw(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
+        self.suppress_instret_write_increment(ir, a.csr, 1, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
@@ -485,6 +486,7 @@ impl Decode<Context> for RiscvDisasContext {
 
     fn trans_csrrs(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
+        self.suppress_instret_write_increment(ir, a.csr, 2, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
@@ -516,6 +518,7 @@ impl Decode<Context> for RiscvDisasContext {
 
     fn trans_csrrc(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
+        self.suppress_instret_write_increment(ir, a.csr, 3, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
@@ -549,6 +552,7 @@ impl Decode<Context> for RiscvDisasContext {
 
     fn trans_csrrwi(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
+        self.suppress_instret_write_increment(ir, a.csr, 5, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
@@ -576,6 +580,7 @@ impl Decode<Context> for RiscvDisasContext {
 
     fn trans_csrrsi(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
+        self.suppress_instret_write_increment(ir, a.csr, 6, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {
@@ -607,6 +612,7 @@ impl Decode<Context> for RiscvDisasContext {
 
     fn trans_csrrci(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
         require_cfg!(self, ext_zicsr);
+        self.suppress_instret_write_increment(ir, a.csr, 7, a.rs1);
         let old = match self.gen_csr_read(ir, a.csr) {
             Some(v) => v,
             None => {

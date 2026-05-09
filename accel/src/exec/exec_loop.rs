@@ -5,9 +5,10 @@ use crate::plat::{self, JmpBuf};
 use super::{ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING};
 use crate::cpu::{ArchExitAction, GuestCpu};
 use crate::ir::context::Context;
+use crate::ir::opcode::Opcode;
 use crate::ir::tb::{
     cflags::CF_SINGLE_STEP, decode_tb_exit, TranslationBlock, EXCP_ARCH_BASE,
-    EXCP_UNDEF, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
+    EXCP_PRIV_CSR, EXCP_UNDEF, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
 };
 use crate::translate::translate;
 use crate::HostCodeGen;
@@ -71,6 +72,10 @@ where
 
     'dispatch: loop {
         if plat::do_setjmp(jmp_ptr) != 0 {
+            if per_cpu.atomic_lock_held {
+                per_cpu.atomic_lock_held = false;
+                shared.atomic_lock.force_unlock();
+            }
             // Helper raised an exception via longjmp.
             next_tb_hint = None;
         }
@@ -164,11 +169,26 @@ where
             continue;
         }
 
-        let raw_exit = cpu_tb_exec(shared, cpu, tb_idx);
+        let raw_exit = if shared.tb_store.get(tb_idx).contains_atomic {
+            let atomic_guard = shared.atomic_lock.lock();
+            per_cpu.atomic_lock_held = true;
+            let raw_exit = cpu_tb_exec(shared, cpu, tb_idx);
+            per_cpu.atomic_lock_held = false;
+            drop(atomic_guard);
+            raw_exit
+        } else {
+            cpu_tb_exec(shared, cpu, tb_idx)
+        };
         let (last_tb, exit_code) = decode_tb_exit(raw_exit);
 
         let src_tb = last_tb.unwrap_or(tb_idx);
-        cpu.on_tb_executed(shared.tb_store.get(src_tb).size);
+        let tb = shared.tb_store.get(src_tb);
+        let tb_size = tb.size;
+        let instret = tb.icount.saturating_sub(tb.instret_discarded);
+        let account_after_arch_exit = exit_code == EXCP_PRIV_CSR as usize;
+        if !account_after_arch_exit {
+            cpu.on_tb_executed(tb_size, instret);
+        }
 
         // Self-modifying code detection: if stores wrote
         // to pages containing translated code, invalidate
@@ -298,7 +318,11 @@ where
             }
             v if v >= EXCP_ARCH_BASE as usize => {
                 per_cpu.stats.real_exit += 1;
-                match cpu.handle_arch_exit(v as u64) {
+                let action = cpu.handle_arch_exit(v as u64);
+                if account_after_arch_exit {
+                    cpu.on_tb_executed(tb_size, instret);
+                }
+                match action {
                     ArchExitAction::Continue => {}
                     ArchExitAction::Halted => return ExitReason::Halted,
                     ArchExitAction::Ecall { priv_level } => {
@@ -547,10 +571,13 @@ where
         }
         return None;
     }
+    let guest_insns = count_guest_insns(&guard.ir_ctx);
     let phys_pc = cpu.last_phys_pc();
     unsafe {
         let tb = shared.tb_store.get_mut(tb_idx);
         tb.size = guest_size;
+        tb.icount = guest_insns;
+        tb.instret_discarded = guard.ir_ctx.instret_discarded;
         tb.phys_pc = phys_pc;
         // Stamp TB with current global generation so
         // that invalidate_all's O(1) generation bump
@@ -606,6 +633,15 @@ where
     }
 
     Some(tb_idx)
+}
+
+fn count_guest_insns(ir: &Context) -> u16 {
+    let count = ir
+        .ops()
+        .iter()
+        .filter(|op| op.opc == Opcode::InsnStart)
+        .count();
+    u16::try_from(count).unwrap_or(u16::MAX).max(1)
 }
 
 /// Execute a single TB and return the exit value.
