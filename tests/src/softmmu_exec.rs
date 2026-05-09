@@ -188,6 +188,11 @@ fn ecall() -> u32 {
     0x00000073
 }
 
+/// EBREAK
+fn ebreak() -> u32 {
+    0x00100073
+}
+
 /// SD rs2, offset(rs1)
 fn sd(rs2: u32, rs1: u32, offset: i32) -> u32 {
     let imm = (offset as u32) & 0xFFF;
@@ -218,6 +223,18 @@ fn push16(code: &mut Vec<u8>, insn: u16) {
 
 fn push32(code: &mut Vec<u8>, insn: u32) {
     code.extend_from_slice(&insn.to_le_bytes());
+}
+
+fn c_nop_tail_trap_with_handler(tail: u32) -> (Vec<u8>, u64) {
+    let mut code = Vec::new();
+    push16(&mut code, 0x0001); // c.nop
+    push32(&mut code, tail);
+    while code.len() % 4 != 0 {
+        push16(&mut code, 0x0001); // align mtvec target
+    }
+    let handler = RAM_BASE + code.len() as u64;
+    push32(&mut code, ecall());
+    (code, handler)
 }
 
 fn th_memidx(
@@ -293,7 +310,43 @@ fn test_fullsys_rvc_instret_counts_retired_instructions() {
     let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
 
     assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
-    assert_eq!(cpu.cpu.csr.instret, 0);
+    assert_eq!(cpu.cpu.csr.instret, u64::MAX);
+}
+
+#[test]
+fn test_fullsys_ebreak_does_not_increment_instret() {
+    let (code, handler) = c_nop_tail_trap_with_handler(ebreak());
+
+    let cpu_model = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
+    let (mut env, mut cpu, _as, _ram) =
+        setup_fullsys_with_cpu(1024 * 1024, &code, cpu_model);
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.csr.mtvec = handler;
+    cpu.cpu.csr.instret = u64::MAX - 1;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.csr.mcause, 3);
+    assert_eq!(cpu.cpu.csr.instret, u64::MAX);
+}
+
+#[test]
+fn test_fullsys_illegal_tail_does_not_increment_instret() {
+    let (code, handler) = c_nop_tail_trap_with_handler(0);
+
+    let cpu_model = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
+    let (mut env, mut cpu, _as, _ram) =
+        setup_fullsys_with_cpu(1024 * 1024, &code, cpu_model);
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.csr.mtvec = handler;
+    cpu.cpu.csr.instret = u64::MAX - 1;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.csr.mcause, 2);
+    assert_eq!(cpu.cpu.csr.instret, u64::MAX);
 }
 
 #[test]

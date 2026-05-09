@@ -115,6 +115,12 @@ pub trait GuestCpu {
         false
     }
 
+    /// Tail instructions in the just-executed TB that did not
+    /// architecturally retire for `exit_code`.
+    fn tb_exit_nonretired_insns(&self, _exit_code: u64) -> u16 {
+        0
+    }
+
     /// Advance architecture runtime state after one translated TB executed.
     ///
     /// `guest_size` is the translated guest byte span for the TB.

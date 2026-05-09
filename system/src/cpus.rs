@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use machina_core::wfi::WfiWaker;
 
 use machina_accel::ir::context::Context;
+use machina_accel::ir::tb::{EXCP_RISCV_EBREAK, EXCP_RISCV_ECALL, EXCP_UNDEF};
 use machina_accel::ir::TempIdx;
 use machina_accel::{ArchExitAction, GuestCpu};
 use machina_gdbstub::handler::{GdbTarget, StopReason};
@@ -873,6 +874,17 @@ impl GuestCpu for FullSystemCpu {
             true
         } else {
             false
+        }
+    }
+
+    fn tb_exit_nonretired_insns(&self, exit_code: u64) -> u16 {
+        if matches!(
+            exit_code,
+            EXCP_RISCV_ECALL | EXCP_RISCV_EBREAK | EXCP_UNDEF
+        ) {
+            1
+        } else {
+            0
         }
     }
 

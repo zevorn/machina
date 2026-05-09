@@ -184,7 +184,11 @@ where
         let src_tb = last_tb.unwrap_or(tb_idx);
         let tb = shared.tb_store.get(src_tb);
         let tb_size = tb.size;
-        let instret = tb.icount.saturating_sub(tb.instret_discarded);
+        let nonretired = cpu.tb_exit_nonretired_insns(exit_code as u64);
+        let instret = tb
+            .icount
+            .saturating_sub(tb.instret_discarded)
+            .saturating_sub(nonretired);
         let account_after_arch_exit = exit_code == EXCP_PRIV_CSR as usize;
         if !account_after_arch_exit {
             cpu.on_tb_executed(tb_size, instret);
