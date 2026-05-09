@@ -30,7 +30,7 @@ pub fn handle_riscv_arch_exit<C: GuestCpu>(
                 ArchExitAction::Continue
             } else {
                 cpu.tlb_flush();
-                ArchExitAction::Continue
+                ArchExitAction::FlushAllTb
             }
         }
         EXCP_RISCV_FENCE_I => {
