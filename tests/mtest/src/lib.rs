@@ -1,5 +1,8 @@
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+
     use machina_core::machine::{LoaderSpec, Machine, MachineOpts};
     use machina_hw_riscv::k230::K230Machine;
 
@@ -38,6 +41,25 @@ mod tests {
         }
     }
 
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn bundled_k230_linux_dir() -> PathBuf {
+        repo_root().join("pc-bios/k230-linux")
+    }
+
+    fn read_prefix(path: &Path, len: usize) -> Vec<u8> {
+        let mut file = std::fs::File::open(path).unwrap();
+        let mut data = vec![0; len];
+        file.read_exact(&mut data).unwrap();
+        data
+    }
+
+    fn align_up_4k(value: u64) -> u64 {
+        (value + 0xfff) & !0xfff
+    }
+
     #[test]
     fn k230_direct_boot_rejects_initrd_without_dtb() {
         let dir = tempfile::tempdir().unwrap();
@@ -53,6 +75,69 @@ mod tests {
 
         let err = machine.boot().unwrap_err().to_string();
         assert!(err.contains("-initrd requires -dtb for the k230 machine"));
+    }
+
+    #[test]
+    fn k230_bundled_linux_artifacts_boot_with_builtin_sbi() {
+        let dir = bundled_k230_linux_dir();
+        let image = dir.join("Image");
+        let dtb = dir.join("k230.dtb");
+        let initrd = dir.join("rootfs.cpio.gz");
+
+        assert!(image.is_file(), "missing {}", image.display());
+        assert!(dtb.is_file(), "missing {}", dtb.display());
+        assert!(initrd.is_file(), "missing {}", initrd.display());
+
+        let dtb_blob = std::fs::read(&dtb).unwrap();
+        let linux_mem =
+            machina_hw_riscv::k230_dtb::dtb_first_memory_region(&dtb_blob)
+                .unwrap()
+                .unwrap();
+        let kernel_size = std::fs::metadata(&image).unwrap().len();
+        let initrd_base = align_up_4k(
+            linux_mem
+                .base
+                .checked_add((linux_mem.size / 2).min(512 * 1024 * 1024))
+                .unwrap()
+                .max(linux_mem.base + kernel_size)
+                .max(linux_mem.base),
+        );
+
+        let mut machine = K230Machine::new();
+        let opts = MachineOpts {
+            kernel: Some(image.clone()),
+            dtb: Some(dtb),
+            initrd: Some(initrd.clone()),
+            bios: None,
+            bios_builtin: true,
+            append: Some(
+                "console=ttyS0,115200 earlycon=sbi cma=0 norandmaps".into(),
+            ),
+            ..k230_opts()
+        };
+        machine.init(&opts).unwrap();
+        machine.boot().unwrap();
+
+        let cpus = machine.cpus_lock();
+        let cpu = cpus[0].as_ref().unwrap();
+        assert_eq!(cpu.pc, linux_mem.base);
+        assert_eq!(cpu.gpr[10], 0);
+        let fdt_addr = cpu.gpr[11];
+        assert_ne!(fdt_addr, 0);
+        drop(cpus);
+
+        assert_eq!(
+            machine.read_ram_bytes(linux_mem.base, 4).unwrap(),
+            read_prefix(&image, 4)
+        );
+        assert_eq!(
+            machine.read_ram_bytes(initrd_base, 4).unwrap(),
+            read_prefix(&initrd, 4)
+        );
+        assert_eq!(
+            machine.read_ram_bytes(fdt_addr, 4).unwrap(),
+            vec![0xd0, 0x0d, 0xfe, 0xed]
+        );
     }
 
     #[test]
