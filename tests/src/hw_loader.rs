@@ -2,7 +2,7 @@ use machina_core::address::GPA;
 use machina_memory::region::MemoryRegion;
 use machina_memory::AddressSpace;
 
-use machina_hw_core::loader::{load_binary, load_elf};
+use machina_hw_core::loader::{elf_phys_entry, load_binary, load_elf};
 
 /// Create a minimal AddressSpace with `size` bytes of RAM
 /// starting at guest physical address 0.
@@ -13,6 +13,37 @@ fn make_ram_as(size: u64) -> AddressSpace {
     let mut as_ = AddressSpace::new(root);
     as_.update_flat_view();
     as_
+}
+
+fn minimal_exec_elf(
+    entry: u64,
+    p_vaddr: u64,
+    p_paddr: u64,
+    p_memsz: u64,
+) -> Vec<u8> {
+    let mut elf = vec![0u8; 64 + 56];
+    elf[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+    elf[4] = 2;
+    elf[5] = 1;
+    elf[6] = 1;
+    elf[16..18].copy_from_slice(&2u16.to_le_bytes());
+    elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+    elf[24..32].copy_from_slice(&entry.to_le_bytes());
+    elf[32..40].copy_from_slice(&64u64.to_le_bytes());
+    elf[52..54].copy_from_slice(&64u16.to_le_bytes());
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+    elf[56..58].copy_from_slice(&1u16.to_le_bytes());
+
+    let ph = 64usize;
+    elf[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes());
+    let p_offset: u64 = 120;
+    elf[ph + 8..ph + 16].copy_from_slice(&p_offset.to_le_bytes());
+    elf[ph + 16..ph + 24].copy_from_slice(&p_vaddr.to_le_bytes());
+    elf[ph + 24..ph + 32].copy_from_slice(&p_paddr.to_le_bytes());
+    elf[ph + 32..ph + 40].copy_from_slice(&1u64.to_le_bytes());
+    elf[ph + 40..ph + 48].copy_from_slice(&p_memsz.to_le_bytes());
+    elf.push(0);
+    elf
 }
 
 #[test]
@@ -134,6 +165,20 @@ fn test_load_elf_simple() {
         let actual = as_.read(GPA::new(p_paddr + i as u64), 1) as u8;
         assert_eq!(actual, expected, "mismatch at offset {i}");
     }
+}
+
+#[test]
+fn test_elf_phys_entry_handles_paddr_above_vaddr() {
+    let elf = minimal_exec_elf(0x1010, 0x1000, 0x8000, 0x100);
+
+    assert_eq!(elf_phys_entry(&elf, 0x1010), Some(0x8010));
+}
+
+#[test]
+fn test_elf_phys_entry_handles_paddr_below_vaddr() {
+    let elf = minimal_exec_elf(0x8010, 0x8000, 0x1000, 0x100);
+
+    assert_eq!(elf_phys_entry(&elf, 0x8010), Some(0x1010));
 }
 
 #[test]

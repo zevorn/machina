@@ -162,11 +162,44 @@ fn k230_builtin_boot_places_kernel_in_sdk_dtb_memory_window() {
     assert_eq!(cpu.pc, 0x0820_0000);
     assert_eq!(cpu.priv_level, PrivLevel::Supervisor);
     assert_eq!(cpu.gpr[10], 0);
-    assert_eq!(cpu.gpr[11], 0x0fe0_0000);
+    let fdt_addr = cpu.gpr[11];
+    drop(cpus);
+    assert_fdt_placed_in_window(&machine, fdt_addr, 0x0820_0000, 0x07df_f000);
     assert_eq!(
         machine.read_ram_bytes(0x0820_0000, 4).unwrap(),
         vec![0x13, 0x00, 0x00, 0x00]
     );
+}
+
+#[test]
+fn k230_dtb_placement_accepts_unaligned_small_memory_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = dir.path().join("Image");
+    let dtb = dir.path().join("k230.dtb");
+    let mem_base = 0x0820_1000;
+    let mem_size = 0x1_0000;
+    std::fs::write(&kernel, [0x13, 0x00, 0x00, 0x00]).unwrap();
+    std::fs::write(&dtb, memory_window_dtb(mem_base, mem_size)).unwrap();
+
+    let mut machine = K230Machine::new();
+    machine
+        .init(&MachineOpts {
+            kernel: Some(kernel),
+            dtb: Some(dtb),
+            bios: None,
+            bios_builtin: true,
+            ..opts()
+        })
+        .unwrap();
+    machine.boot().unwrap();
+
+    let cpus = machine.cpus_lock();
+    let cpu = cpus[0].as_ref().unwrap();
+    let fdt_addr = cpu.gpr[11];
+    assert_eq!(cpu.pc, mem_base);
+    drop(cpus);
+    assert_fdt_placed_in_window(&machine, fdt_addr, mem_base, mem_size);
+    assert_ne!(fdt_addr & 0x1f_ffff, 0);
 }
 
 #[test]
@@ -202,10 +235,8 @@ fn k230_default_bios_loads_rustsbi_and_dynamic_info_for_sdk_boot() {
         vec![0x13, 0x00, 0x00, 0x00]
     );
     assert_eq!(machine.address_space().read(GPA::new(bootrom + 24), 8), 0);
-    assert_eq!(
-        machine.address_space().read(GPA::new(bootrom + 32), 8),
-        0x0fe0_0000
-    );
+    let fdt_addr = machine.address_space().read(GPA::new(bootrom + 32), 8);
+    assert_fdt_placed_in_window(&machine, fdt_addr, 0x0820_0000, 0x07df_f000);
     assert_eq!(
         machine.address_space().read(GPA::new(bootrom + 40), 8),
         0x4942_534f
@@ -218,6 +249,22 @@ fn k230_default_bios_loads_rustsbi_and_dynamic_info_for_sdk_boot() {
 }
 
 fn sdk_memory_window_dtb() -> Vec<u8> {
+    memory_window_dtb(0x0820_0000, 0x07df_f000)
+}
+
+fn assert_fdt_placed_in_window(
+    machine: &K230Machine,
+    fdt_addr: u64,
+    mem_base: u64,
+    mem_size: u64,
+) {
+    let fdt_len = machine.dtb_blob().unwrap().len() as u64;
+    assert_eq!(fdt_addr & 0x7, 0);
+    assert!(fdt_addr >= mem_base);
+    assert!(fdt_addr + fdt_len <= mem_base + mem_size);
+}
+
+fn memory_window_dtb(base: u64, size: u64) -> Vec<u8> {
     let mut fdt = FdtBuilder::new();
     fdt.begin_node("");
     fdt.property_u32("#address-cells", 2);
@@ -228,7 +275,15 @@ fn sdk_memory_window_dtb() -> Vec<u8> {
 
     fdt.begin_node("memory@0");
     fdt.property_string("device_type", "memory");
-    fdt.property_u32_list("reg", &[0, 0x0820_0000, 0, 0x07df_f000]);
+    fdt.property_u32_list(
+        "reg",
+        &[
+            (base >> 32) as u32,
+            base as u32,
+            (size >> 32) as u32,
+            size as u32,
+        ],
+    );
     fdt.end_node();
 
     fdt.begin_node("soc");

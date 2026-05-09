@@ -316,7 +316,7 @@ fn place_dtb(
             .base
             .checked_add(mem.size)
             .ok_or("K230 Linux memory window end overflows u64")?;
-        let addr = align_down_2m(
+        let addr = align_down_8(
             mem_end
                 .checked_sub(len)
                 .ok_or("K230 DTB does not fit in Linux memory window")?,
@@ -350,8 +350,8 @@ fn align_up_2m(value: u64) -> u64 {
     (value + 0x1f_ffff) & !0x1f_ffff
 }
 
-fn align_down_2m(value: u64) -> u64 {
-    value & !0x1f_ffff
+fn align_down_8(value: u64) -> u64 {
+    value & !0x7
 }
 
 fn write_k230_reset_vec(
