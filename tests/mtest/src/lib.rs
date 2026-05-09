@@ -60,6 +60,38 @@ mod tests {
         (value + 0xfff) & !0xfff
     }
 
+    fn minimal_exec_elf(
+        entry: u64,
+        p_vaddr: u64,
+        p_paddr: u64,
+        p_filesz: u64,
+        p_memsz: u64,
+    ) -> Vec<u8> {
+        let mut elf = vec![0u8; 64 + 56];
+        elf[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[6] = 1;
+        elf[16..18].copy_from_slice(&2u16.to_le_bytes());
+        elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+        elf[24..32].copy_from_slice(&entry.to_le_bytes());
+        elf[32..40].copy_from_slice(&64u64.to_le_bytes());
+        elf[52..54].copy_from_slice(&64u16.to_le_bytes());
+        elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1u16.to_le_bytes());
+
+        let ph = 64usize;
+        elf[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes());
+        let p_offset: u64 = 120;
+        elf[ph + 8..ph + 16].copy_from_slice(&p_offset.to_le_bytes());
+        elf[ph + 16..ph + 24].copy_from_slice(&p_vaddr.to_le_bytes());
+        elf[ph + 24..ph + 32].copy_from_slice(&p_paddr.to_le_bytes());
+        elf[ph + 32..ph + 40].copy_from_slice(&p_filesz.to_le_bytes());
+        elf[ph + 40..ph + 48].copy_from_slice(&p_memsz.to_le_bytes());
+        elf.extend(std::iter::repeat(0x13).take(p_filesz as usize));
+        elf
+    }
+
     #[test]
     fn k230_direct_boot_rejects_initrd_without_dtb() {
         let dir = tempfile::tempdir().unwrap();
@@ -137,6 +169,101 @@ mod tests {
         assert_eq!(
             machine.read_ram_bytes(fdt_addr, 4).unwrap(),
             vec![0xd0, 0x0d, 0xfe, 0xed]
+        );
+    }
+
+    #[test]
+    fn k230_builtin_boot_places_dtb_below_initrd_when_top_overlaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("Image");
+        let initrd = dir.path().join("rootfs.cpio.gz");
+        let dtb = dir.path().join("k230.dtb");
+        let mem_base = 0;
+        let mem_size = 0x4_0000;
+        let initrd_start = 0x2_0000;
+        let initrd_tail = [0xaa, 0xbb, 0xcc, 0xdd];
+        let mut initrd_blob = vec![0x5a; mem_size as usize / 2];
+
+        initrd_blob[mem_size as usize / 2 - 4..].copy_from_slice(&initrd_tail);
+        std::fs::write(&image, [0x13, 0x00, 0x00, 0x00]).unwrap();
+        std::fs::write(&initrd, &initrd_blob).unwrap();
+        std::fs::write(
+            &dtb,
+            machina_hw_riscv::k230_dtb::test_fixture_dtb_with_memory_region(
+                mem_base, mem_size,
+            ),
+        )
+        .unwrap();
+
+        let mut machine = K230Machine::new();
+        let opts = MachineOpts {
+            kernel: Some(image),
+            dtb: Some(dtb),
+            initrd: Some(initrd),
+            bios: None,
+            bios_builtin: true,
+            ..k230_opts()
+        };
+        machine.init(&opts).unwrap();
+        machine.boot().unwrap();
+
+        let cpus = machine.cpus_lock();
+        let fdt_addr = cpus[0].as_ref().unwrap().gpr[11];
+        drop(cpus);
+
+        assert!(fdt_addr < initrd_start);
+        assert_eq!(
+            machine.read_ram_bytes(fdt_addr, 4).unwrap(),
+            vec![0xd0, 0x0d, 0xfe, 0xed]
+        );
+        assert_eq!(
+            machine.read_ram_bytes(mem_size - 4, 4).unwrap(),
+            initrd_tail
+        );
+    }
+
+    #[test]
+    fn k230_builtin_boot_uses_elf_low_load_addr_for_initrd_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("Image");
+        let initrd = dir.path().join("rootfs.cpio.gz");
+        let dtb = dir.path().join("k230.dtb");
+        let mem_base = 0;
+        let mem_size = 0x4_0000;
+        let initrd_base = 0x3_2000;
+        let initrd_blob = [0xaa, 0xbb, 0xcc, 0xdd];
+
+        std::fs::write(
+            &image,
+            minimal_exec_elf(0x3_0000, 0x1000, 0x1000, 4, 0x3_0004),
+        )
+        .unwrap();
+        std::fs::write(&initrd, initrd_blob).unwrap();
+        std::fs::write(
+            &dtb,
+            machina_hw_riscv::k230_dtb::test_fixture_dtb_with_memory_region(
+                mem_base, mem_size,
+            ),
+        )
+        .unwrap();
+
+        let mut machine = K230Machine::new();
+        let opts = MachineOpts {
+            kernel: Some(image),
+            dtb: Some(dtb),
+            initrd: Some(initrd),
+            bios: None,
+            bios_builtin: true,
+            ..k230_opts()
+        };
+        machine.init(&opts).unwrap();
+        machine.boot().unwrap();
+
+        assert_eq!(
+            machine
+                .read_ram_bytes(initrd_base, initrd_blob.len())
+                .unwrap(),
+            initrd_blob
         );
     }
 

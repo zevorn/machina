@@ -9,6 +9,8 @@ pub struct LoadInfo {
     pub entry: GPA,
     /// Total bytes loaded.
     pub size: u64,
+    /// Lowest guest physical address written.
+    pub low_addr: u64,
     /// Highest guest physical address written
     /// (load_addr + p_memsz of the last segment).
     pub high_addr: u64,
@@ -27,6 +29,7 @@ pub fn load_binary(
     Ok(LoadInfo {
         entry: addr,
         size: data.len() as u64,
+        low_addr: addr.0,
         high_addr: end,
         bias: None,
     })
@@ -126,6 +129,7 @@ pub fn load_elf(
     let is_dyn = hdr.e_type == ET_DYN;
 
     let mut total_loaded: u64 = 0;
+    let mut low_addr: u64 = u64::MAX;
     let mut high_addr: u64 = 0;
 
     for i in 0..hdr.e_phnum {
@@ -165,6 +169,9 @@ pub fn load_elf(
 
         let seg = &data[p_offset..p_offset + p_filesz];
         write_bytes(as_, GPA::new(load_addr), seg);
+        if load_addr < low_addr {
+            low_addr = load_addr;
+        }
 
         // BSS: zero-fill [p_filesz .. p_memsz)
         let bss_start = load_addr + p_filesz as u64;
@@ -200,6 +207,7 @@ pub fn load_elf(
     Ok(LoadInfo {
         entry: GPA::new(entry),
         size: total_loaded,
+        low_addr: if low_addr == u64::MAX { 0 } else { low_addr },
         high_addr,
         bias,
     })

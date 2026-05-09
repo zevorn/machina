@@ -141,7 +141,7 @@ fn load_image_at(
             loader::elf_phys_entry(&data, info.entry.0).unwrap_or(info.entry.0);
         Ok(LoadedImage {
             entry,
-            low_addr: entry,
+            low_addr: info.low_addr,
             high_addr: info.high_addr,
         })
     } else {
@@ -176,7 +176,7 @@ fn load_firmware_blob(
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         Ok(LoadedImage {
             entry: info.entry.0,
-            low_addr: info.entry.0,
+            low_addr: info.low_addr,
             high_addr: info.high_addr,
         })
     } else {
@@ -266,7 +266,7 @@ fn load_and_fix_user_dtb(
     };
     let blob = std::fs::read(path)?;
     let fixed = fixup_k230_dtb(&blob, initrd_range, machine.kernel_cmdline())?;
-    let addr = place_dtb(machine, &fixed, linux_mem)?;
+    let addr = place_dtb(machine, &fixed, initrd_range, linux_mem)?;
     machine.set_dtb_blob(fixed);
     Ok(addr)
 }
@@ -304,6 +304,7 @@ fn apply_loaders(
 fn place_dtb(
     machine: &K230Machine,
     blob: &[u8],
+    initrd_range: Option<(u64, u64)>,
     linux_mem: Option<FdtMemoryRegion>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let ddr = K230_MEMMAP[K230MemMap::Ddr as usize];
@@ -316,13 +317,33 @@ fn place_dtb(
             .base
             .checked_add(mem.size)
             .ok_or("K230 Linux memory window end overflows u64")?;
-        let addr = align_down_8(
+        let mut addr = align_down_8(
             mem_end
                 .checked_sub(len)
                 .ok_or("K230 DTB does not fit in Linux memory window")?,
         );
+        if let Some((initrd_start, initrd_end)) = initrd_range {
+            let dtb_end = addr
+                .checked_add(len)
+                .ok_or("K230 DTB range end overflows u64")?;
+            if ranges_overlap(addr, dtb_end, initrd_start, initrd_end) {
+                addr = align_down_8(
+                    initrd_start
+                        .checked_sub(len)
+                        .ok_or("K230 DTB does not fit below initrd")?,
+                );
+            }
+        }
         if addr < mem.base {
             return Err("K230 DTB does not fit in Linux memory window".into());
+        }
+        let end = addr
+            .checked_add(len)
+            .ok_or("K230 DTB range end overflows u64")?;
+        if let Some((initrd_start, initrd_end)) = initrd_range {
+            if ranges_overlap(addr, end, initrd_start, initrd_end) {
+                return Err("K230 DTB overlaps initrd".into());
+            }
         }
         loader::load_binary(blob, GPA::new(addr), machine.address_space())?;
         return Ok(addr);
@@ -352,6 +373,10 @@ fn align_up_2m(value: u64) -> u64 {
 
 fn align_down_8(value: u64) -> u64 {
     value & !0x7
+}
+
+fn ranges_overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> bool {
+    a_start < b_end && b_start < a_end
 }
 
 fn write_k230_reset_vec(

@@ -54,6 +54,7 @@ fn test_load_binary() {
         load_binary(&data, GPA::new(0x100), &as_).expect("load_binary failed");
     assert_eq!(info.entry, GPA::new(0x100));
     assert_eq!(info.size, 16);
+    assert_eq!(info.low_addr, 0x100);
 
     // Read back and verify.
     let v0 = as_.read_u32(GPA::new(0x100));
@@ -159,6 +160,7 @@ fn test_load_elf_simple() {
     let info = load_elf(&elf, 0, &as_).expect("load_elf failed");
     assert_eq!(info.entry, GPA::new(entry));
     assert_eq!(info.size, payload.len() as u64);
+    assert_eq!(info.low_addr, p_paddr);
 
     // Verify loaded bytes.
     for (i, &expected) in payload.iter().enumerate() {
@@ -228,6 +230,7 @@ fn test_load_elf_dyn_pie() {
     assert!(info.bias.is_some());
     assert_eq!(info.bias.unwrap(), base);
     assert_eq!(info.size, filesz);
+    assert_eq!(info.low_addr, expected);
 
     for (i, &exp) in payload.iter().enumerate() {
         let actual = as_.read(GPA::new(expected + i as u64), 1) as u8;

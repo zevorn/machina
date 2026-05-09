@@ -177,6 +177,30 @@ pub fn test_fixture_dtb_with_sdhci_nodes_bootargs_and_reservations(
     fdt.finish()
 }
 
+pub fn test_fixture_dtb_with_memory_region(base: u64, size: u64) -> Vec<u8> {
+    let mut fdt = FdtBuilder::new();
+    fdt.begin_node("");
+    fdt.property_u32("#address-cells", 2);
+    fdt.property_u32("#size-cells", 2);
+
+    fdt.begin_node("chosen");
+    fdt.property_string("bootargs", "");
+    fdt.end_node();
+
+    fdt.begin_node(&format!("memory@{base:x}"));
+    fdt.property_string("device_type", "memory");
+    let mut reg = Vec::with_capacity(16);
+    reg.extend_from_slice(&((base >> 32) as u32).to_be_bytes());
+    reg.extend_from_slice(&(base as u32).to_be_bytes());
+    reg.extend_from_slice(&((size >> 32) as u32).to_be_bytes());
+    reg.extend_from_slice(&(size as u32).to_be_bytes());
+    fdt.property_bytes("reg", &reg);
+    fdt.end_node();
+
+    fdt.end_node();
+    fdt.finish()
+}
+
 fn parse_dtb(blob: &[u8]) -> Result<FdtNode, String> {
     let magic = read_be32(blob, 0)?;
     if magic != FDT_MAGIC {
