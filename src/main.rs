@@ -779,6 +779,10 @@ fn main() {
             &monitor_state,
         )),
     ));
+    monitor_svc
+        .lock()
+        .expect("monitor mutex poisoned")
+        .set_ram_size(ram_size);
 
     // Start monitor transport thread (if configured).
     if let Some(ref mon) = cli.monitor {
