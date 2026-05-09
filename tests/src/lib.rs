@@ -7,6 +7,8 @@ mod backend;
 #[cfg(test)]
 mod cli_bios;
 #[cfg(test)]
+mod cli_drive;
+#[cfg(test)]
 mod cli_help;
 #[cfg(test)]
 mod cli_initrd;
