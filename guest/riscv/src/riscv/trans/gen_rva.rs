@@ -33,7 +33,8 @@ impl RiscvDisasContext {
         }
         let val = ir.new_temp(Type::I64);
         if self.lr_helper != 0 {
-            self.sync_pc(ir);
+            let pc = ir.new_const(Type::I64, self.base.pc_next);
+            ir.gen_mov(Type::I64, self.pc, pc);
             let size = ir.new_const(Type::I64, memop.size_bytes() as u64);
             ir.gen_call(val, self.lr_helper, &[self.env, addr, size]);
         } else {

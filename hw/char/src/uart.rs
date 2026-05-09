@@ -405,13 +405,13 @@ impl Uart16550 {
         let mut regs = self.regs.borrow();
         let dlab = regs.lcr & LCR_DLAB != 0;
         let reg = offset & 0x7;
-        let ret = match (reg, dlab) {
+        match (reg, dlab) {
             (0, true) => regs.dll,
             (0, false) => {
                 let ch = Self::read_rbr(&mut regs);
                 drop(regs);
                 self.update_irq();
-                return ch;
+                ch
             }
             (1, true) => regs.dlm,
             (1, false) => regs.ier,
@@ -425,7 +425,7 @@ impl Uart16550 {
                 if clears_thr_ipending {
                     self.update_irq();
                 }
-                return iir;
+                iir
             }
             (3, _) => regs.lcr,
             (4, _) => regs.mcr,
@@ -433,8 +433,7 @@ impl Uart16550 {
             (6, _) => regs.msr,
             (7, _) => regs.scr,
             _ => 0,
-        };
-        ret
+        }
     }
 
     pub fn write(&self, offset: u64, val: u8) {

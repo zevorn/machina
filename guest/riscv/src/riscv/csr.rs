@@ -55,6 +55,9 @@ pub const CSR_CYCLE: u16 = 0xC00;
 pub const CSR_TIME: u16 = 0xC01;
 pub const CSR_INSTRET: u16 = 0xC02;
 
+// Vector CSRs (read-only)
+pub const CSR_VLENB: u16 = 0xC22;
+
 // Debug/Trace trigger CSRs (stubs)
 pub const CSR_TSELECT: u16 = 0x7A0;
 pub const CSR_TDATA1: u16 = 0x7A1;
@@ -422,6 +425,10 @@ impl CsrFile {
             {
                 Ok(0)
             }
+
+            // Vector CSRs (read-only, return 0 when V is not
+            // implemented).
+            CSR_VLENB => Ok(0),
 
             _ => Err(CAUSE_ILLEGAL_INSN),
         }

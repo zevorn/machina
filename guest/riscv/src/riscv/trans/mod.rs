@@ -439,6 +439,21 @@ impl Decode<Context> for RiscvDisasContext {
         self.trans_sfence_vma(ir, _a)
     }
 
+    // T-HEAD custom fence/inval cache operations. Treat as NOP
+    // since Machina is sequentially consistent and does not model
+    // microarchitectural caches.
+    fn trans_th_fence_spa(&mut self, _ir: &mut Context, _a: &ArgsR) -> bool {
+        true
+    }
+
+    fn trans_mfence_spa(&mut self, _ir: &mut Context, _a: &ArgsR) -> bool {
+        true
+    }
+
+    fn trans_minval_spa(&mut self, _ir: &mut Context, _a: &ArgsR) -> bool {
+        true
+    }
+
     // ── Zicsr: CSR access ────────────────────────────
 
     fn trans_csrrw(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {

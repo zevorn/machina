@@ -1,0 +1,10 @@
+#
+# T-HEAD XThead vendor-specific privileged instructions.
+#
+# These use the SYSTEM opcode (0x73) with custom funct7 values
+# not defined in the standard RISC-V privileged spec.
+# Formats and argument sets are shared with insn32.decode.
+
+th_fence_spa 0001010  ..... ..... 000 00000 1110011 @r
+mfence_spa   0001101  ..... ..... 000 00000 1110011 @r
+minval_spa   0001110  ..... ..... 000 00000 1110011 @r

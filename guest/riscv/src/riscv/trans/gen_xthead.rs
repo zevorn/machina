@@ -290,6 +290,7 @@ fn sx32(ir: &mut Context, src: TempIdx) -> TempIdx {
     dst
 }
 
+#[allow(clippy::too_many_arguments)]
 impl RiscvDisasContext {
     fn gen_xthead_addsl(
         &self,
@@ -395,7 +396,7 @@ impl RiscvDisasContext {
             } else {
                 let mask = ir.new_const(Type::I64, (1u64 << len) - 1);
                 ir.gen_and(Type::I64, dst, shifted, mask);
-            }
+            };
         }
         self.gen_set_gpr(ir, rd, dst);
         true

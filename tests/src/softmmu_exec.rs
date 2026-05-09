@@ -179,6 +179,10 @@ fn lui(rd: u32, imm20: u32) -> u32 {
     (imm20 << 12) | (rd << 7) | 0x37
 }
 
+fn slli(rd: u32, rs1: u32, sh: u32) -> u32 {
+    (sh << 20) | (rs1 << 15) | (1 << 12) | (rd << 7) | 0x13
+}
+
 /// ECALL
 fn ecall() -> u32 {
     0x00000073
@@ -208,6 +212,14 @@ fn encode(insns: &[u32]) -> Vec<u8> {
     insns.iter().flat_map(|i| i.to_le_bytes()).collect()
 }
 
+fn push16(code: &mut Vec<u8>, insn: u16) {
+    code.extend_from_slice(&insn.to_le_bytes());
+}
+
+fn push32(code: &mut Vec<u8>, insn: u32) {
+    code.extend_from_slice(&insn.to_le_bytes());
+}
+
 fn th_memidx(
     top5: u32,
     imm2: u32,
@@ -222,6 +234,23 @@ fn th_memidx(
         | (rs1 << 15)
         | (funct3 << 12)
         | (rd << 7)
+        | 0x0b
+}
+
+fn th_pair(
+    top5: u32,
+    sh2: u32,
+    rd2: u32,
+    rs: u32,
+    is_load: bool,
+    rd1: u32,
+) -> u32 {
+    (top5 << 27)
+        | (sh2 << 25)
+        | (rd2 << 20)
+        | (rs << 15)
+        | ((if is_load { 0b100 } else { 0b101 }) << 12)
+        | (rd1 << 7)
         | 0x0b
 }
 
@@ -683,6 +712,7 @@ fn test_fullsys_sfence_vma_evicts_stale_write_tlb_after_pte_wrprotect() {
     }
 
     unsafe fn write_u64(ram: *const u8, off: usize, val: u64) {
+        // SAFETY: The test passes page-table offsets within the RAM buffer.
         (ram as *mut u8)
             .add(off)
             .copy_from_nonoverlapping(val.to_le_bytes().as_ptr(), 8);
@@ -725,6 +755,7 @@ fn test_fullsys_sfence_vma_evicts_stale_write_tlb_after_pte_wrprotect() {
 
     let vpn2 = ((CODE_VA >> 30) & 0x1ff) as usize;
     let vpn1 = ((CODE_VA >> 21) & 0x1ff) as usize;
+    // SAFETY: The page-table pages all live inside the 64 KiB test RAM.
     unsafe {
         write_u64(ram, ROOT_OFF + vpn2 * 8, pte(l1_pa, PTE_V));
         write_u64(ram, L1_OFF + vpn1 * 8, pte(l0_pa, PTE_V));
@@ -763,6 +794,7 @@ fn test_fullsys_sfence_vma_evicts_stale_write_tlb_after_pte_wrprotect() {
     cpu.cpu.csr.mtvec = RAM_BASE + 0x100;
     cpu.cpu.pc = CODE_VA;
 
+    // SAFETY: The test VM owns its CPU state and mapped RAM for this run.
     let r = unsafe { run_with_retry(&mut env, &mut cpu) };
 
     assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
@@ -809,6 +841,7 @@ fn test_fullsys_sc_faults_after_pte_wrprotect() {
     }
 
     unsafe fn write_u64(ram: *const u8, off: usize, val: u64) {
+        // SAFETY: The test passes page-table offsets within the RAM buffer.
         (ram as *mut u8)
             .add(off)
             .copy_from_nonoverlapping(val.to_le_bytes().as_ptr(), 8);
@@ -853,6 +886,7 @@ fn test_fullsys_sc_faults_after_pte_wrprotect() {
 
     let vpn2 = ((CODE_VA >> 30) & 0x1ff) as usize;
     let vpn1 = ((CODE_VA >> 21) & 0x1ff) as usize;
+    // SAFETY: The page-table pages all live inside the 64 KiB test RAM.
     unsafe {
         write_u64(ram, ROOT_OFF + vpn2 * 8, pte(l1_pa, PTE_V));
         write_u64(ram, L1_OFF + vpn1 * 8, pte(l0_pa, PTE_V));
@@ -891,6 +925,7 @@ fn test_fullsys_sc_faults_after_pte_wrprotect() {
     cpu.cpu.csr.mtvec = RAM_BASE + 0x100;
     cpu.cpu.pc = CODE_VA;
 
+    // SAFETY: The test VM owns its CPU state and mapped RAM for this run.
     let r = unsafe { run_with_retry(&mut env, &mut cpu) };
 
     assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
@@ -903,6 +938,109 @@ fn test_fullsys_sc_faults_after_pte_wrprotect() {
     assert_eq!(cpu.cpu.gpr[12], CODE_VA + 12 * 4);
     let data = unsafe { (ram as *const u32).add(0x1000 / 4).read_unaligned() };
     assert_eq!(data, 1, "SC must not write through a read-only TLB addend",);
+}
+
+/// Regression: LR helper faults must report the LR
+/// instruction PC, not the start of the translated block.
+///
+/// K230 glibc can take a first-touch page fault from
+/// lr.w.rl in a function prologue.  If mepc points at
+/// the TB start, Linux resumes by replaying the prologue
+/// and corrupts the user stack.
+#[test]
+fn test_fullsys_lr_fault_reports_current_pc() {
+    use machina_guest_riscv::riscv::csr::{
+        PrivLevel, CSR_PMPADDR0, CSR_PMPCFG0,
+    };
+
+    const CODE_VA: u64 = 0x4000_0000;
+    const DATA_VA: u64 = 0x4000_1000;
+    const ROOT_OFF: usize = 0x2000;
+    const L1_OFF: usize = 0x3000;
+    const L0_OFF: usize = 0x4000;
+    const ASID: u64 = 7;
+    const PTE_V: u64 = 1 << 0;
+    const PTE_R: u64 = 1 << 1;
+    const PTE_X: u64 = 1 << 3;
+    const PTE_A: u64 = 1 << 6;
+    const PTE_D: u64 = 1 << 7;
+
+    fn pte(pa: u64, flags: u64) -> u64 {
+        ((pa >> 12) << 10) | flags
+    }
+
+    unsafe fn write_u64(ram: *const u8, off: usize, val: u64) {
+        // SAFETY: The test passes page-table offsets within the RAM buffer.
+        (ram as *mut u8)
+            .add(off)
+            .copy_from_nonoverlapping(val.to_le_bytes().as_ptr(), 8);
+    }
+
+    let mut code = vec![0u8; 0x200];
+    let main = encode(&[
+        lui(3, (DATA_VA >> 12) as u32), // x3 = unmapped data VA
+        addi(5, 0, 1),                  // marker before LR
+        lr_w(8, 3),                     // must fault at CODE_VA + 8
+        addi(5, 5, 1),                  // must not execute
+        ecall(),
+    ]);
+    code[..main.len()].copy_from_slice(&main);
+
+    let trap = encode(&[
+        csrrs(10, 0x342, 0), // mcause
+        csrrs(11, 0x343, 0), // mtval
+        csrrs(12, 0x341, 0), // mepc
+        ecall(),
+    ]);
+    code[0x100..0x100 + trap.len()].copy_from_slice(&trap);
+
+    let ram_size = 64 * 1024;
+    let (mut env, mut cpu, _as, ram) = setup_fullsys(ram_size, &code);
+
+    let root_pa = RAM_BASE + ROOT_OFF as u64;
+    let l1_pa = RAM_BASE + L1_OFF as u64;
+    let l0_pa = RAM_BASE + L0_OFF as u64;
+    let code_pa = RAM_BASE;
+
+    let vpn2 = ((CODE_VA >> 30) & 0x1ff) as usize;
+    let vpn1 = ((CODE_VA >> 21) & 0x1ff) as usize;
+    // SAFETY: The page-table pages all live inside the 64 KiB test RAM.
+    unsafe {
+        write_u64(ram, ROOT_OFF + vpn2 * 8, pte(l1_pa, PTE_V));
+        write_u64(ram, L1_OFF + vpn1 * 8, pte(l0_pa, PTE_V));
+        write_u64(
+            ram,
+            L0_OFF,
+            pte(code_pa, PTE_V | PTE_R | PTE_X | PTE_A | PTE_D),
+        );
+    }
+
+    let satp = (8u64 << 60) | (ASID << 44) | (root_pa >> 12);
+    cpu.cpu.priv_level = PrivLevel::Supervisor;
+    cpu.cpu
+        .csr
+        .write(CSR_PMPADDR0, 0x3fff_ffff_ffff, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .csr
+        .write(CSR_PMPCFG0, 0x0f, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .pmp
+        .sync_from_csr(&cpu.cpu.csr.pmpcfg, &cpu.cpu.csr.pmpaddr);
+    cpu.cpu.csr.satp = satp;
+    cpu.cpu.mmu.set_satp(satp);
+    cpu.cpu.csr.mtvec = RAM_BASE + 0x100;
+    cpu.cpu.pc = CODE_VA;
+
+    // SAFETY: The test VM owns its CPU state and mapped RAM for this run.
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[10], 13, "LR should raise LoadPageFault");
+    assert_eq!(cpu.cpu.gpr[11], DATA_VA);
+    assert_eq!(cpu.cpu.gpr[12], CODE_VA + 8);
+    assert_eq!(cpu.cpu.gpr[5], 1, "instruction after LR must not run");
 }
 
 /// Regression: LR/SC reservations are tied to the translated
@@ -1529,6 +1667,640 @@ fn test_xtheadfmemidx_indexed_double_load_store() {
     assert_eq!(cpu.cpu.fpr[2], 0x3ff0_0000_0000_0000);
 }
 
+// ── XThead arithmetic / bit-manipulation helpers ──────
+
+fn th_addsl(rd: u32, rs1: u32, rs2: u32, shamt: u32) -> u32 {
+    (shamt << 25) | (rs2 << 20) | (rs1 << 15) | (0b001 << 12) | (rd << 7) | 0x0b
+}
+
+fn th_ext(rd: u32, rs1: u32, lsb: u32, msb: u32) -> u32 {
+    (msb << 26) | (lsb << 20) | (rs1 << 15) | (0b010 << 12) | (rd << 7) | 0x0b
+}
+
+fn th_extu(rd: u32, rs1: u32, lsb: u32, msb: u32) -> u32 {
+    (msb << 26) | (lsb << 20) | (rs1 << 15) | (0b011 << 12) | (rd << 7) | 0x0b
+}
+
+fn th_condmov(rd: u32, rs1: u32, rs2: u32, funct7: u32) -> u32 {
+    (funct7 << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (0b001 << 12)
+        | (rd << 7)
+        | 0x0b
+}
+
+fn th_mac(rd: u32, rs1: u32, rs2: u32, funct7: u32) -> u32 {
+    (funct7 << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (0b001 << 12)
+        | (rd << 7)
+        | 0x0b
+}
+
+fn th_mula(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    th_mac(rd, rs1, rs2, 0b0010000)
+}
+
+fn th_meminc(
+    top5: u32,
+    imm2: u32,
+    imm5: u32,
+    rs1: u32,
+    is_load: bool,
+    rd: u32,
+) -> u32 {
+    (top5 << 27)
+        | (imm2 << 25)
+        | (imm5 << 20)
+        | (rs1 << 15)
+        | ((if is_load { 0b100 } else { 0b101 }) << 12)
+        | (rd << 7)
+        | 0x0b
+}
+
+fn th_lbuia(rd: u32, rs1: u32, imm5: u32, imm2: u32) -> u32 {
+    // top5=19 (0b10011): unsigned byte load, post-increment.
+    // odd top5 values are pre-increment; even ones are post-increment.
+    th_meminc(19, imm2, imm5, rs1, true, rd)
+}
+
+fn th_ff0(rd: u32, rs1: u32) -> u32 {
+    // funct3=001, funct7=0b1000010, rs2=0
+    (0b1000010 << 25) | (rs1 << 15) | (0b001 << 12) | (rd << 7) | 0x0b
+}
+
+fn th_ff1(rd: u32, rs1: u32) -> u32 {
+    // funct3=001, funct7=0b1000011, rs2=0
+    (0b1000011 << 25) | (rs1 << 15) | (0b001 << 12) | (rd << 7) | 0x0b
+}
+
+// ── XThead softmmu execution tests ────────────────────
+
+#[test]
+fn test_xthead_addsl_full_pipeline() {
+    let code = encode(&[
+        addi(21, 0, 3),          // s5 = 3
+        addi(27, 0, 7),          // s11 = 7
+        th_addsl(18, 21, 27, 1), // s2 = s5 + (s11 << 1) = 3 + 14 = 17
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[21], 3, "s5 (source 1)");
+    assert_eq!(cpu.cpu.gpr[27], 7, "s11 (source 2)");
+    assert_eq!(cpu.cpu.gpr[18], 17, "s2 (dest)");
+}
+
+#[test]
+fn test_xthead_addsl_same_rs1_rs2_full_pipeline() {
+    let code = encode(&[
+        addi(21, 0, 0x555),      // s5 = 0x555
+        th_addsl(18, 21, 21, 1), // s2 = s5 + (s5 << 1) = s5 * 3
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[21], 0x555, "s5 (source)");
+    assert_eq!(cpu.cpu.gpr[18], 0x555u64 * 3, "s2 (dest, expect 0xFFF)");
+}
+
+#[test]
+fn test_xthead_addsl_overlapping_destinations_full_pipeline() {
+    let code = encode(&[
+        th_addsl(5, 5, 6, 3),
+        th_addsl(6, 5, 6, 2),
+        th_addsl(7, 7, 7, 1),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.gpr[5] = 3;
+    cpu.cpu.gpr[6] = 7;
+    cpu.cpu.gpr[7] = 5;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[5], 3 + (7 << 3));
+    assert_eq!(cpu.cpu.gpr[6], cpu.cpu.gpr[5] + (7 << 2));
+    assert_eq!(cpu.cpu.gpr[7], 5 + (5 << 1));
+}
+
+#[test]
+fn test_xthead_mempair_lwd_swd_swaps_word_pairs() {
+    let code = encode(&[
+        auipc(3, 0),
+        addi(3, 3, 0x100),
+        th_pair(28, 0, 6, 3, true, 5),
+        th_pair(28, 1, 8, 3, true, 7),
+        th_pair(28, 0, 8, 3, false, 7),
+        th_pair(28, 1, 6, 3, false, 5),
+        ld(9, 3, 0),
+        ld(10, 3, 8),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let first = 0x89ab_cdef_0123_4567u64;
+    let second = 0xfedc_ba98_7654_3210u64;
+    unsafe {
+        (ram as *mut u64).add(0x100 / 8).write_unaligned(first);
+        (ram as *mut u64).add(0x108 / 8).write_unaligned(second);
+    }
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[5], 0x0000_0000_0123_4567);
+    assert_eq!(cpu.cpu.gpr[6], 0xffff_ffff_89ab_cdef);
+    assert_eq!(cpu.cpu.gpr[7], 0x0000_0000_7654_3210);
+    assert_eq!(cpu.cpu.gpr[8], 0xffff_ffff_fedc_ba98);
+    assert_eq!(cpu.cpu.gpr[9], second);
+    assert_eq!(cpu.cpu.gpr[10], first);
+}
+
+#[test]
+fn test_xthead_mempair_ldd_sdd_swaps_doubleword_pairs() {
+    let code = encode(&[
+        auipc(3, 0),
+        addi(3, 3, 0x100),
+        th_pair(31, 0, 6, 3, true, 5),
+        th_pair(31, 1, 8, 3, true, 7),
+        th_pair(31, 0, 8, 3, false, 7),
+        th_pair(31, 1, 6, 3, false, 5),
+        ld(9, 3, 0),
+        ld(10, 3, 8),
+        ld(11, 3, 16),
+        ld(12, 3, 24),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let values = [
+        0x0123_4567_89ab_cdefu64,
+        0xfedc_ba98_7654_3210u64,
+        0x1122_3344_5566_7788u64,
+        0x8877_6655_4433_2211u64,
+    ];
+    unsafe {
+        for (idx, value) in values.iter().enumerate() {
+            (ram as *mut u64)
+                .add(0x100 / 8 + idx)
+                .write_unaligned(*value);
+        }
+    }
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[9], values[2]);
+    assert_eq!(cpu.cpu.gpr[10], values[3]);
+    assert_eq!(cpu.cpu.gpr[11], values[0]);
+    assert_eq!(cpu.cpu.gpr[12], values[1]);
+}
+
+#[test]
+fn test_xthead_memidx_store_data_index_overlap_full_pipeline() {
+    let code = encode(&[
+        auipc(3, 3),
+        addi(4, 0, 0),
+        th_memidx(12, 3, 4, 3, 0b101, 4),
+        addi(4, 4, 1),
+        th_memidx(12, 3, 4, 3, 0b101, 4),
+        addi(4, 4, 1),
+        th_memidx(12, 3, 4, 3, 0b101, 4),
+        ld(5, 3, 0),
+        ld(6, 3, 8),
+        ld(7, 3, 16),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        64 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[5], 0);
+    assert_eq!(cpu.cpu.gpr[6], 1);
+    assert_eq!(cpu.cpu.gpr[7], 2);
+}
+
+#[test]
+fn test_xthead_mula_accumulates_qsort_pointer_offset() {
+    let code = encode(&[th_mula(25, 14, 12), th_mula(8, 15, 19), ecall()]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.gpr[25] = 0x1000;
+    cpu.cpu.gpr[14] = 5;
+    cpu.cpu.gpr[12] = 8;
+    cpu.cpu.gpr[8] = 0x2000;
+    cpu.cpu.gpr[15] = u64::MAX;
+    cpu.cpu.gpr[19] = 0x20;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[25], 0x1028);
+    assert_eq!(cpu.cpu.gpr[8], 0x1fe0);
+}
+
+#[test]
+fn test_xthead_ldia_sdia_copy_doublewords_with_post_increment() {
+    let code = encode(&[
+        auipc(5, 0),
+        addi(5, 5, 0x100),
+        auipc(6, 0),
+        addi(6, 6, 0x180),
+        th_meminc(15, 0, 8, 5, true, 7),
+        th_meminc(15, 0, 8, 6, false, 7),
+        th_meminc(15, 0, 8, 5, true, 8),
+        th_meminc(15, 0, 8, 6, false, 8),
+        ld(9, 6, -16),
+        ld(10, 6, -8),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let first = 0x0123_4567_89ab_cdefu64;
+    let second = 0xfedc_ba98_7654_3210u64;
+    unsafe {
+        (ram as *mut u64).add(0x100 / 8).write_unaligned(first);
+        (ram as *mut u64).add(0x108 / 8).write_unaligned(second);
+    }
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[5], RAM_BASE + 0x110);
+    assert_eq!(cpu.cpu.gpr[6], RAM_BASE + 0x198);
+    assert_eq!(cpu.cpu.gpr[7], first);
+    assert_eq!(cpu.cpu.gpr[8], second);
+    assert_eq!(cpu.cpu.gpr[9], first);
+    assert_eq!(cpu.cpu.gpr[10], second);
+}
+
+#[test]
+fn test_xthead_lwia_swia_copy_words_with_post_increment() {
+    let code = encode(&[
+        auipc(5, 0),
+        addi(5, 5, 0x100),
+        auipc(6, 0),
+        addi(6, 6, 0x180),
+        th_meminc(11, 0, 4, 5, true, 7),
+        th_meminc(11, 0, 4, 6, false, 7),
+        th_meminc(11, 0, 4, 5, true, 8),
+        th_meminc(11, 0, 4, 6, false, 8),
+        ld(9, 6, -8),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    unsafe {
+        (ram as *mut u32)
+            .add(0x100 / 4)
+            .write_unaligned(0x89ab_cdef);
+        (ram as *mut u32)
+            .add(0x104 / 4)
+            .write_unaligned(0x0123_4567);
+    }
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[5], RAM_BASE + 0x108);
+    assert_eq!(cpu.cpu.gpr[6], RAM_BASE + 0x190);
+    assert_eq!(cpu.cpu.gpr[7], 0xffff_ffff_89ab_cdef);
+    assert_eq!(cpu.cpu.gpr[8], 0x0123_4567);
+    assert_eq!(cpu.cpu.gpr[9], 0x0123_4567_89ab_cdef);
+}
+
+#[test]
+fn test_xthead_lrbu_srb_copy_bytes_with_indexed_addressing() {
+    let code = encode(&[
+        auipc(3, 0),
+        addi(3, 3, 0x100),
+        auipc(6, 0),
+        addi(6, 6, 0x180),
+        addi(4, 0, 1),
+        th_memidx(16, 0, 4, 3, 0b100, 5),
+        th_memidx(0, 0, 4, 6, 0b101, 5),
+        addi(4, 4, 1),
+        th_memidx(16, 0, 4, 3, 0b100, 5),
+        th_memidx(0, 0, 4, 6, 0b101, 5),
+        ld(7, 6, 0),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    unsafe {
+        (ram as *mut u8).add(0x101).write(0xff);
+        (ram as *mut u8).add(0x102).write(0x7e);
+    }
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[5], 0x7e);
+    assert_eq!(cpu.cpu.gpr[7], 0x0000_0000_007e_ff00);
+}
+
+#[test]
+fn test_rvc_addi16sp_restore_before_ret_full_pipeline() {
+    let mut code = Vec::new();
+    push32(&mut code, jal(1, 8));
+    push32(&mut code, ecall());
+    push16(&mut code, 0x7109); // c.addi16sp -384
+    push16(&mut code, 0x6119); // c.addi16sp 384
+    push16(&mut code, 0x8082); // ret
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.gpr[2] = 0x3fff_ffff_4000;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[2], 0x3fff_ffff_4000);
+}
+
+#[test]
+fn test_rvc_addi4spn_frame_pointer_full_pipeline() {
+    let mut code = Vec::new();
+    push16(&mut code, 0x0300); // c.addi4spn s0, sp, 384
+    push32(&mut code, ecall());
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+    cpu.cpu.gpr[2] = 0x3fff_ffff_4000;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[8], 0x3fff_ffff_4180);
+}
+
+#[test]
+fn test_xthead_extract_full_pipeline() {
+    let code = encode(&[
+        lui(4, 0),           // x4 = 0
+        addi(4, 4, 0x7f),    // x4 = 127
+        addi(2, 0, 0x80),    // x2 = 128 (bit 7 set, sign bit)
+        th_ext(3, 2, 7, 7),  // signed extract bit 7 → 0xFFF...F
+        th_extu(1, 4, 0, 6), // unsigned extract bits 6:0 → 127
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[3], u64::MAX);
+    assert_eq!(cpu.cpu.gpr[1], 127);
+}
+
+#[test]
+fn test_xthead_condmov_eq_full_pipeline() {
+    let code = encode(&[
+        addi(1, 0, 0xaa),               // rd = 0xaa
+        addi(2, 0, 0xbb),               // rs1 = 0xbb
+        addi(3, 0, 0),                  // rs2 = 0
+        th_condmov(1, 2, 3, 0b0100000), // if rs2==0: rd = rs1 → x1 = 0xbb
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[1], 0xbb);
+}
+
+#[test]
+fn test_xthead_condmov_ne_full_pipeline() {
+    let code = encode(&[
+        addi(1, 0, 0xcc),               // rd = 0xcc
+        addi(2, 0, 0xdd),               // rs1 = 0xdd
+        addi(3, 0, 1),                  // rs2 = 1 (non-zero)
+        th_condmov(1, 2, 3, 0b0100001), // if rs2!=0: rd = rs1 → x1 = 0xdd
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[1], 0xdd);
+}
+
+#[test]
+fn test_xthead_load_inc_simple_full_pipeline() {
+    let code = encode(&[
+        auipc(3, 0),          // x3 = RAM_BASE
+        addi(3, 3, 0x100),    // x3 = RAM_BASE + 0x100
+        th_lbuia(1, 3, 2, 0), // th.lbuia x1, (x3), 2, 0
+        ecall(),
+    ]);
+
+    let mut code_bytes = code;
+    code_bytes.resize(0x200, 0);
+    code_bytes[0x100] = 0x5a;
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code_bytes,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[1], 0x5a);
+    assert_eq!(cpu.cpu.gpr[3], RAM_BASE + 0x102);
+}
+
+fn th_revw(rd: u32, rs1: u32) -> u32 {
+    // th.revw: funct3=001, funct7=0b1001000, rs2=0
+    (0b1001000 << 25) | (rs1 << 15) | (0b001 << 12) | (rd << 7) | 0x0b
+}
+
+fn th_rev(rd: u32, rs1: u32) -> u32 {
+    // th.rev: funct3=001, funct7=0b1000001, rs2=0
+    (0b1000001 << 25) | (rs1 << 15) | (0b001 << 12) | (rd << 7) | 0x0b
+}
+
+#[test]
+fn test_xthead_rev_full_pipeline() {
+    // th.rev: 64-bit byte swap.
+    let code = encode(&[
+        lui(21, 0x01234),    // s5 upper 20 bits
+        addi(21, 21, 0x567), // s5 lower 12 bits
+        // s5 = 0x0000000001234567 → bswap64 → 0x6745230100000000
+        th_rev(18, 21), // s2 = rev(s5)
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[21], 0x01234567, "s5 (source)");
+    assert_eq!(cpu.cpu.gpr[18], 0x6745230100000000, "s2 (bswap64 result)");
+}
+
+#[test]
+fn test_xthead_revw_full_pipeline() {
+    // th.revw: 32-bit byte swap within lower 32 bits, sign-extend to 64
+    // 0x78563412 → byte-swap → 0x12345678 → sign-ext → 0x0000000012345678
+    let code = encode(&[
+        lui(21, 0x78563),    // s5 = 0x78563000
+        addi(21, 21, 0x412), // s5 = 0x78563412
+        th_revw(18, 21),     // s2 = revw(s5)
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[21], 0x78563412, "s5 (source)");
+    // 32-bit byte swap: 0x78563412 → 0x12345678 (positive, fits in i32)
+    assert_eq!(cpu.cpu.gpr[18], 0x12345678, "s2 (bswap32 result)");
+}
+
+#[test]
+fn test_xthead_revw_sign_extension_full_pipeline() {
+    // th.revw: sign-extension test.  When bit 31 of the bswap result
+    // is 1, sign extension produces a negative 64-bit value.
+    // 0x80 → bswap32 → 0x80000000 → sign-ext → 0xFFFFFFFF80000000
+    let code = encode(&[
+        addi(21, 0, 0x80), // s5 = 0x80
+        th_revw(18, 21),   // s2 = revw(s5)
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[21], 0x80, "s5 (source)");
+    // bswap32: bytes [80,00,00,00] → [00,00,00,80] = 0x80000000
+    // bit 31 set → MOVSXD sign-extends → 0xFFFFFFFF80000000
+    assert_eq!(
+        cpu.cpu.gpr[18], 0xFFFFFFFF80000000u64,
+        "s2 (bswap32 sign-extended result)"
+    );
+}
+
 #[test]
 fn test_riscv_time_csr_uses_configured_mmio_addr() {
     const K230_MTIME: u64 = 0x000f_0400_bff8;
@@ -1902,4 +2674,336 @@ fn test_csr_trace_integration() {
         "trace file should contain CSR 0x340 \
          record, got: {content}"
     );
+}
+
+// ── XThead memidx + Sv39 tests ─────────────────────────
+
+/// Test: th_memidx indexed load (signed byte, top5=0)
+/// through Sv39 page tables in the full JIT pipeline.
+/// This exercises the same instruction pattern as the
+/// crashing getaddrinfo comparison callback.
+#[test]
+fn test_xthead_memidx_sv39_sb_load() {
+    use machina_guest_riscv::riscv::cpu_model::RiscvCpuModel;
+    use machina_guest_riscv::riscv::csr::PrivLevel;
+    use machina_guest_riscv::riscv::csr::{CSR_PMPADDR0, CSR_PMPCFG0};
+
+    const PTE_V: u64 = 1 << 0;
+    const PTE_R: u64 = 1 << 1;
+    const PTE_W: u64 = 1 << 2;
+    const PTE_X: u64 = 1 << 3;
+    const PTE_A: u64 = 1 << 6;
+    const PTE_D: u64 = 1 << 7;
+    const ASID: u64 = 1;
+    const CODE_VA: u64 = 0x2000_0000;
+    const DATA_VA: u64 = 0x2000_1000;
+    const ROOT_OFF: usize = 0x2000;
+    const L1_OFF: usize = 0x3000;
+    const L0_OFF: usize = 0x4000;
+
+    fn pte(pa: u64, flags: u64) -> u64 {
+        ((pa >> 2) & 0x003f_ffff_ffff_ffc0) | flags
+    }
+
+    // th.lrb rd, (rs1), rs2, imm2
+    //   → load signed byte from rs1 + (rs2 << imm2)
+    // First load: byte at DATA_VA+0 (positive 0x7f).
+    // Second load: byte at DATA_VA+2 (negative 0x82).
+    let main = encode(&[
+        lui(3, (DATA_VA >> 12) as u32),  // x3 = DATA_VA
+        addi(4, 0, 0),                   // x4 = 0 (index 0)
+        th_memidx(0, 1, 4, 3, 0b100, 2), // x2 = *(s8*)(x3 + x4<<1)
+        addi(4, 4, 1),                   // x4 = 1 (index 1)
+        th_memidx(0, 1, 4, 3, 0b100, 6), // x6 = *(s8*)(x3 + x4<<1)
+        ecall(),
+    ]);
+
+    let mut code = vec![0u8; 64 * 1024];
+    code[..main.len()].copy_from_slice(&main);
+
+    let ram_size = (code.len() + 0x1000) as u64;
+    let cpu = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
+    let (mut env, mut cpu, _as, ram) =
+        setup_fullsys_with_cpu(ram_size, &code, cpu);
+
+    // Write test data.
+    // With imm2=1, index N accesses byte at DATA_VA + (N << 1).
+    unsafe {
+        (ram as *mut u8).add(0x1000).write(0x7f); // index 0 → offset 0: +127
+        (ram as *mut u8).add(0x1002).write(0x82); // index 1 → offset 2: −126
+    }
+
+    let root_pa = RAM_BASE + ROOT_OFF as u64;
+    let l1_pa = RAM_BASE + L1_OFF as u64;
+    let l0_pa = RAM_BASE + L0_OFF as u64;
+    let code_pa = RAM_BASE;
+    let data_pa = RAM_BASE + 0x1000;
+
+    let vpn2 = ((CODE_VA >> 30) & 0x1ff) as usize;
+    let vpn1 = ((CODE_VA >> 21) & 0x1ff) as usize;
+
+    unsafe {
+        let w = |off: usize, val: u64| {
+            (ram as *mut u64).add(off / 8).write_unaligned(val);
+        };
+        w(ROOT_OFF + vpn2 * 8, pte(l1_pa, PTE_V));
+        w(L1_OFF + vpn1 * 8, pte(l0_pa, PTE_V));
+        // Map CODE_VA → code_pa (RX)
+        w(L0_OFF, pte(code_pa, PTE_V | PTE_R | PTE_X | PTE_A | PTE_D));
+        // Map DATA_VA → data_pa (RW)
+        w(
+            L0_OFF + 8,
+            pte(data_pa, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+        // Identity-map the page tables themselves
+        w(
+            L0_OFF + 16,
+            pte(l0_pa, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D),
+        );
+    }
+
+    let satp = (8u64 << 60) | (ASID << 44) | (root_pa >> 12);
+    cpu.cpu.priv_level = PrivLevel::Supervisor;
+    cpu.cpu
+        .csr
+        .write(CSR_PMPADDR0, 0x3fff_ffff_ffff, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .csr
+        .write(CSR_PMPCFG0, 0x0f, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .pmp
+        .sync_from_csr(&cpu.cpu.csr.pmpcfg, &cpu.cpu.csr.pmpaddr);
+    cpu.cpu.csr.satp = satp;
+    cpu.cpu.mmu.set_satp(satp);
+    cpu.cpu.mmu.flush();
+    cpu.cpu.pc = CODE_VA;
+
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 1 });
+    // First load: index 0 → byte at DATA_VA+0 = 0x7f (positive).
+    assert_eq!(
+        cpu.cpu.gpr[2] as i8, 0x7f,
+        "th.lrb: signed byte at offset 0 → +127"
+    );
+    assert_eq!(
+        cpu.cpu.gpr[2], 0x7f,
+        "th.lrb: 64-bit result (0x7f zero-extended to positive)"
+    );
+    // Second load: index 1 → byte at DATA_VA+2 = 0x82 (−126).
+    assert_eq!(
+        cpu.cpu.gpr[6] as i8, -126i8,
+        "th.lrb: signed byte at offset 2 → -126"
+    );
+    assert_eq!(
+        cpu.cpu.gpr[6], 0xffffffffffffff82u64,
+        "th.lrb: 64-bit sign-extended (0x82 → all Fs)"
+    );
+}
+
+// XThead th.ext/th.extu edge-case tests.
+// QEMU treats lsb > msb as a no-op that leaves rd unchanged.
+
+#[test]
+fn test_xthead_extract_lsb_gt_msb_signed() {
+    let code = encode(&[
+        addi(3, 0, 0x123),
+        addi(2, 0, 1),
+        slli(2, 2, 40),
+        th_ext(3, 2, 36, 24),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(
+        cpu.cpu.gpr[3], 0x123,
+        "th.ext lsb>msb should leave rd unchanged"
+    );
+}
+
+#[test]
+fn test_xthead_extract_lsb_gt_msb_signed_negative() {
+    let code = encode(&[
+        addi(3, 0, 0x321),
+        addi(2, 0, -1),
+        th_ext(3, 2, 36, 24),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(
+        cpu.cpu.gpr[3], 0x321,
+        "th.ext lsb>msb should leave rd unchanged"
+    );
+}
+
+#[test]
+fn test_xthead_extract_lsb_gt_msb_unsigned() {
+    let code = encode(&[
+        addi(3, 0, 0x456),
+        addi(2, 0, -1),
+        th_extu(3, 2, 59, 0),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(
+        cpu.cpu.gpr[3], 0x456,
+        "th.extu lsb>msb should leave rd unchanged"
+    );
+}
+
+#[test]
+fn test_xthead_extract_lsb_gt_msb_signed_byte_value() {
+    let code = encode(&[
+        addi(3, 0, 0x789),
+        addi(2, 0, 0x42),
+        th_ext(3, 2, 59, 0),
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(
+        cpu.cpu.gpr[3], 0x789,
+        "th.ext lsb>msb should leave rd unchanged"
+    );
+}
+
+// ── XThead th.ff0 / th.ff1 tests ────────────────────────
+// Helpers th_rev, th_revw (used by earlier tests) and
+// th_ff0, th_ff1 are defined above with the other XThead
+// helpers.
+
+#[test]
+fn test_xthead_ff0_full_pipeline() {
+    // ff0: count leading zeros of ~rs1
+    // x2 = 0xff → ~x2 = 0xffffffffffffff00
+    // clz(~x2) = 0 (MSB is 1)
+    let code = encode(&[
+        addi(2, 0, 0xff), // x2 = 0xff
+        th_ff0(3, 2),     // clz(~x2)
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(
+        cpu.cpu.gpr[3], 0,
+        "th.ff0: clz(~0xff) = 0 (MSB of ~0xff is 1)"
+    );
+}
+
+#[test]
+fn test_xthead_ff0_small_value() {
+    // ff0: count leading zeros of ~rs1.
+    // x2 lower 4 bits 0 → ~x2 has lower 4 bits 1.
+    let code = encode(&[
+        addi(2, 0, -1), // x2 = -1 = all 1s
+        slli(2, 2, 4),  // x2 = 0xffff_ffff_ffff_fff0
+        th_ff0(3, 2),   // ~x2 = 0x0000_0000_0000_000f
+        ecall(),        // clz(0xf) = 60
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[3], 60, "th.ff0: clz(~0xfffffffffffffff0) = 60");
+}
+
+#[test]
+fn test_xthead_ff1_full_pipeline() {
+    // ff1: count leading zeros of rs1
+    let code = encode(&[
+        addi(2, 0, 1),  // x2 = 1
+        slli(2, 2, 32), // x2 = 0x1_0000_0000
+        th_ff1(3, 2),   // clz(0x1_0000_0000) = 31
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[3], 31, "th.ff1: clz(0x1_0000_0000) = 31");
+}
+
+#[test]
+fn test_xthead_ff1_zero() {
+    // ff1: clz(0) = 64 (fallback)
+    let code = encode(&[
+        addi(2, 0, 0), // x2 = 0
+        th_ff1(3, 2),  // clz(0) = 64
+        ecall(),
+    ]);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys_with_cpu(
+        1024 * 1024,
+        &code,
+        RiscvCpu::new_with_model(RiscvCpuModel::TheadC908),
+    );
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
+    assert_eq!(cpu.cpu.gpr[3], 64, "th.ff1: clz(0) = 64");
 }

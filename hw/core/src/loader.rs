@@ -319,3 +319,34 @@ pub fn elf_find_symbol(data: &[u8], name: &str) -> Option<u64> {
 
     None
 }
+
+/// Convert an ET_EXEC virtual entry address to its physical
+/// counterpart by offsetting with the matching PT_LOAD segment's
+/// p_vaddr - p_paddr.
+pub fn elf_phys_entry(data: &[u8], virt_entry: u64) -> Option<u64> {
+    let hdr = parse_elf_header(data).ok()?;
+    if hdr.e_type == ET_DYN {
+        return None;
+    }
+    for i in 0..hdr.e_phnum {
+        let off = hdr.e_phoff + i * hdr.e_phentsize;
+        if off + ELF64_PHDR_SIZE > data.len() {
+            return None;
+        }
+        let p_type = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+        if p_type != PT_LOAD {
+            continue;
+        }
+        let p_vaddr =
+            u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
+        let p_paddr =
+            u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap());
+        let p_memsz =
+            u64::from_le_bytes(data[off + 40..off + 48].try_into().unwrap());
+        if virt_entry >= p_vaddr && virt_entry < p_vaddr.saturating_add(p_memsz)
+        {
+            return Some(virt_entry - (p_vaddr - p_paddr));
+        }
+    }
+    None
+}

@@ -137,9 +137,11 @@ fn load_image_at(
     if data.starts_with(b"\x7fELF") {
         let info = loader::load_elf(&data, load_addr, machine.address_space())
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let entry =
+            loader::elf_phys_entry(&data, info.entry.0).unwrap_or(info.entry.0);
         Ok(LoadedImage {
-            entry: info.entry.0,
-            low_addr: info.entry.0,
+            entry,
+            low_addr: entry,
             high_addr: info.high_addr,
         })
     } else {

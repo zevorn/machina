@@ -193,6 +193,21 @@ pub fn access_fault(access: AccessType) -> Exception {
 }
 
 /// Compute TLB index from a virtual address.
+/// Check canonical-address invariant for Sv39/Sv48.
+///
+/// For Sv39 (va_bits=39), bits 63:39 must equal bit 38.
+/// For Sv48 (va_bits=48), bits 63:48 must equal bit 47.
+fn is_canonical_sv(gva: u64, satp_mode: u64) -> bool {
+    let va_bits = match satp_mode {
+        SATP_MODE_SV39 => 39u32,
+        SATP_MODE_SV48 => 48u32,
+        _ => return true, // BARE / unsupported: no canonical check
+    };
+    let shift = va_bits - 1;
+    let s = (gva as i64) >> shift;
+    s == 0 || s == -1
+}
+
 pub fn tlb_index(va: u64) -> usize {
     let vpn = va >> 12;
     let h = vpn ^ (vpn >> 8);
@@ -323,6 +338,12 @@ impl Mmu {
             return Err(page_fault(access));
         }
         if mode > self.max_satp_mode {
+            return Err(page_fault(access));
+        }
+        // Canonical-address check: for Sv39 bits 63:39
+        // must equal bit 38; for Sv48 bits 63:48 must
+        // equal bit 47.
+        if !is_canonical_sv(gva, mode) {
             return Err(page_fault(access));
         }
 
@@ -499,14 +520,16 @@ impl Mmu {
         priv_level: PrivLevel,
         mem_read: &impl Fn(u64) -> u64,
     ) -> Result<(u64, u8, u64, u64, u64), Exception> {
+        // Reject non-canonical addresses before walking.
+        let mode = self.satp_mode();
+        if !is_canonical_sv(gva, mode) {
+            return Err(page_fault(access));
+        }
+
         let root_ppn = self.satp & SATP_PPN_MASK;
         let mut a = root_ppn * PAGE_SIZE;
 
-        let levels = if self.satp_mode() == SATP_MODE_SV48 {
-            4
-        } else {
-            LEVELS
-        };
+        let levels = if mode == SATP_MODE_SV48 { 4 } else { LEVELS };
 
         for level in (0..levels).rev() {
             let idx = vpn_index(gva, level);

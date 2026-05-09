@@ -1366,12 +1366,10 @@ pub unsafe extern "sysv64" fn machina_mem_write(
     }
 }
 
-/// JIT helper: RISC-V store-conditional.
+/// JIT helper: RISC-V load-reserved.
 ///
-/// SC is a store for translation and protection purposes:
-/// a valid LR reservation does not permit writing through a
-/// read-only TLB entry after Linux has write-protected a COW
-/// page.
+/// # Safety
+/// `env` must point to a valid `RiscvCpu`.
 #[no_mangle]
 pub unsafe extern "sysv64" fn machina_lr_op(
     env: *mut u8,
@@ -1402,7 +1400,7 @@ pub unsafe extern "sysv64" fn machina_lr_op(
         cpu_loop_exit(cpu);
     }
 
-    let val = {
+    {
         let _guard = fullsystem_atomic_lock();
         let val = if size == 4 {
             (read_phys_sized(cpu, pa, 4) as u32 as i32) as i64 as u64
@@ -1412,10 +1410,18 @@ pub unsafe extern "sysv64" fn machina_lr_op(
         cpu.load_res = pa;
         cpu.load_val = val;
         val
-    };
-    val
+    }
 }
 
+/// JIT helper: RISC-V store-conditional.
+///
+/// SC is a store for translation and protection purposes:
+/// a valid LR reservation does not permit writing through a
+/// read-only TLB entry after Linux has write-protected a COW
+/// page.
+///
+/// # Safety
+/// `env` must point to a valid `RiscvCpu`.
 #[no_mangle]
 pub unsafe extern "sysv64" fn machina_sc_op(
     env: *mut u8,
@@ -1470,6 +1476,10 @@ pub unsafe extern "sysv64" fn machina_sc_op(
     0
 }
 
+/// JIT helper: RISC-V atomic memory operation.
+///
+/// # Safety
+/// `env` must point to a valid `RiscvCpu`.
 #[no_mangle]
 pub unsafe extern "sysv64" fn machina_amo_op(
     env: *mut u8,
