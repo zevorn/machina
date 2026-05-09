@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -390,6 +390,36 @@ fn test_aclint_mtimecmp_disable() {
 }
 
 #[test]
+fn test_aclint_mtimecmp_disable_cancels_stale_timer_worker() {
+    let aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti = 7u32;
+    let exits = Arc::new(AtomicUsize::new(0));
+    let exits_seen = Arc::clone(&exits);
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
+    aclint.connect_mti(0, line);
+    aclint.connect_exit_request(
+        0,
+        Arc::new(move || {
+            exits_seen.fetch_add(1, Ordering::AcqRel);
+        }),
+    );
+
+    let now = aclint.read(0xBFF8, 8);
+    aclint.write(0x4000, 8, now + 100_000);
+    aclint.write(0x4000, 8, u64::MAX);
+
+    std::thread::sleep(Duration::from_millis(50));
+
+    assert!(!sink.level(mti), "disabled timer must not assert MTI");
+    assert_eq!(
+        exits.load(Ordering::Acquire),
+        0,
+        "disabled stale timer worker must not request exit"
+    );
+}
+
+#[test]
 fn test_aclint_mtimecmp_retarget_past() {
     let aclint = Aclint::new(1);
     let sink = Arc::new(TestIrqSink::new(16));
@@ -401,6 +431,43 @@ fn test_aclint_mtimecmp_retarget_past() {
     aclint.write(0xBFF8, 8, 1000);
     aclint.write(0x4000, 8, 500);
     assert!(sink.level(mti), "MTI should be high when mtimecmp < mtime");
+}
+
+#[test]
+fn test_aclint_mtimecmp_past_retarget_cancels_stale_timer_worker() {
+    let aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti = 7u32;
+    let exits = Arc::new(AtomicUsize::new(0));
+    let exits_seen = Arc::clone(&exits);
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
+    aclint.connect_mti(0, line);
+    aclint.connect_exit_request(
+        0,
+        Arc::new(move || {
+            exits_seen.fetch_add(1, Ordering::AcqRel);
+        }),
+    );
+
+    let now = aclint.read(0xBFF8, 8);
+    aclint.write(0x4000, 8, now + 300_000);
+    let past = aclint.read(0xBFF8, 8).saturating_sub(1);
+    aclint.write(0x4000, 8, past);
+
+    assert!(sink.level(mti), "past retarget should assert MTI now");
+    assert_eq!(
+        exits.load(Ordering::Acquire),
+        1,
+        "past retarget should request exactly one immediate exit"
+    );
+
+    std::thread::sleep(Duration::from_millis(60));
+
+    assert_eq!(
+        exits.load(Ordering::Acquire),
+        1,
+        "old future timer worker must not request another exit"
+    );
 }
 
 #[test]

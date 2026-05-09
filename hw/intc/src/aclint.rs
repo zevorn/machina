@@ -35,10 +35,7 @@ const TIMER_DISABLED: u64 = u64::MAX;
 type ExitRequest = Arc<dyn Fn() + Send + Sync>;
 
 /// Shared timer state for the background timer thread.
-/// Each hart has its own cancel token (AtomicU64) that
-/// the main thread bumps to invalidate stale timers.
 struct TimerState {
-    cancel_gen: Vec<AtomicU64>,
     worker_active: Vec<AtomicBool>,
     deadline_ns: Vec<AtomicU64>,
     epoch: Instant,
@@ -146,13 +143,11 @@ impl Aclint {
         let n = num_harts as usize;
         let mut mti = Vec::with_capacity(n);
         let mut msi = Vec::with_capacity(n);
-        let mut gens = Vec::with_capacity(n);
         let mut workers = Vec::with_capacity(n);
         let mut deadlines = Vec::with_capacity(n);
         for _ in 0..n {
             mti.push(None);
             msi.push(None);
-            gens.push(AtomicU64::new(0));
             workers.push(AtomicBool::new(false));
             deadlines.push(AtomicU64::new(TIMER_DISABLED));
         }
@@ -169,7 +164,6 @@ impl Aclint {
             msi_outputs: parking_lot::Mutex::new(msi),
             wfi_waker: parking_lot::Mutex::new(None),
             timer_state: Arc::new(TimerState {
-                cancel_gen: gens,
                 worker_active: workers,
                 deadline_ns: deadlines,
                 epoch: Instant::now(),
@@ -177,6 +171,11 @@ impl Aclint {
             virtual_clock: AtomicBool::new(false),
             exit_requests: parking_lot::Mutex::new(vec![None; n]),
         }
+    }
+
+    fn cancel_timer(&self, hart: usize) {
+        self.timer_state.deadline_ns[hart]
+            .store(TIMER_DISABLED, Ordering::Release);
     }
 
     pub fn connect_mti(&self, hart: u32, irq: IrqLine) {
@@ -392,19 +391,16 @@ impl Aclint {
         }
     }
 
-    /// Cancel all pending timer threads by bumping the
-    /// cancel generation for every hart.  After this call
-    /// any sleeping timer thread that wakes up will find
-    /// its stored generation stale and return without
-    /// requesting an exec-loop exit.
+    /// Cancel all pending timer deadlines.  After this call
+    /// any sleeping timer thread that wakes up will find its
+    /// stored deadline stale and return without requesting an
+    /// exec-loop exit.
     ///
     /// Must be called before CPU teardown so stale timer
     /// callbacks cannot target a dropped runtime.
     pub fn cancel_timers(&self) {
-        for (hart, gen) in self.timer_state.cancel_gen.iter().enumerate() {
-            gen.fetch_add(1, Ordering::SeqCst);
-            self.timer_state.deadline_ns[hart]
-                .store(TIMER_DISABLED, Ordering::Release);
+        for hart in 0..self.num_harts as usize {
+            self.cancel_timer(hart);
         }
     }
 
@@ -522,8 +518,7 @@ impl Aclint {
                     return;
                 };
 
-                self.timer_state.cancel_gen[hart]
-                    .fetch_add(1, Ordering::SeqCst);
+                self.cancel_timer(hart);
 
                 let pending = {
                     let mut regs = self.regs.borrow();
