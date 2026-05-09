@@ -83,6 +83,18 @@ fn usage() {
     );
     eprintln!("  --trace file  Trace output file");
     eprintln!("  -h, --help    Show this help");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  Boot a kernel with the built-in SBI firmware:");
+    eprintln!("    machina -bios builtin -kernel vmlinux");
+    eprintln!();
+    eprintln!("  Boot with a virtio block disk and TAP networking:");
+    eprintln!("    machina -kernel vmlinux -drive file=rootfs.img \\");
+    eprintln!("      -netdev tap,id=net0,ifname=tap0 \\");
+    eprintln!("      -device virtio-net-device,netdev=net0");
+    eprintln!();
+    eprintln!("  Pause at startup and wait for a GDB client on tcp::1234:");
+    eprintln!("    machina -kernel vmlinux -s -S");
 }
 
 struct CliArgs {

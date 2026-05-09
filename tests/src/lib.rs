@@ -5,6 +5,8 @@ mod arch_exit;
 #[cfg(test)]
 mod backend;
 #[cfg(test)]
+mod cli_help;
+#[cfg(test)]
 mod cli_initrd;
 #[cfg(test)]
 mod cli_kernel;
