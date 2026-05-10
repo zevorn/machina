@@ -11,6 +11,7 @@ machina-hw-riscv = { workspace = true }
 machina-memory = { workspace = true }
 machina-oracle = { workspace = true }
 tempfile = { workspace = true }
+flate2 = { workspace = true }
 
 [lints]
 workspace = true

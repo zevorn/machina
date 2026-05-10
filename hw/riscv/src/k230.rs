@@ -19,10 +19,19 @@ use machina_hw_core::irq::{InterruptSource, IrqLine, IrqSink};
 use machina_hw_intc::aclint::{Aclint, AclintMmio};
 use machina_hw_intc::plic::{Plic, PlicIrqSink, PlicMmio};
 use machina_hw_misc::unimp::{Unimp, UnimpMmio};
+use machina_hw_sd::card::{SdCardConfig, SdMemoryCard};
+use machina_hw_sd::sdhci::{Sdhci, SdhciMmio};
+use machina_hw_sd::{SdBus, SdCard};
+use machina_hw_storage::{BlockMedia, FileBackend};
 use machina_hw_watchdog::k230::{K230Wdt, K230WdtMmio, MMIO_SIZE};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::ram::RamBlock;
 use machina_memory::region::MemoryRegion;
+
+use crate::k230_gzip_dma::{
+    K230GzipDma, K230GzipDmaMmio, K230_GZIP_DMA_MMIO_SIZE,
+};
+use crate::k230_pufs::{K230Pufs, K230PufsMmio, K230_PUFS_MMIO_SIZE};
 
 #[derive(Clone, Copy)]
 pub struct MemMapEntry {
@@ -67,6 +76,7 @@ pub enum K230MemMap {
     Stc,
     Bootrom,
     Security,
+    Noc,
     Uart0,
     Uart1,
     Uart2,
@@ -236,6 +246,10 @@ pub const K230_MEMMAP: [MemMapEntry; K230MemMap::Count as usize] = {
         base: 0x9121_0000,
         size: 0x0000_8000,
     };
+    m[K230MemMap::Noc as usize] = MemMapEntry {
+        base: 0x9130_0000,
+        size: 0x0000_4000,
+    };
     m[K230MemMap::Uart0 as usize] = MemMapEntry {
         base: 0x9140_0000,
         size: 0x0000_1000,
@@ -384,7 +398,7 @@ pub struct K230Machine {
     mom_tree: MObjectTree,
     ram_size: u64,
     cpu_count: u32,
-    address_space: Option<AddressSpace>,
+    address_space: Option<Arc<AddressSpace>>,
     sysbus: Option<SysBus>,
     ram_block: Option<Arc<RamBlock>>,
     sram_block: Option<Arc<RamBlock>>,
@@ -393,6 +407,9 @@ pub struct K230Machine {
     aclint: Option<Arc<Aclint>>,
     uarts: Vec<Arc<Uart16550>>,
     wdts: Vec<Arc<K230Wdt>>,
+    sdhcis: Vec<Arc<Sdhci>>,
+    gzip_dma: Option<Arc<K230GzipDma>>,
+    pufs: Option<Arc<K230Pufs>>,
     unimp: Vec<Arc<Unimp>>,
     pub(crate) cpus: Arc<Mutex<Vec<Option<RiscvCpu>>>>,
     pub(crate) shared_mip: Arc<AtomicU64>,
@@ -428,6 +445,9 @@ impl K230Machine {
             aclint: None,
             uarts: Vec::new(),
             wdts: Vec::new(),
+            sdhcis: Vec::new(),
+            gzip_dma: None,
+            pufs: None,
             unimp: Vec::new(),
             cpus: Arc::new(Mutex::new(Vec::new())),
             shared_mip: Arc::new(AtomicU64::new(0)),
@@ -447,7 +467,7 @@ impl K230Machine {
 
     pub fn address_space(&self) -> &AddressSpace {
         self.address_space
-            .as_ref()
+            .as_deref()
             .expect("machine not initialized")
     }
 
@@ -629,6 +649,15 @@ impl K230Machine {
         for wdt in &self.wdts {
             Self::track_mom_info(&mut tree, wdt.object_info());
         }
+        for sdhci in &self.sdhcis {
+            Self::track_mom_info(&mut tree, sdhci.object_info());
+        }
+        if let Some(gzip_dma) = &self.gzip_dma {
+            Self::track_mom_info(&mut tree, gzip_dma.object_info());
+        }
+        if let Some(pufs) = &self.pufs {
+            Self::track_mom_info(&mut tree, pufs.object_info());
+        }
         for dev in &self.unimp {
             Self::track_mom_info(
                 &mut tree,
@@ -660,6 +689,71 @@ impl K230Machine {
         );
         dev.register_mmio(region, GPA::new(entry.base))?;
         Ok(dev)
+    }
+
+    fn map_gzip_dma(
+        sysbus: &mut SysBus,
+    ) -> Result<Arc<K230GzipDma>, Box<dyn std::error::Error>> {
+        let dev = K230GzipDma::new_named("k230-gzip-dma");
+        dev.attach_to_bus(sysbus)?;
+        let entry = K230_MEMMAP[K230MemMap::Gsdma as usize];
+        let region = MemoryRegion::io(
+            "k230-gzip-dma",
+            K230_GZIP_DMA_MMIO_SIZE,
+            Arc::new(K230GzipDmaMmio(Arc::clone(&dev))),
+        );
+        dev.register_mmio(region, GPA::new(entry.base))?;
+        Ok(dev)
+    }
+
+    fn map_pufs(
+        sysbus: &mut SysBus,
+    ) -> Result<Arc<K230Pufs>, Box<dyn std::error::Error>> {
+        let dev = K230Pufs::new_named("k230-pufs");
+        dev.attach_to_bus(sysbus)?;
+        let entry = K230_MEMMAP[K230MemMap::Security as usize];
+        let region = MemoryRegion::io(
+            "k230-pufs",
+            K230_PUFS_MMIO_SIZE,
+            Arc::new(K230PufsMmio(Arc::clone(&dev))),
+        );
+        dev.register_mmio(region, GPA::new(entry.base))?;
+        Ok(dev)
+    }
+
+    fn map_sdhci(
+        sysbus: &mut SysBus,
+        name: &str,
+        entry: MemMapEntry,
+    ) -> Result<Arc<Sdhci>, Box<dyn std::error::Error>> {
+        let dev = Arc::new(Sdhci::new_named(name));
+        dev.attach_to_bus(sysbus)?;
+        let region = MemoryRegion::io(
+            name,
+            entry.size,
+            Arc::new(SdhciMmio(Arc::clone(&dev))),
+        );
+        dev.register_mmio(region, GPA::new(entry.base))?;
+        Ok(dev)
+    }
+
+    fn attach_drive_to_sd1(
+        drive: &Option<PathBuf>,
+        buses: &[Arc<SdBus>],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(path) = drive else {
+            return Ok(());
+        };
+        let backend = FileBackend::open(path.clone(), false)?;
+        let media = BlockMedia::new(backend, 512)?;
+        let card = Arc::new(SdMemoryCard::new_named(
+            "k230-sd1-card",
+            media,
+            SdCardConfig::default(),
+        )?);
+        let card_for_bus: Arc<dyn SdCard> = card;
+        buses[1].insert_card(card_for_bus);
+        Ok(())
     }
 
     fn plic_irq_line(plic: &Arc<Plic>, source: u32) -> IrqLine {
@@ -726,9 +820,6 @@ impl K230Machine {
             (K230MemMap::KpuCfg, "kpu_cfg"),
             (K230MemMap::Fft, "fft"),
             (K230MemMap::Ai2d, "2d-engine.ai"),
-            (K230MemMap::Gsdma, "gsdma"),
-            (K230MemMap::Dma, "dma"),
-            (K230MemMap::Gzip, "decomp-gzip"),
             (K230MemMap::NonAi2d, "2d-engine.non-ai"),
             (K230MemMap::Isp, "isp"),
             (K230MemMap::Dewarp, "dewarp"),
@@ -750,7 +841,7 @@ impl K230Machine {
             (K230MemMap::Ts, "ts"),
             (K230MemMap::Hdi, "hdi"),
             (K230MemMap::Stc, "stc"),
-            (K230MemMap::Security, "security"),
+            (K230MemMap::Noc, "noc"),
             (K230MemMap::I2c0, "i2c0"),
             (K230MemMap::I2c1, "i2c1"),
             (K230MemMap::I2c2, "i2c2"),
@@ -764,8 +855,6 @@ impl K230Machine {
             (K230MemMap::I2s, "i2s"),
             (K230MemMap::Usb0, "usb0"),
             (K230MemMap::Usb1, "usb1"),
-            (K230MemMap::Sd0, "sd0"),
-            (K230MemMap::Sd1, "sd1"),
             (K230MemMap::Qspi0, "qspi0"),
             (K230MemMap::Qspi1, "qspi1"),
             (K230MemMap::Spi, "spi"),
@@ -907,6 +996,27 @@ impl Machine for K230Machine {
             wdts.push(wdt);
         }
 
+        let mut sdhcis = Vec::with_capacity(2);
+        let mut sd_buses = Vec::with_capacity(2);
+        for (index, map) in
+            [(0usize, K230MemMap::Sd0), (1usize, K230MemMap::Sd1)]
+        {
+            let name = format!("sd{index}");
+            let bus = Arc::new(SdBus::new());
+            let sdhci =
+                Self::map_sdhci(&mut sysbus, &name, K230_MEMMAP[map as usize])?;
+            sdhci.connect_bus(Arc::clone(&bus));
+            bus.set_host(
+                Arc::clone(&sdhci) as Arc<dyn machina_hw_sd::SdBusHost>
+            );
+            sd_buses.push(bus);
+            sdhcis.push(sdhci);
+        }
+        Self::attach_drive_to_sd1(&opts.drive, &sd_buses)?;
+
+        let gzip_dma = Self::map_gzip_dma(&mut sysbus)?;
+        let pufs = Self::map_pufs(&mut sysbus)?;
+
         let mut unimp = Vec::with_capacity(Self::unimp_specs().len());
         for &(map, name) in Self::unimp_specs() {
             unimp.push(Self::map_unimp(
@@ -916,9 +1026,9 @@ impl Machine for K230Machine {
             )?);
         }
 
-        self.address_space = Some(AddressSpace::new(root));
+        let mut address_space = AddressSpace::new(root);
         {
-            let address_space = self.address_space.as_mut().unwrap();
+            let address_space = &mut address_space;
             plic.realize_onto(&mut sysbus, address_space)?;
             aclint.realize_onto(&mut sysbus, address_space)?;
             for (index, uart) in uarts.iter().enumerate() {
@@ -950,11 +1060,23 @@ impl Machine for K230Machine {
             for wdt in &wdts {
                 wdt.realize_onto(&mut sysbus, address_space)?;
             }
+            for sdhci in &sdhcis {
+                sdhci.realize_onto(&mut sysbus, address_space)?;
+            }
+            gzip_dma.realize_onto(&mut sysbus, address_space)?;
+            pufs.realize_onto(&mut sysbus, address_space)?;
             for dev in &unimp {
                 dev.realize_onto(&mut sysbus, address_space)?;
             }
         }
+        let address_space = Arc::new(address_space);
+        for sdhci in &sdhcis {
+            sdhci.set_dma_address_space(Arc::clone(&address_space));
+        }
+        gzip_dma.set_dma_address_space(Arc::clone(&address_space));
+        pufs.set_dma_address_space(Arc::clone(&address_space));
 
+        self.address_space = Some(address_space);
         self.ram_block = Some(ram_block);
         self.sram_block = Some(sram_block);
         self.bootrom_block = Some(bootrom_block);
@@ -962,6 +1084,9 @@ impl Machine for K230Machine {
         self.aclint = Some(aclint);
         self.uarts = uarts;
         self.wdts = wdts;
+        self.sdhcis = sdhcis;
+        self.gzip_dma = Some(gzip_dma);
+        self.pufs = Some(pufs);
         self.unimp = unimp;
         self.sysbus = Some(sysbus);
         self.refresh_mom_tree();
@@ -981,6 +1106,15 @@ impl Machine for K230Machine {
         }
         for wdt in &self.wdts {
             wdt.reset_runtime();
+        }
+        for sdhci in &self.sdhcis {
+            sdhci.reset_runtime();
+        }
+        if let Some(gzip_dma) = &self.gzip_dma {
+            gzip_dma.reset_runtime();
+        }
+        if let Some(pufs) = &self.pufs {
+            pufs.reset_runtime();
         }
         for dev in &self.unimp {
             dev.reset_runtime();

@@ -3,8 +3,10 @@ mod tests {
     use std::io::Read;
     use std::path::{Path, PathBuf};
 
+    use flate2::read::GzDecoder;
     use machina_core::machine::{LoaderSpec, Machine, MachineOpts};
     use machina_hw_riscv::k230::K230Machine;
+    use machina_hw_riscv::k230_boot::K230_BOOTROM_BASE;
 
     #[test]
     fn loader_spec_parses_qemu_loader_syntax() {
@@ -54,6 +56,13 @@ mod tests {
         let mut data = vec![0; len];
         file.read_exact(&mut data).unwrap();
         data
+    }
+
+    fn decompress_gzip_to(src: &Path, dst: &Path) -> u64 {
+        let input = std::fs::File::open(src).unwrap();
+        let mut decoder = GzDecoder::new(input);
+        let mut output = std::fs::File::create(dst).unwrap();
+        std::io::copy(&mut decoder, &mut output).unwrap()
     }
 
     fn align_up_4k(value: u64) -> u64 {
@@ -173,6 +182,34 @@ mod tests {
     }
 
     #[test]
+    fn k230_bundled_uboot_sd_artifacts_initialize_sdk_boot_path() {
+        let dir = bundled_k230_linux_dir();
+        let uboot = dir.join("u-boot");
+        let sd_gz = dir.join("sysimage-sdcard.img.gz");
+
+        assert!(uboot.is_file(), "missing {}", uboot.display());
+        assert!(sd_gz.is_file(), "missing {}", sd_gz.display());
+
+        let temp = tempfile::tempdir().unwrap();
+        let sd = temp.path().join("sysimage-sdcard.img");
+        let raw_len = decompress_gzip_to(&sd_gz, &sd);
+        assert!(raw_len >= 512 * 1024 * 1024);
+
+        let mut machine = K230Machine::new();
+        let opts = MachineOpts {
+            bios: Some(uboot),
+            drive: Some(sd),
+            ..k230_opts()
+        };
+        machine.init(&opts).unwrap();
+        machine.boot().unwrap();
+
+        let cpus = machine.cpus_lock();
+        let cpu = cpus[0].as_ref().unwrap();
+        assert_eq!(cpu.pc, K230_BOOTROM_BASE);
+    }
+
+    #[test]
     fn k230_builtin_boot_places_dtb_below_initrd_when_top_overlaps() {
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("Image");
@@ -268,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn k230_dtb_fixup_disables_sdk_sdhci_nodes() {
+    fn k230_dtb_fixup_preserves_sdk_sdhci_nodes() {
         let mut blob =
             machina_hw_riscv::k230_dtb::test_fixture_dtb_with_sdhci_nodes();
         blob = machina_hw_riscv::k230_dtb::fixup_k230_dtb(
@@ -284,7 +321,7 @@ mod tests {
                 "/soc/sdhci0@91580000"
             )
             .unwrap(),
-            Some("disabled".to_string()),
+            Some("okay".to_string()),
         );
         assert_eq!(
             machina_hw_riscv::k230_dtb::dtb_node_status(
@@ -292,7 +329,7 @@ mod tests {
                 "/soc/sdhci1@91581000"
             )
             .unwrap(),
-            Some("disabled".to_string()),
+            Some("okay".to_string()),
         );
         assert!(blob
             .windows(b"console=ttyS0,115200 earlycon=sbi cma=0".len())
