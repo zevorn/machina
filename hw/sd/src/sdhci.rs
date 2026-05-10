@@ -78,6 +78,7 @@ const CMD_SEND_CSD: u8 = 9;
 const CMD_SEND_CID: u8 = 10;
 const CMD_STOP_TRANSMISSION: u8 = 12;
 const CMD_SEND_STATUS: u8 = 13;
+const CMD_APP_CMD: u8 = 55;
 const CMD_READ_SINGLE_BLOCK: u8 = 17;
 const CMD_READ_MULTIPLE_BLOCK: u8 = 18;
 const CMD_WRITE_BLOCK: u8 = 24;
@@ -109,6 +110,7 @@ struct SdhciRegs {
     data_buffer: Vec<u8>,
     data_offset: usize,
     write_transfer_active: bool,
+    app_command_pending: bool,
     snps_vendor_regs: Vec<u32>,
 }
 
@@ -138,6 +140,7 @@ impl SdhciRegs {
             data_buffer: Vec::new(),
             data_offset: 0,
             write_transfer_active: false,
+            app_command_pending: false,
             snps_vendor_regs: vec![0; SNPS_VENDOR_REG_WORDS],
         }
     }
@@ -368,14 +371,21 @@ impl Sdhci {
         };
         let mut response = [0; 16];
         match bus.do_command(&SdRequest::new(cmd, argument), &mut response) {
-            Ok(_) => {
-                let (block_len, block_count, dma_address, dma_enabled) = {
+            Ok(n) => {
+                let (
+                    block_len,
+                    block_count,
+                    dma_address,
+                    dma_enabled,
+                    app_command_pending,
+                ) = {
                     let regs = self.regs.lock();
                     (
                         regs.transfer_block_len(),
                         regs.transfer_block_count(),
                         regs.dma_address,
                         regs.transfer_mode & TRANSFER_MODE_DMA_ENABLE != 0,
+                        regs.app_command_pending,
                     )
                 };
                 let dma_address_space = if dma_enabled {
@@ -387,7 +397,10 @@ impl Sdhci {
                 let mut write_buffer_len = None;
                 let mut dma_complete = false;
 
-                if is_read_data_command(cmd) && bus.data_ready() {
+                if n > 0
+                    && is_read_data_command(cmd, app_command_pending)
+                    && bus.data_ready()
+                {
                     let transfer_len =
                         block_len * transfer_blocks(cmd, block_count);
                     let mut data = vec![0; transfer_len];
@@ -399,7 +412,10 @@ impl Sdhci {
                             read_buffer = Some(data);
                         }
                     }
-                } else if is_write_data_command(cmd) && bus.receive_ready() {
+                } else if n > 0
+                    && is_write_data_command(cmd)
+                    && bus.receive_ready()
+                {
                     let transfer_len =
                         block_len * transfer_blocks(cmd, block_count);
                     if let Some(ref aspace) = dma_address_space {
@@ -414,6 +430,7 @@ impl Sdhci {
                 }
 
                 let mut regs = self.regs.lock();
+                regs.app_command_pending = cmd == CMD_APP_CMD && n > 0;
                 regs.response = response_words(cmd, &response);
                 regs.normal_int_status |= INT_COMMAND_COMPLETE;
                 if cmd == CMD_STOP_TRANSMISSION {
@@ -441,6 +458,7 @@ impl Sdhci {
                 }
             }
             Err(err) => {
+                self.regs.lock().app_command_pending = false;
                 self.record_command_error(err);
             }
         }
@@ -612,15 +630,11 @@ fn is_write_data_command(cmd: u8) -> bool {
     matches!(cmd, CMD_WRITE_BLOCK | CMD_WRITE_MULTIPLE_BLOCK)
 }
 
-fn is_read_data_command(cmd: u8) -> bool {
+fn is_read_data_command(cmd: u8, app_command_pending: bool) -> bool {
     matches!(
         cmd,
-        CMD_SWITCH_FUNC
-            | CMD_SEND_STATUS
-            | CMD_READ_SINGLE_BLOCK
-            | CMD_READ_MULTIPLE_BLOCK
-            | ACMD_SEND_SCR
-    )
+        CMD_SWITCH_FUNC | CMD_READ_SINGLE_BLOCK | CMD_READ_MULTIPLE_BLOCK
+    ) || (app_command_pending && matches!(cmd, CMD_SEND_STATUS | ACMD_SEND_SCR))
 }
 
 fn transfer_blocks(cmd: u8, block_count: usize) -> usize {
