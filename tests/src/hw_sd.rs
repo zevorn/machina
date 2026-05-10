@@ -970,6 +970,36 @@ fn test_sdhci_sdma_reads_scr_after_acmd51() {
 }
 
 #[test]
+fn test_sdhci_sdma_reads_sd_status_after_acmd13() {
+    let card = Arc::new(sd_card(vec![0; 1024]));
+    let rca = select_card(&card);
+
+    let dma_addr = 0x2000;
+    let aspace = make_ram_aspace(0x4000);
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card.clone());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x08, 4, u64::from(rca << 16));
+    mmio.write(0x0e, 2, 55 << 8);
+    mmio.write(0x30, 2, 1);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 64);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, u64::from(rca << 16));
+    mmio.write(0x0e, 2, 13 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_eq!(mmio.read(0x30, 2) & (1 << 5), 0);
+    assert!(!card.data_ready());
+}
+
+#[test]
 fn test_sdhci_sdma_reads_switch_status_after_cmd6() {
     let card = Arc::new(sd_card(vec![0; 1024]));
     select_card(&card);

@@ -77,6 +77,7 @@ const CMD_SWITCH_FUNC: u8 = 6;
 const CMD_SEND_CSD: u8 = 9;
 const CMD_SEND_CID: u8 = 10;
 const CMD_STOP_TRANSMISSION: u8 = 12;
+const CMD_SEND_STATUS: u8 = 13;
 const CMD_READ_SINGLE_BLOCK: u8 = 17;
 const CMD_READ_MULTIPLE_BLOCK: u8 = 18;
 const CMD_WRITE_BLOCK: u8 = 24;
@@ -615,6 +616,7 @@ fn is_read_data_command(cmd: u8) -> bool {
     matches!(
         cmd,
         CMD_SWITCH_FUNC
+            | CMD_SEND_STATUS
             | CMD_READ_SINGLE_BLOCK
             | CMD_READ_MULTIPLE_BLOCK
             | ACMD_SEND_SCR
