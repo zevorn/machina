@@ -925,6 +925,28 @@ fn test_sdhci_normal_cmd13_does_not_consume_stale_card_data() {
 }
 
 #[test]
+fn test_sdhci_acmd6_does_not_consume_stale_card_data() {
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    bus.set_host(controller.clone());
+    let mmio = SdhciMmio(controller);
+
+    let card = MockSdCard::new(true);
+    card.set_response(&[0x00, 0x00, 0x01, 0xaa]);
+    assert!(card.data_ready());
+    bus.insert_card(card.clone());
+
+    mmio.write(0x0e, 2, 55 << 8);
+    mmio.write(0x0e, 2, 6 << 8);
+
+    assert_eq!(card.commands(), vec![(55, 0), (6, 0)]);
+    assert_ne!(mmio.read(0x30, 2) & (1 << 0), 0);
+    assert_eq!(mmio.read(0x30, 2) & (1 << 5), 0);
+    assert_eq!(*card.read_pos.lock().unwrap(), 0);
+}
+
+#[test]
 fn test_sdhci_command_without_card_sets_error_interrupt_status() {
     let bus = Arc::new(SdBus::new());
     let controller = Arc::new(Sdhci::new());

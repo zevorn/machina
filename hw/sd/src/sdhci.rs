@@ -733,10 +733,10 @@ fn issue_auto_cmd12(bus: &SdBus) {
 }
 
 fn is_read_data_command(cmd: u8, app_command_pending: bool) -> bool {
-    matches!(
-        cmd,
-        CMD_SWITCH_FUNC | CMD_READ_SINGLE_BLOCK | CMD_READ_MULTIPLE_BLOCK
-    ) || (app_command_pending && matches!(cmd, CMD_SEND_STATUS | ACMD_SEND_SCR))
+    matches!(cmd, CMD_READ_SINGLE_BLOCK | CMD_READ_MULTIPLE_BLOCK)
+        || (!app_command_pending && cmd == CMD_SWITCH_FUNC)
+        || (app_command_pending
+            && matches!(cmd, CMD_SEND_STATUS | ACMD_SEND_SCR))
 }
 
 fn transfer_blocks(cmd: u8, block_count: usize) -> usize {
