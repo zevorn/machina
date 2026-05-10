@@ -1121,3 +1121,146 @@ fn modrm_offset_rbp_disp8() {
     let last = code[code.len() - 1];
     assert_eq!(last, 0x00, "RBP base with offset=0 should have disp8=0");
 }
+
+// ===== Jump-encoding boundary tests (#75) =====
+
+/// IR Cond -> expected X86Cond opcode-low-nibble (used as the
+/// second byte of a 0F 8x rel32 Jcc encoding).
+fn jcc_opcode_low(cond: X86Cond) -> u8 {
+    0x80 | (cond as u8)
+}
+
+#[test]
+fn from_tcg_maps_each_ir_cond_to_x86_jcc_byte() {
+    use machina_accel::ir::Cond;
+    let cases: &[(Cond, X86Cond)] = &[
+        (Cond::Eq, X86Cond::Je),
+        (Cond::Ne, X86Cond::Jne),
+        (Cond::Lt, X86Cond::Jl),
+        (Cond::Ge, X86Cond::Jge),
+        (Cond::Le, X86Cond::Jle),
+        (Cond::Gt, X86Cond::Jg),
+        (Cond::Ltu, X86Cond::Jb),
+        (Cond::Geu, X86Cond::Jae),
+        (Cond::Leu, X86Cond::Jbe),
+        (Cond::Gtu, X86Cond::Ja),
+        (Cond::TstEq, X86Cond::Je),
+        (Cond::TstNe, X86Cond::Jne),
+        (Cond::Always, X86Cond::Je),
+        (Cond::Never, X86Cond::Jne),
+    ];
+    for &(ir, x86) in cases {
+        let mapped = X86Cond::from_tcg(ir);
+        assert_eq!(
+            mapped, x86,
+            "IR Cond::{ir:?} should map to X86Cond::{x86:?}, got {mapped:?}",
+        );
+
+        // Also verify the resulting Jcc encodes the same low
+        // opcode nibble (0x80 | cond) by emitting it with a
+        // small forward target.
+        let mut buf = CodeBuffer::new(4096).unwrap();
+        for _ in 0..16 {
+            buf.emit_u8(0x90);
+        }
+        emit_jcc(&mut buf, mapped, 100);
+        let code = buf.as_slice();
+        assert_eq!(code[16], 0x0F, "Jcc must start with 0x0F prefix");
+        assert_eq!(
+            code[17],
+            jcc_opcode_low(mapped),
+            "Jcc opcode for {x86:?} should be 0F {:02X}",
+            jcc_opcode_low(mapped),
+        );
+    }
+}
+
+#[test]
+fn jcc_max_forward_disp32_encodes_i32_max() {
+    let mut buf = CodeBuffer::new(4096).unwrap();
+    // After the 6-byte Jcc, `after = 6`. Largest valid forward
+    // target is 6 + i32::MAX, which makes disp = i32::MAX.
+    let target = 6usize + i32::MAX as usize;
+    emit_jcc(&mut buf, X86Cond::Je, target);
+    let code = buf.as_slice();
+    assert_eq!(code[0], 0x0F);
+    assert_eq!(code[1], 0x84);
+    assert_eq!(&code[2..6], &(i32::MAX as u32).to_le_bytes());
+}
+
+#[test]
+#[should_panic(expected = "jcc displacement out of i32 range")]
+fn jcc_just_past_max_forward_panics() {
+    let mut buf = CodeBuffer::new(4096).unwrap();
+    // disp = i32::MAX + 1 -> overflow.
+    let target = 6usize + i32::MAX as usize + 1;
+    emit_jcc(&mut buf, X86Cond::Je, target);
+}
+
+#[test]
+fn jmp_max_forward_disp32_encodes_i32_max() {
+    let mut buf = CodeBuffer::new(4096).unwrap();
+    // After the 5-byte JMP, `after = 5`. Largest valid forward
+    // target is 5 + i32::MAX, making disp = i32::MAX.
+    let target = 5usize + i32::MAX as usize;
+    emit_jmp(&mut buf, target);
+    let code = buf.as_slice();
+    assert_eq!(code[0], 0xE9);
+    assert_eq!(&code[1..5], &(i32::MAX as u32).to_le_bytes());
+}
+
+#[test]
+fn jmp_max_backward_disp32_from_offset_pad() {
+    // Pad until buf.offset() is well past i32::MAX worth of
+    // bytes is impossible without OOM; test the largest
+    // *practical* backward disp instead by padding 100 bytes
+    // and jumping to offset 0 — disp = -(100 + 5) = -105.
+    let mut buf = CodeBuffer::new(4096).unwrap();
+    for _ in 0..100 {
+        buf.emit_u8(0x90);
+    }
+    emit_jmp(&mut buf, 0);
+    let code = buf.as_slice();
+    assert_eq!(code[100], 0xE9);
+    let disp = i32::from_le_bytes(code[101..105].try_into().unwrap());
+    assert_eq!(disp, -(100 + 5));
+}
+
+#[test]
+fn patch_jump_backward_writes_negative_disp() {
+    // Layout:
+    //   [0 .. 8)  target padding (the patched jump points here)
+    //   [8 .. 13) JMP placeholder
+    let mut buf = CodeBuffer::new(4096).unwrap();
+    let target = buf.offset();
+    for _ in 0..8 {
+        buf.emit_u8(0x90);
+    }
+    let jmp_offset = buf.offset();
+    buf.emit_u8(0xE9);
+    buf.emit_u32(0); // placeholder
+
+    let gen = X86_64CodeGen::new();
+    gen.patch_jump(&buf, jmp_offset, target);
+
+    let expected_disp = (target as i32) - (jmp_offset as i32 + 5);
+    assert!(expected_disp < 0, "test should drive the negative path");
+    let actual = i32::from_le_bytes(
+        buf.as_slice()[jmp_offset + 1..jmp_offset + 5]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(actual, expected_disp);
+}
+
+#[test]
+fn jcc_to_same_byte_offset_encodes_negative_six() {
+    // Jcc to its own start-of-instruction: target = jcc_offset,
+    // after = jcc_offset + 6, so disp = -6.
+    let mut buf = CodeBuffer::new(4096).unwrap();
+    let jcc_offset = buf.offset();
+    emit_jcc(&mut buf, X86Cond::Je, jcc_offset);
+    let code = buf.as_slice();
+    let disp = i32::from_le_bytes(code[2..6].try_into().unwrap());
+    assert_eq!(disp, -6);
+}
