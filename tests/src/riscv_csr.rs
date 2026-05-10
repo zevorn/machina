@@ -250,3 +250,212 @@ fn test_unknown_csr_returns_error() {
     let cpu = RiscvCpu::new();
     assert!(cpu.try_csr_read(0x3FF).is_err());
 }
+
+// ===== Table-driven CSR coverage (#72) =====
+//
+// Each table describes one orthogonal axis of CSR behaviour.
+// Per-row asserts include the row label so a regression points
+// at the exact CSR/bit that broke.
+
+// (bit, mnemonic): bits in mstatus that should round-trip through
+// csr_write. UXL/SXL are deliberately excluded because they are
+// fixed at 0b10 (RV64) and therefore behave as WARL/read-only.
+const MSTATUS_WRITABLE_BITS: &[(u32, &str)] = &[
+    (1, "SIE"),
+    (3, "MIE"),
+    (5, "SPIE"),
+    (7, "MPIE"),
+    (8, "SPP"),
+    (13, "FS_lo"),
+    (14, "FS_hi"),
+    (17, "MPRV"),
+    (18, "SUM"),
+    (19, "MXR"),
+];
+
+// (bit_mask, mnemonic): bits in mstatus that must NOT change
+// after csr_write. UXL/SXL are pinned at 0b10 by the RV64
+// hardware definition; bits 23/24 are WPRI in the RV64 priv
+// spec and our MSTATUS_WRITE_MASK leaves them out.
+const MSTATUS_NON_WRITABLE_FIELDS: &[(u64, &str)] = &[
+    (3u64 << 32, "UXL"),
+    (3u64 << 34, "SXL"),
+    (1u64 << 23, "WPRI_23"),
+    (1u64 << 24, "WPRI_24"),
+];
+
+#[test]
+fn test_mstatus_writable_bits_table() {
+    for &(bit, name) in MSTATUS_WRITABLE_BITS {
+        let mut cpu = RiscvCpu::new();
+        let mask = 1u64 << bit;
+        cpu.csr_write(CSR_MSTATUS, mask);
+        let got = cpu.csr_read(CSR_MSTATUS) & mask;
+        assert_eq!(got, mask, "mstatus.{name} (bit {bit}) must be writable");
+    }
+}
+
+#[test]
+fn test_mstatus_warl_or_wpri_bits_table() {
+    for &(field_mask, name) in MSTATUS_NON_WRITABLE_FIELDS {
+        let mut cpu = RiscvCpu::new();
+        let baseline = cpu.csr_read(CSR_MSTATUS) & field_mask;
+
+        // Try to flip the bits the field covers.
+        cpu.csr_write(CSR_MSTATUS, !baseline);
+        let after_flip = cpu.csr_read(CSR_MSTATUS) & field_mask;
+        assert_eq!(
+            after_flip, baseline,
+            "mstatus.{name} ({field_mask:#x}) must stay at its hardware value",
+        );
+
+        // And explicit zeroing should not change a non-zero
+        // hardware-fixed value either.
+        cpu.csr_write(CSR_MSTATUS, 0);
+        let after_zero = cpu.csr_read(CSR_MSTATUS) & field_mask;
+        assert_eq!(
+            after_zero, baseline,
+            "mstatus.{name} ({field_mask:#x}) must survive a 0-write",
+        );
+    }
+}
+
+// (csr, m, s, u): expected access result at each privilege.
+// Ok = readable, NotOk = traps illegal.
+struct PrivCase {
+    csr: u16,
+    name: &'static str,
+    m: bool,
+    s: bool,
+    u: bool,
+}
+
+const PRIV_TABLE: &[PrivCase] = &[
+    PrivCase {
+        csr: CSR_MSTATUS,
+        name: "mstatus",
+        m: true,
+        s: false,
+        u: false,
+    },
+    PrivCase {
+        csr: CSR_MTVEC,
+        name: "mtvec",
+        m: true,
+        s: false,
+        u: false,
+    },
+    PrivCase {
+        csr: CSR_MEPC,
+        name: "mepc",
+        m: true,
+        s: false,
+        u: false,
+    },
+    PrivCase {
+        csr: CSR_SSTATUS,
+        name: "sstatus",
+        m: true,
+        s: true,
+        u: false,
+    },
+    PrivCase {
+        csr: CSR_STVEC,
+        name: "stvec",
+        m: true,
+        s: true,
+        u: false,
+    },
+    PrivCase {
+        csr: CSR_FFLAGS,
+        name: "fflags",
+        m: true,
+        s: true,
+        u: true,
+    },
+    PrivCase {
+        csr: CSR_FCSR,
+        name: "fcsr",
+        m: true,
+        s: true,
+        u: true,
+    },
+];
+
+#[test]
+fn test_csr_privilege_access_table() {
+    for case in PRIV_TABLE {
+        for (priv_level, expected) in [
+            (PrivLevel::Machine, case.m),
+            (PrivLevel::Supervisor, case.s),
+            (PrivLevel::User, case.u),
+        ] {
+            let mut cpu = RiscvCpu::new();
+            cpu.set_priv(priv_level);
+            let got = cpu.try_csr_read(case.csr).is_ok();
+            assert_eq!(
+                got, expected,
+                "{} read at {:?}: expected {expected}, got {got}",
+                case.name, priv_level,
+            );
+        }
+    }
+}
+
+// CSRs whose access bits encode read-only (top two bits = 0b11):
+// writes must trap and the read value must be preserved.
+const READ_ONLY_CSRS: &[(u16, &str)] = &[
+    (CSR_CYCLE, "cycle"),
+    (CSR_INSTRET, "instret"),
+    (CSR_TIME, "time"),
+    (CSR_MHARTID, "mhartid"),
+    (CSR_MVENDORID, "mvendorid"),
+    (CSR_MARCHID, "marchid"),
+    (CSR_MIMPID, "mimpid"),
+];
+
+#[test]
+fn test_read_only_csr_write_table() {
+    for &(addr, name) in READ_ONLY_CSRS {
+        let mut cpu = RiscvCpu::new();
+        let before = cpu.try_csr_read(addr).unwrap_or_else(|_| {
+            panic!("{name} ({addr:#x}) should be readable")
+        });
+
+        let result = cpu.try_csr_write(addr, !before);
+        assert!(
+            result.is_err(),
+            "{name} ({addr:#x}) write must return Err, not silently mask",
+        );
+
+        let after = cpu.try_csr_read(addr).unwrap();
+        assert_eq!(
+            before, after,
+            "{name} ({addr:#x}) value must not change after rejected write",
+        );
+    }
+}
+
+// Invalid / unassigned CSR numbers: read AND write must error.
+const INVALID_CSRS: &[u16] = &[
+    0x3FE, // unassigned in M-mode area
+    0x4FF, // unassigned in U/S area
+    0x800, // unassigned U area
+    0xCFF, // unassigned counter-shadow area
+    0xFFF, // top of address space
+];
+
+#[test]
+fn test_invalid_csr_addresses_table() {
+    let mut cpu = RiscvCpu::new();
+    for &addr in INVALID_CSRS {
+        assert!(
+            cpu.try_csr_read(addr).is_err(),
+            "read of unassigned CSR {addr:#x} must trap",
+        );
+        assert!(
+            cpu.try_csr_write(addr, 0).is_err(),
+            "write to unassigned CSR {addr:#x} must trap",
+        );
+    }
+}
