@@ -170,3 +170,91 @@ fn test_interrupt_source_set() {
     src.set(false);
     assert_eq!(sink.0.load(Ordering::SeqCst), 0);
 }
+
+// ===== OrIrq / SplitIrq additional coverage (#89) =====
+
+#[test]
+fn test_or_irq_full_truth_table_three_inputs() {
+    let sink = TestSink::new();
+    let or_gate = Arc::new(OrIrq::new(IrqLine::new(sink.clone(), 0), 3));
+
+    // Iterate all 8 input combinations and verify the output level
+    // matches the OR of the three inputs.
+    for combo in 0u8..8 {
+        let bits = [combo & 1 != 0, combo & 2 != 0, combo & 4 != 0];
+        // Drive each input to its configured level.
+        for (idx, &lvl) in bits.iter().enumerate() {
+            or_gate.set_irq(idx as u32, lvl);
+        }
+        let any = bits.iter().any(|&b| b);
+        assert_eq!(
+            sink.level(),
+            any,
+            "OrIrq output mismatch for input pattern {bits:?}",
+        );
+    }
+}
+
+#[test]
+fn test_or_irq_idempotent_writes_do_not_drop_holding_inputs() {
+    let sink = TestSink::new();
+    let or_gate = Arc::new(OrIrq::new(IrqLine::new(sink.clone(), 0), 2));
+
+    or_gate.set_irq(0, true);
+    assert!(sink.level());
+
+    // Re-asserting input 0 must not lower the output, regardless of
+    // whether input 1 ever toggled.
+    or_gate.set_irq(0, true);
+    or_gate.set_irq(0, true);
+    assert!(sink.level(), "repeated raises must keep output high");
+
+    // Lower a never-raised input — output stays high because input 0
+    // still holds it.
+    or_gate.set_irq(1, false);
+    assert!(sink.level(), "lowering an idle input must not drop output");
+}
+
+#[test]
+fn test_split_irq_preserves_per_output_irq_numbers() {
+    // A single BitSink covers all three outputs. SplitIrq should
+    // forward to each IrqLine's own irq_num so each output bit ends
+    // up set.
+    let sink = Arc::new(BitSink(AtomicU64::new(0)));
+    let split = Arc::new(SplitIrq::new(vec![
+        IrqLine::new(sink.clone(), 1),
+        IrqLine::new(sink.clone(), 4),
+        IrqLine::new(sink.clone(), 7),
+    ]));
+
+    split.set_irq(0, true);
+    let raised = sink.0.load(Ordering::SeqCst);
+    assert_eq!(
+        raised,
+        (1 << 1) | (1 << 4) | (1 << 7),
+        "each output line must drive its own irq_num",
+    );
+
+    split.set_irq(0, false);
+    assert_eq!(
+        sink.0.load(Ordering::SeqCst),
+        0,
+        "lowering the input must clear all output bits",
+    );
+}
+
+#[test]
+fn test_split_irq_with_no_outputs_is_safe() {
+    // Degenerate fan-out with zero sinks must accept set_irq
+    // without panicking.
+    let split = Arc::new(SplitIrq::new(Vec::new()));
+    split.set_irq(0, true);
+    split.set_irq(0, false);
+}
+
+#[test]
+fn test_interrupt_source_irq_num_getter() {
+    let sink = Arc::new(BitSink(AtomicU64::new(0)));
+    let src = InterruptSource::new(sink as Arc<dyn IrqSink>, 17);
+    assert_eq!(src.irq_num(), 17);
+}
