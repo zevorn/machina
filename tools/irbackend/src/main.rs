@@ -30,7 +30,21 @@ Options:
   --disas     Disassemble via objdump
   -h, --help  Show this help";
 
-fn parse_args() -> Args {
+/// Pull the value following `args[*i]` (the option name), advancing
+/// `*i` to point at the consumed value. Returns a friendly error
+/// instead of panicking when the value is missing.
+fn next_value<'a>(
+    args: &'a [String],
+    i: &mut usize,
+    name: &str,
+) -> Result<&'a str, String> {
+    *i += 1;
+    args.get(*i)
+        .map(String::as_str)
+        .ok_or_else(|| format!("{name} requires argument"))
+}
+
+fn parse_args() -> Result<Args, String> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 || args[1] == "--help" || args[1] == "-h" {
         eprintln!("{USAGE}");
@@ -48,19 +62,17 @@ fn parse_args() -> Args {
     while i < args.len() {
         match args[i].as_str() {
             "-o" => {
-                i += 1;
-                a.output = Some(args[i].clone());
+                a.output = Some(next_value(&args, &mut i, "-o")?.to_string());
             }
             "--raw" => a.raw = true,
             "--disas" => a.disas = true,
             other => {
-                eprintln!("unknown option: {other}");
-                process::exit(1);
+                return Err(format!("unknown option: {other}"));
             }
         }
         i += 1;
     }
-    a
+    Ok(a)
 }
 
 fn hex_dump(data: &[u8], w: &mut impl Write) -> io::Result<()> {
@@ -96,7 +108,13 @@ fn disassemble(code: &[u8]) {
 }
 
 fn main() {
-    let args = parse_args();
+    let args = match parse_args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("tcg-irbackend: {e}");
+            process::exit(1);
+        }
+    };
 
     let data = fs::read(&args.ir_path).unwrap_or_else(|e| {
         let p = &args.ir_path;

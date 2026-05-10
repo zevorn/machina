@@ -72,7 +72,21 @@ Options:
 
 Supported architectures: riscv64";
 
-fn parse_args() -> Args {
+/// Pull the value following `args[*i]` (the option name), advancing
+/// `*i` to point at the consumed value. Returns a friendly error
+/// instead of panicking when the value is missing.
+fn next_value<'a>(
+    args: &'a [String],
+    i: &mut usize,
+    name: &str,
+) -> Result<&'a str, String> {
+    *i += 1;
+    args.get(*i)
+        .map(String::as_str)
+        .ok_or_else(|| format!("{name} requires argument"))
+}
+
+fn parse_args() -> Result<Args, String> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 || args[1] == "--help" || args[1] == "-h" {
         eprintln!("{USAGE}");
@@ -93,40 +107,43 @@ fn parse_args() -> Args {
     while i < args.len() {
         match args[i].as_str() {
             "--arch" => {
-                i += 1;
-                a.arch = Some(args[i].clone());
+                a.arch = Some(next_value(&args, &mut i, "--arch")?.to_string());
             }
             "-o" => {
-                i += 1;
-                a.output = Some(args[i].clone());
+                a.output = Some(next_value(&args, &mut i, "-o")?.to_string());
             }
             "--emit-bin" => {
-                i += 1;
-                a.emit_bin = Some(args[i].clone());
+                a.emit_bin =
+                    Some(next_value(&args, &mut i, "--emit-bin")?.to_string());
             }
             "--start" => {
-                i += 1;
-                let s = args[i].trim_start_matches("0x");
+                let v = next_value(&args, &mut i, "--start")?;
+                let s = v.trim_start_matches("0x");
                 a.start = Some(
-                    u64::from_str_radix(s, 16).expect("invalid hex address"),
+                    u64::from_str_radix(s, 16)
+                        .map_err(|e| format!("invalid --start '{v}': {e}"))?,
                 );
             }
             "--count" => {
-                i += 1;
-                a.count = Some(args[i].parse().expect("invalid count"));
+                let v = next_value(&args, &mut i, "--count")?;
+                a.count = Some(
+                    v.parse()
+                        .map_err(|e| format!("invalid --count '{v}': {e}"))?,
+                );
             }
             "--max-insns" => {
-                i += 1;
-                a.max_insns = args[i].parse().expect("invalid max-insns");
+                let v = next_value(&args, &mut i, "--max-insns")?;
+                a.max_insns = v
+                    .parse()
+                    .map_err(|e| format!("invalid --max-insns '{v}': {e}"))?;
             }
             other => {
-                eprintln!("unknown option: {other}");
-                process::exit(1);
+                return Err(format!("unknown option: {other}"));
             }
         }
         i += 1;
     }
-    a
+    Ok(a)
 }
 
 /// Build a flat guest memory image from ELF segments.
@@ -240,7 +257,13 @@ fn translate_tb_riscv64(
 }
 
 fn main() {
-    let args = parse_args();
+    let args = match parse_args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("tcg-irdump: {e}");
+            process::exit(1);
+        }
+    };
 
     let data = fs::read(&args.elf_path).unwrap_or_else(|e| {
         let p = &args.elf_path;

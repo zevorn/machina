@@ -142,6 +142,119 @@ fn irbackend_raw_output() {
     let _ = fs::remove_file(&tmp_bin);
 }
 
+/// Spawn one of the IR tools with a single dummy positional plus the
+/// supplied option set, capturing stdout+stderr. Used by the
+/// friendly-error tests below: the tools must reject malformed input
+/// with a non-zero exit and a clear message, never with a panic.
+fn run_tool_args(name: &str, extra_args: &[&str]) -> (bool, String) {
+    ensure_built();
+    let mut cmd = Command::new(bin_path(name));
+    cmd.arg("dummy.elf");
+    cmd.args(extra_args);
+    let out = cmd.output().expect("failed to spawn tool");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    (out.status.success(), combined)
+}
+
+fn assert_friendly_error(name: &str, args: &[&str], must_contain: &[&str]) {
+    let (success, combined) = run_tool_args(name, args);
+    assert!(
+        !success,
+        "{name} must reject {args:?}; got success exit\n{combined}",
+    );
+    assert!(
+        !combined.contains("panicked at"),
+        "{name} must not panic on {args:?}\n{combined}",
+    );
+    for needle in must_contain {
+        assert!(
+            combined.contains(needle),
+            "{name} {args:?}: expected `{needle}` in output\n{combined}",
+        );
+    }
+}
+
+#[test]
+fn irdump_missing_value_for_arch_is_friendly() {
+    assert_friendly_error(
+        "machina-irdump",
+        &["--arch"],
+        &["--arch requires argument"],
+    );
+}
+
+#[test]
+fn irdump_missing_value_for_output_is_friendly() {
+    assert_friendly_error("machina-irdump", &["-o"], &["-o requires argument"]);
+}
+
+#[test]
+fn irdump_missing_value_for_emit_bin_is_friendly() {
+    assert_friendly_error(
+        "machina-irdump",
+        &["--emit-bin"],
+        &["--emit-bin requires argument"],
+    );
+}
+
+#[test]
+fn irdump_invalid_count_is_friendly() {
+    assert_friendly_error(
+        "machina-irdump",
+        &["--count", "not-a-number"],
+        &["invalid --count", "not-a-number"],
+    );
+}
+
+#[test]
+fn irdump_invalid_start_is_friendly() {
+    assert_friendly_error(
+        "machina-irdump",
+        &["--start", "ZZZ"],
+        &["invalid --start", "ZZZ"],
+    );
+}
+
+#[test]
+fn irdump_invalid_max_insns_is_friendly() {
+    assert_friendly_error(
+        "machina-irdump",
+        &["--max-insns", "abc"],
+        &["invalid --max-insns", "abc"],
+    );
+}
+
+#[test]
+fn irdump_unknown_option_is_friendly() {
+    assert_friendly_error(
+        "machina-irdump",
+        &["--no-such-flag"],
+        &["unknown option: --no-such-flag"],
+    );
+}
+
+#[test]
+fn irbackend_missing_output_value_is_friendly() {
+    assert_friendly_error(
+        "machina-irbackend",
+        &["-o"],
+        &["-o requires argument"],
+    );
+}
+
+#[test]
+fn irbackend_unknown_option_is_friendly() {
+    assert_friendly_error(
+        "machina-irbackend",
+        &["--no-such-flag"],
+        &["unknown option: --no-such-flag"],
+    );
+}
+
 #[test]
 fn irbackend_multiple_tbs() {
     ensure_built();
