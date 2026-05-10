@@ -209,3 +209,157 @@ fn f32_nan_compare_signals_invalid() {
     assert!(!nan.lt(one, &mut e));
     assert!(e.flags().contains(ExcFlags::INVALID));
 }
+
+// ── Min/Max edge cases (#61) ────────────────────────
+
+#[test]
+fn f32_min_pos_zero_neg_zero_returns_neg_zero() {
+    let mut e = env();
+    let pz = Float32::from_f32(0.0);
+    let nz = Float32::from_bits(0x8000_0000);
+    // IEEE 754-2008: min(+0, -0) = -0, regardless of operand order.
+    assert_eq!(pz.min(nz, &mut e).to_bits(), 0x8000_0000);
+    assert_eq!(nz.min(pz, &mut e).to_bits(), 0x8000_0000);
+}
+
+#[test]
+fn f32_max_pos_zero_neg_zero_returns_pos_zero() {
+    let mut e = env();
+    let pz = Float32::from_f32(0.0);
+    let nz = Float32::from_bits(0x8000_0000);
+    // IEEE 754-2008: max(+0, -0) = +0, regardless of operand order.
+    assert_eq!(pz.max(nz, &mut e).to_bits(), 0x0000_0000);
+    assert_eq!(nz.max(pz, &mut e).to_bits(), 0x0000_0000);
+}
+
+#[test]
+fn f32_min_qnan_finite_returns_finite_no_invalid() {
+    // IEEE 754-2008: min/max with one quiet NaN returns the
+    // non-NaN operand and does NOT raise INVALID.
+    let mut e = env();
+    let nan = Float32::from_bits(QNAN);
+    let one = Float32::from_f32(1.0);
+    assert_eq!(nan.min(one, &mut e).to_bits(), one.to_bits());
+    assert_eq!(one.min(nan, &mut e).to_bits(), one.to_bits());
+    assert!(
+        !e.flags().contains(ExcFlags::INVALID),
+        "qNaN must not raise INVALID for min: {:?}",
+        e.flags(),
+    );
+}
+
+#[test]
+fn f32_max_qnan_finite_returns_finite_no_invalid() {
+    let mut e = env();
+    let nan = Float32::from_bits(QNAN);
+    let one = Float32::from_f32(1.0);
+    assert_eq!(nan.max(one, &mut e).to_bits(), one.to_bits());
+    assert_eq!(one.max(nan, &mut e).to_bits(), one.to_bits());
+    assert!(
+        !e.flags().contains(ExcFlags::INVALID),
+        "qNaN must not raise INVALID for max: {:?}",
+        e.flags(),
+    );
+}
+
+#[test]
+fn f32_min_snan_finite_signals_invalid() {
+    // IEEE 754-2008: any signalling NaN operand to min/max raises
+    // INVALID. The non-NaN value is returned.
+    let mut e = env();
+    let snan = Float32::from_bits(SNAN);
+    let one = Float32::from_f32(1.0);
+    let r = snan.min(one, &mut e);
+    assert_eq!(r.to_bits(), one.to_bits());
+    assert!(
+        e.flags().contains(ExcFlags::INVALID),
+        "sNaN min must signal INVALID: {:?}",
+        e.flags(),
+    );
+}
+
+#[test]
+fn f32_max_snan_finite_signals_invalid() {
+    let mut e = env();
+    let snan = Float32::from_bits(SNAN);
+    let one = Float32::from_f32(1.0);
+    let r = snan.max(one, &mut e);
+    assert_eq!(r.to_bits(), one.to_bits());
+    assert!(
+        e.flags().contains(ExcFlags::INVALID),
+        "sNaN max must signal INVALID: {:?}",
+        e.flags(),
+    );
+}
+
+#[test]
+fn f32_min_both_qnan_returns_nan_without_invalid() {
+    let mut e = env();
+    let nan = Float32::from_bits(QNAN);
+    let r = nan.min(nan, &mut e);
+    assert!(r.is_nan());
+    assert!(
+        !e.flags().contains(ExcFlags::INVALID),
+        "two qNaNs to min must not raise INVALID: {:?}",
+        e.flags(),
+    );
+}
+
+#[test]
+fn f32_min_max_signed_ordering() {
+    let mut e = env();
+
+    // Mixed sign: negative is smaller than positive.
+    let a = Float32::from_f32(-3.0);
+    let b = Float32::from_f32(5.0);
+    assert_eq!(a.min(b, &mut e).to_bits(), a.to_bits());
+    assert_eq!(b.min(a, &mut e).to_bits(), a.to_bits());
+    assert_eq!(a.max(b, &mut e).to_bits(), b.to_bits());
+    assert_eq!(b.max(a, &mut e).to_bits(), b.to_bits());
+
+    // Both negative: more-negative magnitude is smaller.
+    let p = Float32::from_f32(-1.0);
+    let q = Float32::from_f32(-2.0);
+    assert_eq!(p.min(q, &mut e).to_bits(), q.to_bits());
+    assert_eq!(p.max(q, &mut e).to_bits(), p.to_bits());
+
+    // Both positive: smaller magnitude is smaller.
+    let r = Float32::from_f32(0.5);
+    let s = Float32::from_f32(1.0);
+    assert_eq!(r.min(s, &mut e).to_bits(), r.to_bits());
+    assert_eq!(r.max(s, &mut e).to_bits(), s.to_bits());
+}
+
+#[test]
+fn f32_min_max_with_infinities() {
+    let mut e = env();
+    let pinf = Float32::from_bits(POS_INF);
+    let ninf = Float32::from_bits(NEG_INF);
+    let v = Float32::from_f32(100.0);
+    assert_eq!(ninf.min(v, &mut e).to_bits(), NEG_INF);
+    assert_eq!(pinf.max(v, &mut e).to_bits(), POS_INF);
+    assert_eq!(ninf.min(pinf, &mut e).to_bits(), NEG_INF);
+    assert_eq!(ninf.max(pinf, &mut e).to_bits(), POS_INF);
+}
+
+// ── Float64 min/max smoke ──────────────────────────
+
+#[test]
+fn f64_min_pos_neg_zero_returns_neg_zero() {
+    use machina_softfloat::types::Float64;
+    let mut e = env();
+    let pz = Float64::from_f64(0.0);
+    let nz = Float64::from_bits(0x8000_0000_0000_0000);
+    assert_eq!(pz.min(nz, &mut e).to_bits(), 0x8000_0000_0000_0000);
+    assert_eq!(nz.min(pz, &mut e).to_bits(), 0x8000_0000_0000_0000);
+}
+
+#[test]
+fn f64_max_pos_neg_zero_returns_pos_zero() {
+    use machina_softfloat::types::Float64;
+    let mut e = env();
+    let pz = Float64::from_f64(0.0);
+    let nz = Float64::from_bits(0x8000_0000_0000_0000);
+    assert_eq!(pz.max(nz, &mut e).to_bits(), 0x0000_0000_0000_0000);
+    assert_eq!(nz.max(pz, &mut e).to_bits(), 0x0000_0000_0000_0000);
+}
