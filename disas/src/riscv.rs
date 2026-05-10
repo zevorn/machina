@@ -98,7 +98,7 @@ fn disasm32(insn: u32, pc: u64) -> String {
         0x03 => disasm_load(insn, funct3, rd, rs1),
         0x23 => disasm_store(insn, funct3, rs1, rs2),
         0x13 => disasm_op_imm(insn, funct3, rd, rs1),
-        0x33 => disasm_op(funct3, funct7, rd, rs1, rs2),
+        0x33 => disasm_op(insn, funct3, funct7, rd, rs1, rs2),
         0x1b => disasm_op_imm32(insn, funct3, rd, rs1),
         0x3b => disasm_op32(funct3, funct7, rd, rs1, rs2),
         0x2f => disasm_amo(insn, funct3, rd, rs1, rs2),
@@ -222,12 +222,16 @@ fn disasm_op_imm(insn: u32, f3: u32, rd: u32, rs1: u32) -> String {
                 };
                 return format!("{op} {}, {}", reg(rd), reg(rs1));
             }
-            // Zbs immediate shifts (funct6)
+            // RV64 funct3=1 OP-IMM is the I-type shift slot. Only the
+            // funct6 values below are assigned (slli plus Zbs/Zbb).
+            // Anything else is reserved per the RISC-V Unprivileged
+            // ISA (RV64I + Zbs).
             match funct6 {
+                0x00 => format!("slli {}, {}, {shamt}", reg(rd), reg(rs1)),
                 0x12 => format!("bclri {}, {}, {shamt}", reg(rd), reg(rs1)),
                 0x1a => format!("binvi {}, {}, {shamt}", reg(rd), reg(rs1)),
                 0x0a => format!("bseti {}, {}, {shamt}", reg(rd), reg(rs1)),
-                _ => format!("slli {}, {}, {shamt}", reg(rd), reg(rs1)),
+                _ => format!(".word {insn:#010x}"),
             }
         }
         2 => {
@@ -274,7 +278,14 @@ fn disasm_op_imm(insn: u32, f3: u32, rd: u32, rs1: u32) -> String {
     }
 }
 
-fn disasm_op(f3: u32, f7: u32, rd: u32, rs1: u32, rs2: u32) -> String {
+fn disasm_op(
+    insn: u32,
+    f3: u32,
+    f7: u32,
+    rd: u32,
+    rs1: u32,
+    rs2: u32,
+) -> String {
     // M extension
     if f7 == 1 {
         let op = match f3 {
@@ -324,8 +335,12 @@ fn disasm_op(f3: u32, f7: u32, rd: u32, rs1: u32, rs2: u32) -> String {
         (1, 0x05) => "clmul",
         (3, 0x05) => "clmulh",
         (2, 0x05) => "clmulr",
+        // Reserved or unassigned R-type encoding for OP. The
+        // Unprivileged ISA + bitmanip extensions only define the
+        // (f3, f7) pairs above; everything else must round-trip as
+        // raw machine code.
         _ => {
-            return format!("op f3={f3} f7={f7:#x}");
+            return format!(".word {insn:#010x}");
         }
     };
     // Pseudo: snez rd, rs2

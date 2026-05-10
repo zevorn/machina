@@ -320,3 +320,76 @@ fn test_clmulr() {
     let insn = rtype(0x05, RS2, RS1, 2, RD, OP);
     assert_eq!(dis(insn), "clmulr a0, a1, a2");
 }
+
+// ===== Invalid / reserved bitmanip encodings (#62) =====
+//
+// For unknown or reserved encodings the riscv64 disassembler must
+// emit `.word 0x<insn>` rather than misclaim it as a recognised
+// instruction. Each test below picks an encoding adjacent to a
+// valid one and asserts the .word fallback, including the exact
+// preserved machine-code value.
+
+fn assert_dot_word(insn: u32) {
+    let txt = dis(insn);
+    let expected = format!(".word {insn:#010x}");
+    assert_eq!(
+        txt, expected,
+        "encoding {insn:#010x} must disassemble as `{expected}`",
+    );
+}
+
+// Zbb unary uses funct7=0x30, funct3=1 with shamt encoding the
+// operation: 0=clz, 1=ctz, 2=cpop, 4=sext.b, 5=sext.h. shamt=3 and
+// shamt>=6 are reserved.
+#[test]
+fn test_invalid_zbb_unary_shamt_3_is_word() {
+    assert_dot_word(ishift5(0x30, 3, RS1, 1, RD, OP_IMM));
+}
+
+#[test]
+fn test_invalid_zbb_unary_shamt_6_is_word() {
+    assert_dot_word(ishift5(0x30, 6, RS1, 1, RD, OP_IMM));
+}
+
+#[test]
+fn test_invalid_zbb_unary_shamt_7_is_word() {
+    assert_dot_word(ishift5(0x30, 7, RS1, 1, RD, OP_IMM));
+}
+
+// rev8 (RV64) is funct6=0x1a, shamt=0x38, funct3=5 in OP_IMM. Any
+// other shamt with funct6=0x1a is reserved.
+#[test]
+fn test_invalid_rev8_shamt_neighbours_are_word() {
+    // shamt=0x37 is one below the canonical rev8 encoding.
+    assert_dot_word(ishift6(0x1a, 0x37, RS1, 5, RD, OP_IMM));
+    // shamt=0x39 is one above.
+    assert_dot_word(ishift6(0x1a, 0x39, RS1, 5, RD, OP_IMM));
+}
+
+// orc.b is funct6=0x0a, shamt=0x07, funct3=5 in OP_IMM. Other shamt
+// values with funct6=0x0a are reserved.
+#[test]
+fn test_invalid_orc_b_shamt_neighbours_are_word() {
+    // shamt=0x06 is one below the canonical orc.b encoding.
+    assert_dot_word(ishift6(0x0a, 0x06, RS1, 5, RD, OP_IMM));
+    // shamt=0x08 is one above.
+    assert_dot_word(ishift6(0x0a, 0x08, RS1, 5, RD, OP_IMM));
+}
+
+// In the RV64 funct3=1 I-type shift slot (OP-IMM), only funct6 in
+// {0x00 slli, 0x12 bclri, 0x1a binvi, 0x0a bseti} is assigned; any
+// other funct6 must fall back to .word rather than masquerade as
+// slli (the previous catch-all behaviour).
+#[test]
+fn test_invalid_zbs_unassigned_funct6_is_word() {
+    // funct6=0x33 with funct3=1 is unassigned across RV64I + Zbs.
+    assert_dot_word(ishift6(0x33, 5, RS1, 1, RD, OP_IMM));
+}
+
+// Zbc lives in OP with funct7=0x05; the assigned funct3 values are
+// 1=clmul, 2=clmulr, 3=clmulh. funct3=0 with funct7=0x05 has no
+// assignment in RV64I+M+Zb*, so it must round-trip as .word.
+#[test]
+fn test_invalid_zbc_funct3_0_is_word() {
+    assert_dot_word(rtype(0x05, RS2, RS1, 0, RD, OP));
+}
