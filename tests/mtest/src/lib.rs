@@ -5,6 +5,8 @@ mod tests {
 
     use flate2::read::GzDecoder;
     use machina_core::machine::{LoaderSpec, Machine, MachineOpts};
+    use machina_guest_riscv::riscv::cpu::RiscvCpu;
+    use machina_guest_riscv::riscv::csr::{CSR_PMPADDR0, CSR_PMPCFG0};
     use machina_hw_riscv::k230::K230Machine;
     use machina_hw_riscv::k230_boot::K230_BOOTROM_BASE;
 
@@ -207,6 +209,21 @@ mod tests {
         let cpus = machine.cpus_lock();
         let cpu = cpus[0].as_ref().unwrap();
         assert_eq!(cpu.pc, K230_BOOTROM_BASE);
+    }
+
+    #[test]
+    fn k230_linux_handoff_keeps_locked_sdk_pmp_windows() {
+        let mut cpu = RiscvCpu::new();
+
+        cpu.csr_write(CSR_PMPADDR0, 0x2448_4dff);
+        cpu.csr_write(CSR_PMPADDR0 + 1, 0x2448_51ff);
+        cpu.csr_write(CSR_PMPCFG0, 0x9999);
+
+        cpu.csr_write(CSR_PMPADDR0, 0x003f_ffff_ffff_ffff);
+
+        assert_eq!(cpu.csr_read(CSR_PMPADDR0), 0x2448_4dff);
+        assert_eq!(cpu.csr_read(CSR_PMPADDR0 + 1), 0x2448_51ff);
+        assert_eq!(cpu.csr_read(CSR_PMPCFG0) & 0xffff, 0x9999);
     }
 
     #[test]

@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 machina-core = { workspace = true }
+machina-guest-riscv = { workspace = true }
 machina-hw-watchdog = { workspace = true }
 machina-hw-riscv = { workspace = true }
 machina-memory = { workspace = true }

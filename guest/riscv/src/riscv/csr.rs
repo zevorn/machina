@@ -33,6 +33,9 @@ pub const CSR_MIMPID: u16 = 0xF13;
 pub const CSR_PMPCFG0: u16 = 0x3A0;
 pub const CSR_PMPCFG2: u16 = 0x3A2;
 pub const CSR_PMPADDR0: u16 = 0x3B0;
+const PMPCFG_L: u64 = 1 << 7;
+const PMPCFG_A_MASK: u64 = 0x3 << 3;
+const PMPCFG_A_TOR: u64 = 0x1 << 3;
 
 // Supervisor-level CSRs
 pub const CSR_SSTATUS: u16 = 0x100;
@@ -510,7 +513,7 @@ impl CsrFile {
             // PMP config (RV64: pmpcfg0 and pmpcfg2)
             addr if addr == CSR_PMPCFG0 || addr == CSR_PMPCFG2 => {
                 let idx = ((addr - CSR_PMPCFG0) / 2) as usize;
-                self.pmpcfg[idx] = val;
+                self.write_pmpcfg(idx, val);
                 Ok(())
             }
             // pmpcfg1/pmpcfg3: ignored in RV64.
@@ -522,7 +525,9 @@ impl CsrFile {
                 && addr < CSR_PMPADDR0 + PMP_COUNT as u16 =>
             {
                 let idx = (addr - CSR_PMPADDR0) as usize;
-                self.pmpaddr[idx] = val;
+                if !self.pmpaddr_locked(idx) {
+                    self.pmpaddr[idx] = val;
+                }
                 Ok(())
             }
 
@@ -629,6 +634,41 @@ impl CsrFile {
         } else {
             0
         }
+    }
+}
+
+impl CsrFile {
+    fn pmpcfg_byte(&self, entry: usize) -> u64 {
+        let csr = entry / 8;
+        let shift = (entry % 8) * 8;
+        (self.pmpcfg[csr] >> shift) & 0xff
+    }
+
+    fn write_pmpcfg(&mut self, csr: usize, val: u64) {
+        let mut next = self.pmpcfg[csr];
+        for byte in 0..8 {
+            let entry = csr * 8 + byte;
+            let shift = byte * 8;
+            let mask = 0xffu64 << shift;
+            if self.pmpcfg_byte(entry) & PMPCFG_L != 0 {
+                continue;
+            }
+            next = (next & !mask) | (val & mask);
+        }
+        self.pmpcfg[csr] = next;
+    }
+
+    fn pmpaddr_locked(&self, entry: usize) -> bool {
+        if self.pmpcfg_byte(entry) & PMPCFG_L != 0 {
+            return true;
+        }
+
+        if entry + 1 >= PMP_COUNT {
+            return false;
+        }
+
+        let next_cfg = self.pmpcfg_byte(entry + 1);
+        next_cfg & PMPCFG_L != 0 && next_cfg & PMPCFG_A_MASK == PMPCFG_A_TOR
     }
 }
 

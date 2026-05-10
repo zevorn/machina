@@ -80,6 +80,38 @@ fn test_read_only_csr_write_rejected() {
     assert!(cpu.try_csr_write(CSR_CYCLE, 42).is_err());
 }
 
+#[test]
+fn test_locked_pmp_entry_ignores_address_and_config_writes() {
+    let mut cpu = RiscvCpu::new();
+
+    cpu.csr_write(CSR_PMPADDR0, 0x2448_4dff);
+    cpu.csr_write(CSR_PMPADDR0 + 1, 0x2448_51ff);
+    cpu.csr_write(CSR_PMPCFG0, 0x9999);
+
+    cpu.csr_write(CSR_PMPADDR0, 0x003f_ffff_ffff_ffff);
+    cpu.csr_write(CSR_PMPADDR0 + 1, 0x003f_ffff_ffff_ffff);
+    cpu.csr_write(CSR_PMPCFG0, 0);
+
+    assert_eq!(cpu.csr_read(CSR_PMPADDR0), 0x2448_4dff);
+    assert_eq!(cpu.csr_read(CSR_PMPADDR0 + 1), 0x2448_51ff);
+    assert_eq!(cpu.csr_read(CSR_PMPCFG0) & 0xffff, 0x9999);
+}
+
+#[test]
+fn test_locked_tor_entry_ignores_lower_bound_address_write() {
+    let mut cpu = RiscvCpu::new();
+
+    cpu.csr_write(CSR_PMPADDR0, 0x100);
+    cpu.csr_write(CSR_PMPADDR0 + 1, 0x200);
+    cpu.csr_write(CSR_PMPCFG0, 0x88 << 8);
+
+    cpu.csr_write(CSR_PMPADDR0, 0x300);
+    cpu.csr_write(CSR_PMPADDR0 + 1, 0x400);
+
+    assert_eq!(cpu.csr_read(CSR_PMPADDR0), 0x100);
+    assert_eq!(cpu.csr_read(CSR_PMPADDR0 + 1), 0x200);
+}
+
 // -- Delegation --
 
 #[test]
