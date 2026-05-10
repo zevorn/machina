@@ -325,6 +325,14 @@ fn test_aclint_virtual_clock_advances_only_by_tick() {
 fn test_aclint_mti_output() {
     let aclint = Aclint::new(2);
 
+    // Pin the timer to virtual time so wall-clock drift between
+    // assertions cannot move mtime past mtimecmp on heavily-
+    // loaded CI runners. The previous re-anchor trick still
+    // raced because the scheduler could pause the test thread
+    // for far more than 200 ticks (20µs at 10 MHz) between the
+    // mtime write and the assertion read.
+    aclint.set_virtual_clock(true);
+
     let sink = Arc::new(TestIrqSink::new(16));
     let mti_irq = 7u32;
     let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti_irq);
@@ -347,18 +355,17 @@ fn test_aclint_mti_output() {
         "MTI should be high when mtime >= mtimecmp"
     );
 
-    // Re-anchor mtime to 50 before the final check so that
-    // wall-clock drift between the previous write and the
-    // mtimecmp write cannot push mtime past 200 on slow CI.
-    // update_mti() sees mtime=50 < mtimecmp=100, so MTI stays
-    // low after this; the HIGH assertion is already done above.
+    // Re-anchor mtime to 50, then raise mtimecmp to 200. With
+    // the virtual clock pinned, mtime stays at 50 forever, so
+    // 50 < 200 deterministically and MTI must drop.
     aclint.write(0xBFF8, 8, 50);
-
-    // Raise mtimecmp to 200 -> MTI low (mtime=50 < 200).
     aclint.write(0x4000, 8, 200);
+    let mtime_after = aclint.read(0xBFF8, 8);
+    let mtimecmp_after = aclint.read(0x4000, 8);
     assert!(
         !sink.level(mti_irq),
-        "MTI should go low after raising mtimecmp"
+        "MTI should go low after raising mtimecmp. \
+         mtime={mtime_after}, mtimecmp={mtimecmp_after}",
     );
 }
 
