@@ -350,9 +350,13 @@ fn read_llt(
 ) -> Result<LltDescriptor, Box<dyn std::error::Error>> {
     let mut words = [0u32; LLT_WORDS];
     for (index, word) in words.iter_mut().enumerate() {
-        *word = address_space
-            .read(GPA(u64::from(address) + index as u64 * 4), 4)
-            as u32;
+        let word_addr = u64::from(address)
+            .checked_add(index as u64 * 4)
+            .ok_or_else(|| invalid_llt("LLT descriptor address overflow"))?;
+        if !address_space.is_mapped(GPA(word_addr), 4) {
+            return Err(invalid_llt("unmapped LLT descriptor word"));
+        }
+        *word = address_space.read(GPA(word_addr), 4) as u32;
     }
     let _ = LLT_SIZE;
     Ok(LltDescriptor {

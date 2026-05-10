@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use flate2::write::GzEncoder;
@@ -13,6 +13,48 @@ fn make_ram_aspace(size: u64) -> Arc<AddressSpace> {
     let mut root = MemoryRegion::container("root", size);
     let (ram, _block) = MemoryRegion::ram("ram", size);
     root.add_subregion(ram, GPA(0));
+    Arc::new(AddressSpace::new(root))
+}
+
+struct BoundaryProbe {
+    len: u64,
+    reads: Mutex<Vec<(u64, u32)>>,
+}
+
+impl BoundaryProbe {
+    fn new(len: u64) -> Arc<Self> {
+        Arc::new(Self {
+            len,
+            reads: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn reads(&self) -> Vec<(u64, u32)> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+impl MmioOps for BoundaryProbe {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        assert!(
+            offset + u64::from(size) <= self.len,
+            "descriptor read crosses IO region boundary"
+        );
+        self.reads.lock().unwrap().push((offset, size));
+        0
+    }
+
+    fn write(&self, _offset: u64, _size: u32, _value: u64) {}
+}
+
+fn make_probe_aspace(
+    base: u64,
+    len: u64,
+    probe: Arc<BoundaryProbe>,
+) -> Arc<AddressSpace> {
+    let mut root = MemoryRegion::container("root", base + len + 0x1000);
+    let ops: Arc<dyn MmioOps> = probe;
+    root.add_subregion(MemoryRegion::io("boundary-probe", len, ops), GPA(base));
     Arc::new(AddressSpace::new(root))
 }
 
@@ -246,6 +288,29 @@ fn k230_gzip_dma_rejects_truncated_input_llt_chain() {
     );
 
     assert_eq!(mmio.read(0x800c, 4) & (1 << 10), 0);
+}
+
+#[test]
+fn k230_gzip_dma_rejects_unmapped_llt_descriptor_word() {
+    let llt_addr = 0x4000;
+    let probe = BoundaryProbe::new(0x16);
+    let aspace = make_probe_aspace(llt_addr, 0x16, probe.clone());
+
+    let dev = K230GzipDma::new_named("k230-gzip-dma");
+    dev.set_dma_address_space(aspace);
+    let mmio = K230GzipDmaMmio(dev);
+
+    mmio.write(0x60, 4, llt_addr);
+    mmio.write(0x90, 4, llt_addr);
+    mmio.write(0x8004, 4, 0x8000_0004);
+    mmio.write(0x8008, 4, 4);
+    mmio.write(0x8000, 4, 0x3);
+
+    assert_eq!(mmio.read(0x800c, 4) & (1 << 10), 0);
+    assert_eq!(
+        probe.reads(),
+        vec![(0, 4), (4, 4), (8, 4), (12, 4), (16, 4)]
+    );
 }
 
 #[test]
