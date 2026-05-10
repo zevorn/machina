@@ -65,3 +65,73 @@ fn test_parse_device_netdev_id_mismatch() {
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("does not match"));
 }
+
+// ===== Empty-value and unsupported-device validation (#59) =====
+
+#[test]
+fn test_parse_netdev_empty_id_is_rejected() {
+    let result = NetdevOpts::parse("tap,id=,ifname=tap0", None);
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("empty id"),
+        "error message must name the empty id field, got: {err}",
+    );
+}
+
+#[test]
+fn test_parse_netdev_empty_ifname_is_rejected() {
+    let result = NetdevOpts::parse("tap,id=net0,ifname=", None);
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("empty ifname"),
+        "error message must name the empty ifname field, got: {err}",
+    );
+}
+
+#[test]
+fn test_parse_device_empty_netdev_is_rejected() {
+    let result = NetdevOpts::parse(
+        "tap,id=net0,ifname=tap0",
+        Some("virtio-net-device,netdev="),
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("empty netdev"),
+        "error must name the empty netdev= value, got: {err}",
+    );
+}
+
+#[test]
+fn test_parse_device_empty_mac_is_rejected() {
+    let result = NetdevOpts::parse(
+        "tap,id=net0,ifname=tap0",
+        Some("virtio-net-device,netdev=net0,mac="),
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("empty mac"),
+        "error must name the empty mac= value, got: {err}",
+    );
+}
+
+#[test]
+fn test_parse_device_unknown_kind_is_rejected() {
+    // Unsupported -device kinds must be flagged here, not
+    // silently accepted with their fields ignored.
+    let result =
+        NetdevOpts::parse("tap,id=net0,ifname=tap0", Some("e1000,netdev=net0"));
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("unsupported type") && err.contains("e1000"),
+        "error must name the unsupported device kind, got: {err}",
+    );
+}
+
+#[test]
+fn test_parse_netdev_extra_commas_do_not_panic() {
+    // Trailing/repeated separators are tolerated but the
+    // required fields still need to be present.
+    let nd = NetdevOpts::parse("tap,,id=net0,,ifname=tap0,", None).unwrap();
+    assert_eq!(nd.id, "net0");
+    assert_eq!(nd.ifname, "tap0");
+}
