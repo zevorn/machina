@@ -200,12 +200,12 @@ impl K230GzipDma {
             if compressed.get(2).copied() == Some(0x09) {
                 compressed[2] = 0x08;
             }
-            let mut decoder = GzDecoder::new(compressed.as_slice());
+            let output_len = out_size as usize;
+            let decoder = GzDecoder::new(compressed.as_slice());
+            let mut bounded_decoder = decoder.take(out_size.into());
             let mut output = Vec::new();
-            decoder.read_to_end(&mut output)?;
-            if output.len() > out_size as usize {
-                output.truncate(out_size as usize);
-            }
+            bounded_decoder.read_to_end(&mut output)?;
+            output.truncate(output_len);
             write_llt_data(&address_space, dst_llt, &output)?;
             Ok(output)
         })();
@@ -312,6 +312,9 @@ fn write_llt_data(
         );
         offset += chunk_len;
         llt_addr = desc.next_llt_addr;
+    }
+    if offset < data.len() {
+        return Err(invalid_llt("truncated LLT descriptor chain"));
     }
     Ok(())
 }
