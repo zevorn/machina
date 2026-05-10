@@ -324,3 +324,142 @@ fn test_plic_lifecycle_and_mom_identity() {
         .unwrap_err();
     assert!(err.to_string().contains("not realized"));
 }
+
+// ===== PLIC boundary / multi-context regressions (#70) =====
+//
+// SiFive PLIC MMIO map (constants from hw/intc/src/plic.rs):
+//   0x00_0000 priority[]
+//   0x00_1000 pending bitmap (read-only)
+//   0x00_2000 enable bitmap, stride 0x80 per context
+//   0x20_0000 context, stride 0x1000 per context (0:thresh,4:claim)
+//
+// These tests pin down out-of-range MMIO behaviour, per-context
+// independence, the priority-0 claim rule, and the invalid-IRQ
+// guard rails — all without booting a guest.
+
+#[test]
+fn test_plic_priority_oob_read_returns_zero_no_panic() {
+    let plic = Plic::new(32, 1);
+
+    // priority[32] is the first index past the configured source
+    // count and the pending region begins at 0x1000, so anything in
+    // (32*4 .. 0x1000) is out-of-range for priority.
+    let oob_offset = 32u64 * 4;
+    assert_eq!(plic.read(oob_offset, 4), 0);
+    plic.write(oob_offset, 4, 0xdead_beef);
+    // Re-read still returns 0; the write was silently dropped.
+    assert_eq!(plic.read(oob_offset, 4), 0);
+    // A neighbouring valid priority still behaves normally.
+    plic.write(0x04, 4, 5);
+    assert_eq!(plic.read(0x04, 4), 5);
+}
+
+#[test]
+fn test_plic_pending_oob_read_returns_zero_no_panic() {
+    // pending bitmap covers ceil(num_sources / 32) words. With
+    // num_sources=32 only word 0 (offset 0x1000) is valid; reading
+    // word 1 at 0x1004 must return 0.
+    let plic = Plic::new(32, 1);
+    assert_eq!(plic.read(0x1004, 4), 0);
+}
+
+#[test]
+fn test_plic_enable_oob_context_returns_zero_no_panic() {
+    // num_contexts=2 -> only ctx 0/1 valid. Reading enable for
+    // ctx 5 must not panic and must return 0.
+    let plic = Plic::new(64, 2);
+    let stride = 0x80u64;
+    let bogus_ctx = 5u64;
+    let off = 0x2000 + bogus_ctx * stride;
+    assert_eq!(plic.read(off, 4), 0);
+    plic.write(off, 4, 0xffff_ffff);
+    assert_eq!(plic.read(off, 4), 0);
+}
+
+#[test]
+fn test_plic_context_register_oob_returns_zero_no_panic() {
+    // Threshold/claim window for ctx 5 with num_contexts=2.
+    let plic = Plic::new(64, 2);
+    let off = 0x20_0000 + 5 * 0x1000;
+    assert_eq!(plic.read(off, 4), 0); // threshold
+    assert_eq!(plic.read(off + 4, 4), 0); // claim
+    plic.write(off, 4, 0xabcd);
+    plic.write(off + 4, 4, 1);
+    // Real ctx 0 threshold remains unaffected.
+    assert_eq!(plic.read(0x20_0000, 4), 0);
+}
+
+#[test]
+fn test_plic_far_offset_returns_zero_no_panic() {
+    // An offset far beyond every known region must not panic and
+    // must read 0 / silently drop writes.
+    let plic = Plic::new(64, 2);
+    let far = 0x1000_0000u64;
+    assert_eq!(plic.read(far, 4), 0);
+    plic.write(far, 4, 0x12345);
+    assert_eq!(plic.read(far, 4), 0);
+}
+
+#[test]
+fn test_plic_enable_and_threshold_are_per_context() {
+    let plic = Plic::new(64, 2);
+
+    // Configure context 0: enable IRQ 1 (bit 1 of word 0), threshold = 3.
+    plic.write(0x2000, 4, 1u64 << 1); // enable[0][0] = 0b10
+    plic.write(0x20_0000, 4, 3); // threshold[0] = 3
+
+    // Context 1 must remain at zeros — even reading uses a separate
+    // window per context.
+    let enable1 = plic.read(0x2000 + 0x80, 4);
+    assert_eq!(enable1, 0, "ctx 1 enable must not see ctx 0 writes");
+    let thresh1 = plic.read(0x20_0000 + 0x1000, 4);
+    assert_eq!(thresh1, 0, "ctx 1 threshold must not see ctx 0 writes");
+
+    // Reverse: writing ctx 1 must not bleed into ctx 0.
+    plic.write(0x2000 + 0x80, 4, 1u64 << 5); // enable[1][0] = 0x20
+    plic.write(0x20_0000 + 0x1000, 4, 7); // threshold[1] = 7
+    assert_eq!(plic.read(0x2000, 4), 1u64 << 1);
+    assert_eq!(plic.read(0x20_0000, 4), 3);
+}
+
+#[test]
+fn test_plic_pending_irq_with_priority_zero_cannot_be_claimed() {
+    let plic = Plic::new(64, 1);
+
+    // Enable IRQ 1 for ctx 0, leave its priority at 0.
+    plic.write(0x2000, 4, 1u64 << 1);
+    plic.set_pending(1, true);
+
+    // Claim port (offset 4) should return 0 because priority 0 is
+    // never above the (default zero) threshold.
+    assert_eq!(plic.read(0x20_0004, 4), 0);
+
+    // After raising priority above the threshold, the same claim
+    // succeeds — confirming the only thing blocking it was priority.
+    plic.write(0x04, 4, 5);
+    plic.set_pending(1, true);
+    assert_eq!(plic.read(0x20_0004, 4), 1);
+}
+
+#[test]
+fn test_plic_invalid_source_does_not_disturb_valid_irqs() {
+    let plic = Plic::new(32, 1);
+
+    // Configure IRQ 1 fully so it is claimable.
+    plic.write(0x04, 4, 5);
+    plic.write(0x2000, 4, 1u64 << 1);
+
+    // Invalid source 0 (reserved) and source 32 (== num_sources)
+    // must be ignored by both set_irq and set_pending.
+    plic.set_irq(0, true);
+    plic.set_irq(32, true);
+    plic.set_pending(0, true);
+    plic.set_pending(32, true);
+
+    // Pending bitmap word 0 must NOT have bit 0 set (IRQ 0 reserved)
+    // and the lone valid IRQ 1 still works after we deliberately
+    // drive it.
+    assert_eq!(plic.read(0x1000, 4) & 1, 0, "IRQ 0 must never go pending");
+    plic.set_irq(1, true);
+    assert_eq!(plic.read(0x20_0004, 4), 1, "valid IRQ 1 still claimable");
+}
