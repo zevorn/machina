@@ -90,7 +90,11 @@ fn bit_pattern_inline_fields() {
 #[test]
 fn bit_pattern_exceeds_32() {
     let toks = ["11111111111111111111111111111111", "1"];
-    assert!(parse_bit_tokens(&toks, 32).is_err());
+    let err = parse_bit_tokens(&toks, 32).unwrap_err();
+    assert!(
+        err.contains("exceeds") && err.contains("32"),
+        "error must mention overflow and width 32, got: {err}",
+    );
 }
 
 // ── Field parsing ────────────────────────────────────────────
@@ -140,9 +144,23 @@ fn parse_field_with_function() {
 
 #[test]
 fn parse_bad_field_segment() {
-    assert!(parse_field_segment("abc").is_err());
-    assert!(parse_field_segment(":5").is_err());
-    assert!(parse_field_segment("20:").is_err());
+    let e1 = parse_field_segment("abc").unwrap_err();
+    assert!(
+        e1.contains("bad segment") && e1.contains("abc"),
+        "missing-colon error must echo the bad token, got: {e1}",
+    );
+
+    let e2 = parse_field_segment(":5").unwrap_err();
+    assert!(
+        e2.contains("bad pos"),
+        "empty position must be flagged as bad pos, got: {e2}",
+    );
+
+    let e3 = parse_field_segment("20:").unwrap_err();
+    assert!(
+        e3.contains("bad len"),
+        "empty length must be flagged as bad len, got: {e3}",
+    );
 }
 
 // ── Argset parsing ───────────────────────────────────────────
@@ -304,7 +322,89 @@ fn parse_unknown_format_ref() {
 @r ....... ..... ..... ... ..... ....... &r %rd
 add 0000000 ..... ..... 000 ..... 0110011 @nonexistent
 ";
-    assert!(parse(input).is_err());
+    let err = parse(input).unwrap_err();
+    assert!(
+        err.contains("unknown format") && err.contains("nonexistent"),
+        "error must name the missing format, got: {err}",
+    );
+    // The top-level wrapper must add line context so the user sees
+    // which line of the .decode input is at fault.
+    assert!(
+        err.contains("line "),
+        "error must include line number, got: {err}",
+    );
+}
+
+#[test]
+fn parse_unknown_argset_ref_is_rejected() {
+    let input = "\
+%rd 7:5
+add 0000000 ..... ..... 000 ..... 0110011 &nope %rd
+";
+    let err = parse(input).unwrap_err();
+    assert!(
+        err.contains("unknown argset") && err.contains("nope"),
+        "error must name the missing argset, got: {err}",
+    );
+    assert!(
+        err.contains("add"),
+        "error should also point at the referencing pattern, got: {err}",
+    );
+}
+
+#[test]
+fn parse_bit_pattern_overflow_includes_line_number() {
+    // Pattern with 33 bit characters in a 32-bit decoder. The
+    // error must round-trip through parse_with_width's
+    // `line {N}: ...` wrapper.
+    let input = "\
+# leading comment
+foo 11111111111111111111111111111111 1
+";
+    let err = parse(input).unwrap_err();
+    assert!(
+        err.contains("exceeds") && err.contains("32"),
+        "error must describe the overflow and width, got: {err}",
+    );
+    assert!(
+        err.contains("line "),
+        "error must carry a line number prefix, got: {err}",
+    );
+}
+
+#[test]
+fn parse_bad_field_segment_in_input_includes_line_number() {
+    // %rd has a malformed segment ":5" — empty position. The
+    // error from parse_field_segment must surface with line info.
+    let input = "\
+# header
+%rd :5
+";
+    let err = parse(input).unwrap_err();
+    assert!(
+        err.contains("bad pos"),
+        "underlying segment error must surface, got: {err}",
+    );
+    assert!(
+        err.contains("line "),
+        "error must include line number, got: {err}",
+    );
+}
+
+#[test]
+fn parse_bad_attr_includes_concrete_token() {
+    // `xyz=blah` is not parseable as either a `%field` ref or an
+    // integer constant.
+    let input = "\
+%rd 7:5
+&r rd
+add 0000000 ..... ..... 000 ..... 0110011 &r %rd xyz=blah
+";
+    let err = parse(input).unwrap_err();
+    assert!(
+        err.contains("bad attr") && err.contains("xyz=blah"),
+        "error must echo the bad attr token, got: {err}",
+    );
 }
 
 // ── Format inheritance ───────────────────────────────────────

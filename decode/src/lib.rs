@@ -50,6 +50,7 @@ pub struct Pattern {
     pub field_map: BTreeMap<String, FieldMapping>,
 }
 
+#[derive(Debug)]
 pub struct Parsed {
     pub fields: BTreeMap<String, Field>,
     pub argsets: BTreeMap<String, ArgSet>,
@@ -79,6 +80,7 @@ pub fn is_inline_field(s: &str) -> bool {
     }
 }
 
+#[derive(Debug)]
 pub struct BitPatternResult {
     pub fixedbits: u32,
     pub fixedmask: u32,
@@ -386,38 +388,57 @@ pub fn parse_with_width(input: &str, width: u32) -> Result<Parsed, String> {
             continue;
         }
         let first = line.chars().next().unwrap();
-        let result: Result<(), String> = match first {
-            '%' => {
-                let f = parse_field(line)?;
-                fields.insert(f.name.clone(), f);
-                Ok(())
+        // Wrap the dispatch in a closure so the inner `?`s
+        // propagate to `result` (and pick up the line-number
+        // prefix) instead of the enclosing function.
+        let result: Result<(), String> = (|| -> Result<(), String> {
+            match first {
+                '%' => {
+                    let f = parse_field(line)?;
+                    fields.insert(f.name.clone(), f);
+                    Ok(())
+                }
+                '&' => {
+                    let a = parse_argset(line)?;
+                    argsets.insert(a.name.clone(), a);
+                    Ok(())
+                }
+                '@' => {
+                    let (n, f) = parse_format(line, &fields, width)?;
+                    formats.insert(n, f);
+                    Ok(())
+                }
+                '{' | '}' | '[' | ']' => Ok(()),
+                _ => {
+                    let p = parse_pattern(
+                        line,
+                        &formats,
+                        &fields,
+                        &mut auto_args,
+                        width,
+                    )?;
+                    patterns.push(p);
+                    Ok(())
+                }
             }
-            '&' => {
-                let a = parse_argset(line)?;
-                argsets.insert(a.name.clone(), a);
-                Ok(())
-            }
-            '@' => {
-                let (n, f) = parse_format(line, &fields, width)?;
-                formats.insert(n, f);
-                Ok(())
-            }
-            '{' | '}' | '[' | ']' => Ok(()),
-            _ => {
-                let p = parse_pattern(
-                    line,
-                    &formats,
-                    &fields,
-                    &mut auto_args,
-                    width,
-                )?;
-                patterns.push(p);
-                Ok(())
-            }
-        };
+        })();
         result.map_err(|e: String| format!("line {}: {e}", lineno + 1))?;
     }
     argsets.extend(auto_args);
+
+    // Final pass: validate every pattern's `&argset` reference
+    // resolves to a defined or auto-generated argset. Without this
+    // check an unknown argset name would slip silently through to
+    // codegen and surface as a Rust type error.
+    for p in &patterns {
+        if !p.args_name.is_empty() && !argsets.contains_key(&p.args_name) {
+            return Err(format!(
+                "unknown argset &{} referenced by pattern {}",
+                p.args_name, p.name,
+            ));
+        }
+    }
+
     Ok(Parsed {
         fields,
         argsets,
