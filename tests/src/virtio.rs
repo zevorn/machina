@@ -372,3 +372,98 @@ fn test_queue1_notify_dispatches_handle_queue() {
         "wrong queue index dispatched"
     );
 }
+
+// ===== VirtQueue ring address bounds (#58) =====
+//
+// All ring access paths must reject out-of-range / underflowing
+// guest addresses without panicking, even in debug builds. These
+// tests configure a queue with a bad avail_addr or used_addr and
+// drive the unsafe entry points; the host RAM buffer is filled
+// with a sentinel so any accidental write would be visible.
+
+unsafe fn ring_test_buf() -> Vec<u8> {
+    vec![0xA5u8; 4096]
+}
+
+#[test]
+fn read_avail_ring_with_avail_addr_below_ram_base_returns_zero_no_panic() {
+    let mut q = VirtQueue::new();
+    q.num = 16;
+    // ram_base = 0x10000, avail_addr = 0x100 < ram_base.
+    q.avail_addr = 0x100;
+    let buf = unsafe { ring_test_buf() };
+    let got = unsafe {
+        q.read_avail_ring(0, buf.as_ptr(), 0x10000, buf.len() as u64)
+    };
+    assert_eq!(got, 0, "underflowing avail_addr must return 0");
+    // The buffer must be untouched (it's read-only here, but
+    // double-check no out-of-bounds host access scribbled it).
+    assert!(buf.iter().all(|&b| b == 0xA5));
+}
+
+#[test]
+fn read_avail_ring_with_overflowing_addr_returns_zero_no_panic() {
+    let mut q = VirtQueue::new();
+    q.num = 16;
+    // avail_addr near u64 max so + 4 + i*2 overflows.
+    q.avail_addr = u64::MAX - 1;
+    let buf = unsafe { ring_test_buf() };
+    let got =
+        unsafe { q.read_avail_ring(0, buf.as_ptr(), 0, buf.len() as u64) };
+    assert_eq!(got, 0, "overflowing avail_addr arithmetic must return 0");
+}
+
+#[test]
+fn write_used_with_used_addr_below_ram_base_is_a_noop_no_panic() {
+    let mut q = VirtQueue::new();
+    q.num = 16;
+    q.used_addr = 0x80; // below ram_base.
+    let mut buf = unsafe { ring_test_buf() };
+    unsafe {
+        q.write_used(0, 1, 4, buf.as_mut_ptr(), 0x10000, buf.len() as u64);
+    }
+    assert!(
+        buf.iter().all(|&b| b == 0xA5),
+        "underflowing used_addr must not write any host memory",
+    );
+}
+
+#[test]
+fn write_used_idx_with_used_addr_below_ram_base_is_a_noop_no_panic() {
+    let mut q = VirtQueue::new();
+    q.used_addr = 0x80; // below ram_base.
+    let mut buf = unsafe { ring_test_buf() };
+    unsafe {
+        q.write_used_idx(7, buf.as_mut_ptr(), 0x10000, buf.len() as u64);
+    }
+    assert!(
+        buf.iter().all(|&b| b == 0xA5),
+        "underflowing used_addr must not write the index",
+    );
+}
+
+#[test]
+fn read_used_idx_returns_none_for_underflowing_used_addr() {
+    let mut q = VirtQueue::new();
+    q.used_addr = 0x80;
+    let buf = unsafe { ring_test_buf() };
+    let got =
+        unsafe { q.read_used_idx(buf.as_ptr(), 0x10000, buf.len() as u64) };
+    assert!(got.is_none(), "underflowing used_addr must surface as None");
+}
+
+#[test]
+fn read_used_idx_returns_value_for_in_range_addr() {
+    // ram_base = 0x1000, ram_size = 0x1000, used_addr = 0x1100.
+    // used.idx is at used_addr + 2 = 0x1102 -> off = 0x102.
+    // Pre-write 0x1234 there.
+    let mut buf = unsafe { ring_test_buf() };
+    let off: usize = 0x102;
+    buf[off] = 0x34;
+    buf[off + 1] = 0x12;
+
+    let mut q = VirtQueue::new();
+    q.used_addr = 0x1100;
+    let got = unsafe { q.read_used_idx(buf.as_ptr(), 0x1000, 0x1000) };
+    assert_eq!(got, Some(0x1234));
+}

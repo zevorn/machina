@@ -98,6 +98,28 @@ impl VirtQueue {
         unsafe { (ram.add(off as usize) as *const u16).read_unaligned() }
     }
 
+    /// Translate a ring offset to a host-RAM offset, returning
+    /// `None` if any of the additions or subtractions wrap or
+    /// the resulting `[off, off + len)` window leaves
+    /// `[0, ram_size)`. Used by every ring access path so a
+    /// malicious or stale guest address can never reach the
+    /// raw pointer arithmetic below.
+    fn ring_off(
+        base_addr: u64,
+        offset: u64,
+        len: u64,
+        ram_base: u64,
+        ram_size: u64,
+    ) -> Option<u64> {
+        let addr = base_addr.checked_add(offset)?;
+        let off = addr.checked_sub(ram_base)?;
+        let end = off.checked_add(len)?;
+        if end > ram_size {
+            return None;
+        }
+        Some(off)
+    }
+
     /// Read an entry from the available ring.
     ///
     /// # Safety
@@ -114,11 +136,39 @@ impl VirtQueue {
             return 0;
         }
         let i = (ring_idx as u64) % (self.num as u64);
-        let off = self.avail_addr + 4 + i * 2 - ram_base;
-        if off + 2 > ram_size {
-            return 0;
-        }
+        // avail.ring[i] at avail_addr + 4 + i*2.
+        let entry_offset = match i.checked_mul(2).and_then(|e| e.checked_add(4))
+        {
+            Some(o) => o,
+            None => return 0,
+        };
+        let off = match Self::ring_off(
+            self.avail_addr,
+            entry_offset,
+            2,
+            ram_base,
+            ram_size,
+        ) {
+            Some(o) => o,
+            None => return 0,
+        };
         unsafe { (ram.add(off as usize) as *const u16).read_unaligned() }
+    }
+
+    /// Read the used ring index (used.idx). Returns `None` if
+    /// the configured `used_addr` is out of range.
+    ///
+    /// # Safety
+    /// Caller must ensure `ram` is valid for the range
+    /// [`ram_base`, `ram_base + ram_size`).
+    pub unsafe fn read_used_idx(
+        &self,
+        ram: *const u8,
+        ram_base: u64,
+        ram_size: u64,
+    ) -> Option<u16> {
+        let off = Self::ring_off(self.used_addr, 2, 2, ram_base, ram_size)?;
+        Some(unsafe { (ram.add(off as usize) as *const u16).read_unaligned() })
     }
 
     /// Write an entry to the used ring.
@@ -140,10 +190,21 @@ impl VirtQueue {
         }
         let i = (used_idx as u64) % (self.num as u64);
         // used.ring[i] at used_addr + 4 + i*8.
-        let off = self.used_addr + 4 + i * 8 - ram_base;
-        if off + 8 > ram_size {
-            return;
-        }
+        let entry_offset = match i.checked_mul(8).and_then(|e| e.checked_add(4))
+        {
+            Some(o) => o,
+            None => return,
+        };
+        let off = match Self::ring_off(
+            self.used_addr,
+            entry_offset,
+            8,
+            ram_base,
+            ram_size,
+        ) {
+            Some(o) => o,
+            None => return,
+        };
         unsafe {
             let p = ram.add(off as usize);
             (p as *mut u32).write_unaligned(desc_id);
@@ -163,10 +224,11 @@ impl VirtQueue {
         ram_base: u64,
         ram_size: u64,
     ) {
-        let off = self.used_addr + 2 - ram_base;
-        if off + 2 > ram_size {
-            return;
-        }
+        let off = match Self::ring_off(self.used_addr, 2, 2, ram_base, ram_size)
+        {
+            Some(o) => o,
+            None => return,
+        };
         unsafe {
             (ram.add(off as usize) as *mut u16).write_unaligned(idx);
         }

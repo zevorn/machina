@@ -273,12 +273,13 @@ impl VirtioDevice for VirtioBlk {
     ) -> u32 {
         let avail_idx = queue.read_avail_idx(ram, ram_base, ram_size);
         let mut processed = 0u32;
-        let mut used_idx = {
-            let off = queue.used_addr + 2 - ram_base;
-            if off + 2 > ram_size {
-                return 0;
-            }
-            unsafe { (ram.add(off as usize) as *const u16).read_unaligned() }
+        // Delegate the used.idx read to VirtQueue so the bounds
+        // checks live next to the rest of the ring arithmetic
+        // and a bad guest used_addr cannot wrap into a huge
+        // host-side offset here.
+        let mut used_idx = match queue.read_used_idx(ram, ram_base, ram_size) {
+            Some(v) => v,
+            None => return 0,
         };
 
         while queue.last_avail_idx != avail_idx {
