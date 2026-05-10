@@ -287,6 +287,9 @@ fn read_llt_data(
         data.extend(read_guest_bytes(address_space, desc.src_addr, chunk_len));
         llt_addr = desc.next_llt_addr;
     }
+    if data.len() < len {
+        return Err(invalid_llt("truncated LLT descriptor chain"));
+    }
     Ok(data)
 }
 

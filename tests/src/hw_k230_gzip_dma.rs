@@ -206,6 +206,49 @@ fn k230_gzip_dma_rejects_truncated_output_llt_chain() {
 }
 
 #[test]
+fn k230_gzip_dma_rejects_truncated_input_llt_chain() {
+    let payload = b"k230 gzip dma input";
+    let compressed = gzip_method_9(payload);
+    let aspace = make_ram_aspace(0x1_0000);
+    let compressed_addr = 0x1000;
+    let output_addr = 0x8000;
+    let read_llt = 0x4000;
+    let write_llt_addr = 0x4100;
+
+    write_bytes(&aspace, compressed_addr, &compressed);
+    write_llt(
+        &aspace,
+        read_llt,
+        compressed_addr as u32,
+        (compressed.len() - 1) as u32,
+        0x8028_0000,
+        0,
+    );
+    write_llt(
+        &aspace,
+        write_llt_addr,
+        0x8020_0000,
+        payload.len() as u32,
+        output_addr as u32,
+        0,
+    );
+
+    let dev = K230GzipDma::new_named("k230-gzip-dma");
+    dev.set_dma_address_space(aspace);
+    let mmio = K230GzipDmaMmio(dev);
+
+    start_decompress(
+        &mmio,
+        read_llt,
+        write_llt_addr,
+        compressed.len(),
+        payload.len(),
+    );
+
+    assert_eq!(mmio.read(0x800c, 4) & (1 << 10), 0);
+}
+
+#[test]
 fn k230_gzip_dma_rejects_zero_progress_llt_cycle() {
     let (tx, rx) = mpsc::channel();
 
