@@ -624,9 +624,9 @@ fn read_dma_buffer(
     let mut data = vec![0; len];
     let mut offset = 0;
     while offset < len {
-        let width = dma_access_width(len - offset);
-        let value = address_space
-            .read(GPA(u64::from(address).wrapping_add(offset as u64)), width);
+        let addr = u64::from(address).wrapping_add(offset as u64);
+        let width = dma_access_width(address_space, addr, len - offset);
+        let value = address_space.read(GPA(addr), width);
         data[offset..offset + width as usize]
             .copy_from_slice(&value.to_le_bytes()[..width as usize]);
         offset += width as usize;
@@ -637,27 +637,30 @@ fn read_dma_buffer(
 fn write_dma_buffer(address_space: &AddressSpace, address: u32, data: &[u8]) {
     let mut offset = 0;
     while offset < data.len() {
-        let width = dma_access_width(data.len() - offset);
+        let addr = u64::from(address).wrapping_add(offset as u64);
+        let width = dma_access_width(address_space, addr, data.len() - offset);
         let mut bytes = [0; 8];
         bytes[..width as usize]
             .copy_from_slice(&data[offset..offset + width as usize]);
-        address_space.write(
-            GPA(u64::from(address).wrapping_add(offset as u64)),
-            width,
-            u64::from_le_bytes(bytes),
-        );
+        address_space.write(GPA(addr), width, u64::from_le_bytes(bytes));
         offset += width as usize;
     }
 }
 
-fn dma_access_width(remaining: usize) -> u32 {
-    if remaining >= 4 {
-        4
-    } else if remaining >= 2 {
-        2
-    } else {
-        1
+fn dma_access_width(
+    address_space: &AddressSpace,
+    address: u64,
+    remaining: usize,
+) -> u32 {
+    for width in [4, 2, 1] {
+        if remaining >= width as usize
+            && address & u64::from(width - 1) == 0
+            && address_space.is_mapped(GPA(address), width)
+        {
+            return width;
+        }
     }
+    1
 }
 
 fn read_response_reg(regs: &SdhciRegs, offset: u64, size: u32) -> u64 {

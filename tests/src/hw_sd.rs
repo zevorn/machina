@@ -163,6 +163,33 @@ impl IrqSink for Pl181IrqSink {
     }
 }
 
+#[derive(Default)]
+struct DmaProbe {
+    read_sizes: Mutex<Vec<u32>>,
+    writes: Mutex<Vec<(u32, u64)>>,
+}
+
+impl DmaProbe {
+    fn read_sizes(&self) -> Vec<u32> {
+        self.read_sizes.lock().unwrap().clone()
+    }
+
+    fn writes(&self) -> Vec<(u32, u64)> {
+        self.writes.lock().unwrap().clone()
+    }
+}
+
+impl MmioOps for DmaProbe {
+    fn read(&self, _offset: u64, size: u32) -> u64 {
+        self.read_sizes.lock().unwrap().push(size);
+        0x5a
+    }
+
+    fn write(&self, _offset: u64, size: u32, val: u64) {
+        self.writes.lock().unwrap().push((size, val));
+    }
+}
+
 fn sd_card(data: Vec<u8>) -> SdMemoryCard<MemBackend> {
     SdMemoryCard::new(
         BlockMedia::new(MemBackend::new(data, false), 512).unwrap(),
@@ -190,6 +217,17 @@ fn make_ram_aspace(size: u64) -> Arc<AddressSpace> {
     let mut root = MemoryRegion::container("root", size);
     let (ram, _block) = MemoryRegion::ram("ram", size);
     root.add_subregion(ram, GPA(0));
+    Arc::new(AddressSpace::new(root))
+}
+
+fn make_io_aspace<T: MmioOps + 'static>(
+    addr: u64,
+    size: u64,
+    ops: Arc<T>,
+) -> Arc<AddressSpace> {
+    let mut root = MemoryRegion::container("root", addr + size + 0x1000);
+    let ops: Arc<dyn MmioOps> = ops;
+    root.add_subregion(MemoryRegion::io("dma-probe", size, ops), GPA(addr));
     Arc::new(AddressSpace::new(root))
 }
 
@@ -853,6 +891,34 @@ fn test_sdhci_sdma_reads_single_block_after_cmd17() {
 }
 
 #[test]
+fn test_sdhci_sdma_card_read_caps_dma_write_at_region_end() {
+    let mut data = vec![0; 1024];
+    data[512] = 0x5a;
+    let card = Arc::new(sd_card(data));
+    select_card(&card);
+
+    let dma_addr = 0x2000;
+    let probe = Arc::new(DmaProbe::default());
+    let aspace = make_io_aspace(dma_addr, 1, probe.clone());
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card);
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, 512);
+    mmio.write(0x0e, 2, 17 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_eq!(probe.writes(), vec![(1, 0x5a)]);
+}
+
+#[test]
 fn test_sdhci_sdma_reads_scr_after_acmd51() {
     let card = Arc::new(sd_card(vec![0; 1024]));
     let rca = select_card(&card);
@@ -1018,6 +1084,39 @@ fn test_sdhci_sdma_writes_single_block_after_cmd24() {
     assert_eq!(card.do_command(&SdRequest::new(17, 512), &mut resp), 4);
     for index in 0..512 {
         assert_eq!(card.read_byte(), (index & 0xff) as u8);
+    }
+}
+
+#[test]
+fn test_sdhci_sdma_card_write_caps_dma_read_at_region_end() {
+    let card = Arc::new(sd_card(vec![0; 1024]));
+    select_card(&card);
+
+    let dma_addr = 0x2000;
+    let probe = Arc::new(DmaProbe::default());
+    let aspace = make_io_aspace(dma_addr, 1, probe.clone());
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card.clone());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, 512);
+    mmio.write(0x0e, 2, 24 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_eq!(probe.read_sizes(), vec![1]);
+
+    let mut resp = [0; 16];
+    assert_eq!(card.do_command(&SdRequest::new(17, 512), &mut resp), 4);
+    assert_eq!(card.read_byte(), 0x5a);
+    for _ in 1..512 {
+        assert_eq!(card.read_byte(), 0);
     }
 }
 
