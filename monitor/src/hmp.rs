@@ -46,6 +46,15 @@ pub fn handle_line(
 fn handle_info(arg: &str, svc: &Arc<Mutex<MonitorService>>) -> Option<String> {
     let s = svc.lock().expect("monitor mutex poisoned");
     match arg.trim() {
+        "memory" => {
+            let bytes = s.ram_size();
+            if bytes == 0 {
+                Some("RAM: not configured\n".into())
+            } else {
+                let mib = bytes / (1024 * 1024);
+                Some(format!("RAM: {mib} MiB ({bytes} bytes)\n"))
+            }
+        }
         "status" => {
             let running = s.query_status();
             if running {
@@ -109,6 +118,7 @@ fn help_text() -> String {
 info status     -- VM run state\n\
 info registers  -- dump GPRs (paused only)\n\
 info cpus       -- list vCPUs\n\
+info memory     -- show guest RAM size\n\
 stop            -- pause vCPU\n\
 cont (c)        -- resume vCPU\n\
 quit (q)        -- exit emulator\n\

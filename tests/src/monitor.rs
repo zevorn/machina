@@ -189,6 +189,28 @@ fn test_hmp_info_cpus() {
     assert!(out.as_ref().unwrap().contains("CPU #0"));
 }
 
+#[test]
+fn test_hmp_info_memory_unconfigured() {
+    let svc = make_svc();
+    let out = hmp::handle_line("info memory", &svc);
+    assert_eq!(out, Some("RAM: not configured\n".to_string()));
+}
+
+#[test]
+fn test_hmp_info_memory_reports_mib_and_bytes() {
+    let svc = make_svc();
+    svc.lock().unwrap().set_ram_size(128 * 1024 * 1024);
+    let out = hmp::handle_line("info memory", &svc);
+    assert_eq!(out, Some("RAM: 128 MiB (134217728 bytes)\n".to_string()),);
+}
+
+#[test]
+fn test_hmp_help_lists_info_memory() {
+    let svc = make_svc();
+    let out = hmp::handle_line("help", &svc);
+    assert!(out.as_ref().unwrap().contains("info memory"));
+}
+
 // ── TCP socket-level tests ──────────────────────────
 
 fn read_json_line(reader: &mut BufReader<TcpStream>) -> serde_json::Value {

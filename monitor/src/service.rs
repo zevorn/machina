@@ -7,11 +7,30 @@ use machina_core::monitor::{CpuSnapshot, MonitorState, VmState};
 /// Central monitor service shared by all transports.
 pub struct MonitorService {
     pub state: Arc<MonitorState>,
+    /// Total guest RAM in bytes, populated by `main.rs` after CLI
+    /// parsing and read by `info memory` / `query-memory`. `0` until
+    /// it is explicitly set, which is the case in unit tests that do
+    /// not exercise memory-aware commands.
+    ram_size_bytes: u64,
 }
 
 impl MonitorService {
     pub fn new(state: Arc<MonitorState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            ram_size_bytes: 0,
+        }
+    }
+
+    /// Record the guest RAM size in bytes so the monitor can report
+    /// it through `info memory`.
+    pub fn set_ram_size(&mut self, bytes: u64) {
+        self.ram_size_bytes = bytes;
+    }
+
+    /// Guest RAM size in bytes as last set by `set_ram_size`.
+    pub fn ram_size(&self) -> u64 {
+        self.ram_size_bytes
     }
 
     pub fn query_status(&self) -> bool {
