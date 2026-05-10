@@ -2,6 +2,97 @@
 
 > 目标读者：希望构建、运行和引导客户软件的开发者。
 
+## 新贡献者上手流程
+
+下面这条路径仅依赖仓库自带的 `tests/firmware/` 固件，因此 fresh
+clone 之后无需准备外部内核、磁盘镜像或 RISC-V 交叉工具链就能跑通。
+按顺序执行；任意一步失败请参见末尾的「常见故障」表。
+
+### 1. 安装宿主机依赖
+
+- 当前 stable Rust 工具链（`rustc 1.80+`）以及 `cargo`，建议通过
+  [`rustup`](https://rustup.rs/) 安装。
+- GNU `make`。
+- 一个可用的宿主链接器（`cc`），release 构建时 cargo 会调用它。
+
+### 2. 克隆与构建
+
+```bash
+git clone https://github.com/gevico/machina.git
+cd machina
+make release
+```
+
+首次构建会拉取工作区依赖（在主流笔记本上约 1–3 分钟）。可执行
+文件位于 `./target/release/machina`。
+
+### 3. 用自带固件做最短的端到端冒烟
+
+最便宜的全流程检查 —— 启动自带的裸金属 PASS 内核，跑完后退出码 0：
+
+```bash
+./target/release/machina -M riscv64-ref -m 128 -bios none \
+    -kernel tests/firmware/sifive_pass.bin -nographic
+```
+
+预期输出（`shutdown (pass)` 这一行就是成功标志）：
+
+```
+machina: riscv64-ref, 128 MiB RAM
+machina: entering execution loop
+machina: shutdown (pass)
+```
+
+如果想顺带验证捆绑的 RustSBI 路径：
+
+```bash
+./target/release/machina -M riscv64-ref -m 128 \
+    -kernel tests/firmware/sbi_smoke.bin -nographic
+```
+
+输出应以 RustSBI banner 开头，并以 `MACHINA_SBI_OK` 结束，随后
+Machina 干净退出。
+
+### 4. 跑你正在改动那一块的窄测试
+
+迭代时永远先用 filter 跑窄测试，整套 `make test` 比较慢。示例：
+
+```bash
+# 启动工具自身的冒烟。
+cargo test -p machina-tests tools::
+
+# 反汇编器回归。
+cargo test -p machina-tests disas
+
+# 内存区域 / FlatView。
+cargo test -p machina-tests memory_region
+
+# RISC-V CSR 语义。
+cargo test -p machina-tests riscv_csr
+```
+
+### 5. 提 PR 之前的检查
+
+提 PR 之前，按 CI 同样的检查跑一遍：
+
+```bash
+make fmt-check    # rustfmt diff 必须为空
+make clippy       # 0 个 clippy 警告
+make test         # 全量测试套件
+```
+
+如果改动了 `.agents/`，再跑一次 `make check-agent-skills`。
+
+### 常见故障
+
+| 现象 | 大概率原因 / 修法 |
+|------|-------------------|
+| `make release` 提示 `cc not found` | 装宿主机的编译工具：Debian/Ubuntu 用 `build-essential`，macOS 装 Xcode CLT，Fedora/Arch 用 `gcc`。 |
+| `tests/firmware/*.bin` 不存在 | 仓库自带预编译二进制。若被删掉，可在装好 `riscv64-elf-` 交叉工具链后执行 `cd tests/firmware && ./build.sh` 重建。 |
+| 冒烟命令卡住 | 检查参数是否漏了 `-bios none`。`sifive_pass.bin` 是裸金属内核，不带 `-bios none` 会被 RustSBI 接管而不退出。 |
+| `make test` 跑得很久 | 这是正常的——测试套件很大。日常迭代请用 `cargo test -p machina-tests <filter>` 跑窄测试，只在 push 之前跑一次 `make test`。 |
+| `info registers` 提示 "VM must be paused" | 当前虚拟机仍在运行。先发 `stop`（HMP）或 `{"execute":"stop"}`（QMP）暂停，再查询寄存器。 |
+
 ## 快速开始
 
 ### 构建
