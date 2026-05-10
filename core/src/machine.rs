@@ -17,6 +17,12 @@ pub struct NetdevOpts {
 impl NetdevOpts {
     /// Parse `-netdev` and optional `-device
     /// virtio-net-device` into NetdevOpts.
+    ///
+    /// Empty value strings (`id=`, `ifname=`, `netdev=`) are
+    /// rejected up front so callers don't fail later inside
+    /// device init or TAP setup. Only `tap` netdevs and
+    /// `virtio-net-device` device strings are accepted; anything
+    /// else returns an explicit `Err` naming the field at fault.
     pub fn parse(
         netdev_raw: &str,
         device_raw: Option<&str>,
@@ -32,8 +38,14 @@ impl NetdevOpts {
         let mut ifname = None;
         for part in netdev_raw.split(',').skip(1) {
             if let Some(v) = part.strip_prefix("id=") {
+                if v.is_empty() {
+                    return Err("-netdev: empty id= value".to_string());
+                }
                 id = Some(v.to_string());
             } else if let Some(v) = part.strip_prefix("ifname=") {
+                if v.is_empty() {
+                    return Err("-netdev: empty ifname= value".to_string());
+                }
                 ifname = Some(v.to_string());
             }
         }
@@ -43,11 +55,32 @@ impl NetdevOpts {
 
         let mut mac = None;
         if let Some(dev) = device_raw {
+            // First sub-token is the device kind. Only
+            // virtio-net-device is supported here; anything else
+            // is rejected explicitly so the user gets a clear
+            // error rather than silently dropping the field.
+            let kind = dev.split(',').next().unwrap_or("");
+            if kind != "virtio-net-device" {
+                return Err(format!(
+                    "-device: unsupported type \
+                     (expected virtio-net-device): {kind}",
+                ));
+            }
             let mut dev_netdev = None;
             for part in dev.split(',').skip(1) {
                 if let Some(v) = part.strip_prefix("netdev=") {
+                    if v.is_empty() {
+                        return Err("-device virtio-net-device: \
+                             empty netdev= value"
+                            .to_string());
+                    }
                     dev_netdev = Some(v.to_string());
                 } else if let Some(v) = part.strip_prefix("mac=") {
+                    if v.is_empty() {
+                        return Err("-device virtio-net-device: \
+                             empty mac= value"
+                            .to_string());
+                    }
                     mac = Some(v.to_string());
                 }
             }
