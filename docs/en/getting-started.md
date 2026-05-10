@@ -3,6 +3,104 @@
 > Target audience: developers who want to build, run, and boot
 > guest software on machina.
 
+## First-time Contributor Walk-through
+
+This path uses only the firmware payloads bundled in
+`tests/firmware/`, so it works on a fresh clone with no external
+kernel, disk image, or RISC-V cross toolchain. Run each step in
+order; if a step fails see [Troubleshooting](#troubleshooting).
+
+### 1. Install host dependencies
+
+- A current stable Rust toolchain (`rustc 1.80+`) plus `cargo`,
+  installed via [`rustup`](https://rustup.rs/).
+- GNU `make`.
+- A working host C linker (`cc`) — Cargo invokes it for the
+  release build.
+
+### 2. Clone and build
+
+```bash
+git clone https://github.com/gevico/machina.git
+cd machina
+make release
+```
+
+The first build also pulls workspace dependencies (~1–3 minutes
+on a recent laptop). The output binary is at
+`./target/release/machina`.
+
+### 3. Smoke-boot a bundled payload
+
+The cheapest end-to-end check — boots the bundled bare-metal
+"PASS" kernel against `riscv64-ref` and exits with code 0:
+
+```bash
+./target/release/machina -M riscv64-ref -m 128 -bios none \
+    -kernel tests/firmware/sifive_pass.bin -nographic
+```
+
+Expected output (the `shutdown (pass)` line is the success
+marker):
+
+```
+machina: riscv64-ref, 128 MiB RAM
+machina: entering execution loop
+machina: shutdown (pass)
+```
+
+For a longer smoke test that exercises the bundled RustSBI
+firmware path, run:
+
+```bash
+./target/release/machina -M riscv64-ref -m 128 \
+    -kernel tests/firmware/sbi_smoke.bin -nographic
+```
+
+Expected output begins with the RustSBI banner and ends with
+`MACHINA_SBI_OK`, after which Machina exits cleanly.
+
+### 4. Run the narrow tests for the area you are touching
+
+Always start with a focused filter so iteration is fast — `make
+test` runs the full suite (slow). Examples:
+
+```bash
+# Smoke tests for the boot tooling itself.
+cargo test -p machina-tests tools::
+
+# Disassembler regressions.
+cargo test -p machina-tests disas
+
+# Memory-region / FlatView tests.
+cargo test -p machina-tests memory_region
+
+# RISC-V CSR semantics.
+cargo test -p machina-tests riscv_csr
+```
+
+### 5. Pre-PR checks
+
+Before opening a pull request, the same checks CI runs:
+
+```bash
+make fmt-check    # rustfmt diff must be empty
+make clippy       # zero clippy warnings
+make test         # full test suite
+```
+
+If `.agents/` was modified, also run `make check-agent-skills`.
+
+### Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---------|--------------------|
+| `make release` fails on `cc not found` | Install the host build essentials (`build-essential` on Debian/Ubuntu, Xcode CLT on macOS, `gcc` on Fedora/Arch). |
+| `tests/firmware/*.bin` missing | The repo ships pre-built binaries. If you removed them, rebuild with `cd tests/firmware && ./build.sh`, which needs a `riscv64-elf-` cross toolchain. |
+| Smoke command hangs | Make sure you used `tests/firmware/sifive_pass.bin` with `-bios none`. The plain `sifive_pass` payload is a bare-metal kernel and will not work without `-bios none`. |
+| `make test` takes a long time | This is expected — the suite is large. While iterating, prefer `cargo test -p machina-tests <filter>` and only run `make test` before pushing. |
+| `info registers` says "VM must be paused" | You are connected to a running guest. Send `stop` (HMP) or `{"execute":"stop"}` (QMP) first, then retry the query. |
+
 ## Quick Start
 
 ### Build
