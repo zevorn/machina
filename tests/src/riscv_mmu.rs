@@ -53,6 +53,7 @@ const PTE_X: u64 = 1 << 3;
 const PTE_U: u64 = 1 << 4;
 const PTE_A: u64 = 1 << 6;
 const PTE_D: u64 = 1 << 7;
+const PTE_N: u64 = 1 << 63;
 
 const MSTATUS_SUM: u64 = 1 << 18;
 
@@ -721,4 +722,49 @@ fn test_thead_maee_attrs_translate_only_when_enabled() {
         no_write,
     );
     assert_eq!(pa, Ok(IO_PA));
+}
+
+#[test]
+fn test_thead_maee_preserves_valid_svnapot_n_bit() {
+    let mem_size = 0x10000;
+    let mut mem = vec![0u8; mem_size];
+
+    const VA: u64 = 0x5000;
+    const ROOT_PA: u64 = 0x1000;
+    const L1_PA: u64 = 0x2000;
+    const L0_PA: u64 = 0x3000;
+    const ENCODED_PPN: u64 = 0x20008;
+
+    let root_idx = ((VA >> 30) & 0x1ff) * 8;
+    let l1_idx = ((VA >> 21) & 0x1ff) * 8;
+    let l0_idx = ((VA >> 12) & 0x1ff) * 8;
+
+    write_pte(&mut mem, ROOT_PA + root_idx, ptr_pte(L1_PA >> 12));
+    write_pte(&mut mem, L1_PA + l1_idx, ptr_pte(L0_PA >> 12));
+    write_pte(
+        &mut mem,
+        L0_PA + l0_idx,
+        leaf_pte(
+            ENCODED_PPN,
+            PTE_V | PTE_R | PTE_A | PTE_D | PTE_N | THEAD_PAGE_SHARE,
+        ),
+    );
+    let reader = mem_reader(&mem);
+
+    let mut mmu = Mmu::new();
+    mmu.configure_profile(8, true, true, true);
+    mmu.set_satp(satp_sv39(0, ROOT_PA >> 12));
+
+    let expected_ppn = (ENCODED_PPN & !0xf) | ((VA >> 12) & 0xf);
+    let pa = mmu.translate(
+        VA,
+        AccessType::Read,
+        PrivLevel::Supervisor,
+        0,
+        4,
+        None,
+        &reader,
+        no_write,
+    );
+    assert_eq!(pa, Ok(expected_ppn << 12));
 }

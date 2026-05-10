@@ -175,6 +175,14 @@ fn level_page_size(level: usize) -> u64 {
     PAGE_SIZE << (level as u32 * VPN_BITS)
 }
 
+fn is_supported_svnapot_pte(pte: u64) -> bool {
+    if (pte & PTE_N) == 0 {
+        return false;
+    }
+    let ppn = (pte >> 10) & PTE_PPN_MASK;
+    ppn.trailing_zeros() as u64 + 1 == 4
+}
+
 /// Map an access type to the corresponding page-fault
 /// exception.
 fn page_fault(access: AccessType) -> Exception {
@@ -261,9 +269,17 @@ impl Mmu {
 
     fn pte_standard_view(&self, pte: u64) -> u64 {
         if self.ext_xtheadmaee {
-            pte & !PTE_THEAD_MAEE_ATTRS
+            pte & !self.thead_maee_attr_mask(pte)
         } else {
             pte
+        }
+    }
+
+    fn thead_maee_attr_mask(&self, pte: u64) -> u64 {
+        if self.ext_ssvnapot && is_supported_svnapot_pte(pte) {
+            PTE_THEAD_MAEE_ATTRS & !PTE_N
+        } else {
+            PTE_THEAD_MAEE_ATTRS
         }
     }
 

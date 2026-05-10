@@ -267,6 +267,9 @@ impl Sdhci {
             REG_BLOCK_SIZE => u64::from(regs.block_size),
             REG_BLOCK_COUNT => u64::from(regs.block_count),
             REG_ARGUMENT => u64::from(regs.argument),
+            REG_TRANSFER_MODE if size == 4 => {
+                u64::from(regs.transfer_mode) | (u64::from(regs.command) << 16)
+            }
             REG_TRANSFER_MODE => u64::from(regs.transfer_mode),
             REG_COMMAND => u64::from(regs.command),
             REG_PRESENT_STATE => u64::from(regs.present_state()),
@@ -318,6 +321,16 @@ impl Sdhci {
             }
             REG_ARGUMENT => {
                 regs.argument = value as u32;
+            }
+            REG_TRANSFER_MODE if size == 4 => {
+                regs.transfer_mode = value as u16;
+                regs.command = (value >> 16) as u16;
+                let command = regs.command;
+                let argument = regs.argument;
+                drop(regs);
+                self.dispatch_command(command, argument);
+                self.update_irq();
+                return;
             }
             REG_TRANSFER_MODE => {
                 regs.transfer_mode = value as u16;
