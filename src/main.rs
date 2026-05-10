@@ -179,6 +179,15 @@ fn parse_args() -> Result<CliArgs, String> {
             "-bios" => {
                 i += 1;
                 let arg = args.get(i).ok_or("-bios requires argument")?.clone();
+                if cli.bios_builtin || cli.bios.is_some() {
+                    // Repeated -bios silently dropped earlier values,
+                    // which let users believe both took effect. Reject
+                    // outright so the conflict surfaces immediately.
+                    return Err(
+                        "-bios: already specified; pass -bios at most once"
+                            .to_string(),
+                    );
+                }
                 if arg == "builtin" {
                     cli.bios_builtin = true;
                     cli.bios = None;
