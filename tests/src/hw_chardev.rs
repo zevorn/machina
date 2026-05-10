@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use machina_hw_core::chardev::SocketChardev;
 use machina_hw_core::chardev::{
-    CharFrontend, Chardev, NullChardev, StdioChardev,
+    CharFrontend, Chardev, NullChardev, StdioChardev, STDIO_HELP_PROMPT,
+    STDIO_HELP_TEXT,
 };
 
 #[test]
@@ -83,6 +84,13 @@ fn test_char_frontend_start_input() {
 fn test_stdio_chardev_write() {
     let mut c = StdioChardev::new();
     c.write(b'X');
+}
+
+#[test]
+fn stdio_escape_help_describes_prefix_sequence() {
+    assert!(STDIO_HELP_PROMPT.contains("then H"));
+    assert!(STDIO_HELP_TEXT.contains("Ctrl+A, then X  exit"));
+    assert!(STDIO_HELP_TEXT.contains("Ctrl+A, then Ctrl+A"));
 }
 
 #[cfg(unix)]

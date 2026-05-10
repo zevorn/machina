@@ -57,6 +57,9 @@ make release
 
 ### Keyboard Shortcuts (-nographic)
 
+These are prefix sequences: press and release `Ctrl+A`, then press the
+following key.
+
 | Key | Action |
 |-----|--------|
 | Ctrl+A, X | Exit emulator |

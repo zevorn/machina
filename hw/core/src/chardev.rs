@@ -186,6 +186,12 @@ pub struct StdioChardev {
 }
 
 const ESCAPE_CHAR: u8 = 0x01; // Ctrl+A
+pub const STDIO_HELP_PROMPT: &str = "machina: press Ctrl+A, then H for help";
+pub const STDIO_HELP_TEXT: &str = "\n\
+Ctrl+A, then H  help\n\
+Ctrl+A, then X  exit\n\
+Ctrl+A, then C  monitor\n\
+Ctrl+A, then Ctrl+A  send Ctrl+A";
 
 impl StdioChardev {
     pub fn new() -> Self {
@@ -193,10 +199,10 @@ impl StdioChardev {
         let saved = enable_raw_mode();
         #[cfg(unix)]
         if saved.is_some() {
-            eprintln!("machina: Ctrl+A H for help");
+            eprintln!("{STDIO_HELP_PROMPT}");
         }
         #[cfg(not(unix))]
-        eprintln!("machina: Ctrl+A H for help");
+        eprintln!("{STDIO_HELP_PROMPT}");
         Self {
             _thread: None,
             #[cfg(unix)]
@@ -285,17 +291,7 @@ impl Chardev for StdioChardev {
                                     }
                                 }
                                 b'h' | b'H' => {
-                                    eprintln!(
-                                        "\nCtrl+A H  \
-                                         help\n\
-                                         Ctrl+A X  \
-                                         exit\n\
-                                         Ctrl+A C  \
-                                         monitor\n\
-                                         Ctrl+A \
-                                         Ctrl+A  \
-                                         send Ctrl+A"
-                                    );
+                                    eprintln!("{STDIO_HELP_TEXT}");
                                 }
                                 ESCAPE_CHAR => {
                                     send_to(

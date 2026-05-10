@@ -67,6 +67,32 @@ mod tests {
         std::io::copy(&mut decoder, &mut output).unwrap()
     }
 
+    fn file_contains(path: &Path, needle: &[u8]) -> bool {
+        assert!(!needle.is_empty());
+
+        let mut file = std::fs::File::open(path).unwrap();
+        let mut tail = Vec::new();
+        let mut buf = [0u8; 64 * 1024];
+
+        loop {
+            let len = file.read(&mut buf).unwrap();
+            if len == 0 {
+                return false;
+            }
+
+            let mut window = Vec::with_capacity(tail.len() + len);
+            window.extend_from_slice(&tail);
+            window.extend_from_slice(&buf[..len]);
+            if window.windows(needle.len()).any(|entry| entry == needle) {
+                return true;
+            }
+
+            let keep = needle.len().saturating_sub(1).min(window.len());
+            tail.clear();
+            tail.extend_from_slice(&window[window.len() - keep..]);
+        }
+    }
+
     fn align_up_4k(value: u64) -> u64 {
         (value + 0xfff) & !0xfff
     }
@@ -196,6 +222,10 @@ mod tests {
         let sd = temp.path().join("sysimage-sdcard.img");
         let raw_len = decompress_gzip_to(&sd_gz, &sd);
         assert!(raw_len >= 512 * 1024 * 1024);
+        assert!(
+            file_contains(&sd, b"bootcmd=k230_boot auto auto_boot;"),
+            "K230 SD image must carry the SDK autoboot command"
+        );
 
         let mut machine = K230Machine::new();
         let opts = MachineOpts {
