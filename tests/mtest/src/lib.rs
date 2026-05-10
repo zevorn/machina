@@ -3,8 +3,12 @@ mod tests {
     use std::io::Read;
     use std::path::{Path, PathBuf};
 
+    use flate2::read::GzDecoder;
     use machina_core::machine::{LoaderSpec, Machine, MachineOpts};
+    use machina_guest_riscv::riscv::cpu::RiscvCpu;
+    use machina_guest_riscv::riscv::csr::{CSR_PMPADDR0, CSR_PMPCFG0};
     use machina_hw_riscv::k230::K230Machine;
+    use machina_hw_riscv::k230_boot::K230_BOOTROM_BASE;
 
     #[test]
     fn loader_spec_parses_qemu_loader_syntax() {
@@ -54,6 +58,39 @@ mod tests {
         let mut data = vec![0; len];
         file.read_exact(&mut data).unwrap();
         data
+    }
+
+    fn decompress_gzip_to(src: &Path, dst: &Path) -> u64 {
+        let input = std::fs::File::open(src).unwrap();
+        let mut decoder = GzDecoder::new(input);
+        let mut output = std::fs::File::create(dst).unwrap();
+        std::io::copy(&mut decoder, &mut output).unwrap()
+    }
+
+    fn file_contains(path: &Path, needle: &[u8]) -> bool {
+        assert!(!needle.is_empty());
+
+        let mut file = std::fs::File::open(path).unwrap();
+        let mut tail = Vec::new();
+        let mut buf = [0u8; 64 * 1024];
+
+        loop {
+            let len = file.read(&mut buf).unwrap();
+            if len == 0 {
+                return false;
+            }
+
+            let mut window = Vec::with_capacity(tail.len() + len);
+            window.extend_from_slice(&tail);
+            window.extend_from_slice(&buf[..len]);
+            if window.windows(needle.len()).any(|entry| entry == needle) {
+                return true;
+            }
+
+            let keep = needle.len().saturating_sub(1).min(window.len());
+            tail.clear();
+            tail.extend_from_slice(&window[window.len() - keep..]);
+        }
     }
 
     fn align_up_4k(value: u64) -> u64 {
@@ -173,6 +210,53 @@ mod tests {
     }
 
     #[test]
+    fn k230_bundled_uboot_sd_artifacts_initialize_sdk_boot_path() {
+        let dir = bundled_k230_linux_dir();
+        let uboot = dir.join("u-boot");
+        let sd_gz = dir.join("sysimage-sdcard.img.gz");
+
+        assert!(uboot.is_file(), "missing {}", uboot.display());
+        assert!(sd_gz.is_file(), "missing {}", sd_gz.display());
+
+        let temp = tempfile::tempdir().unwrap();
+        let sd = temp.path().join("sysimage-sdcard.img");
+        let raw_len = decompress_gzip_to(&sd_gz, &sd);
+        assert!(raw_len >= 512 * 1024 * 1024);
+        assert!(
+            file_contains(&sd, b"bootcmd=k230_boot auto auto_boot;"),
+            "K230 SD image must carry the SDK autoboot command"
+        );
+
+        let mut machine = K230Machine::new();
+        let opts = MachineOpts {
+            bios: Some(uboot),
+            drive: Some(sd),
+            ..k230_opts()
+        };
+        machine.init(&opts).unwrap();
+        machine.boot().unwrap();
+
+        let cpus = machine.cpus_lock();
+        let cpu = cpus[0].as_ref().unwrap();
+        assert_eq!(cpu.pc, K230_BOOTROM_BASE);
+    }
+
+    #[test]
+    fn k230_linux_handoff_keeps_locked_sdk_pmp_windows() {
+        let mut cpu = RiscvCpu::new();
+
+        cpu.csr_write(CSR_PMPADDR0, 0x2448_4dff);
+        cpu.csr_write(CSR_PMPADDR0 + 1, 0x2448_51ff);
+        cpu.csr_write(CSR_PMPCFG0, 0x9999);
+
+        cpu.csr_write(CSR_PMPADDR0, 0x003f_ffff_ffff_ffff);
+
+        assert_eq!(cpu.csr_read(CSR_PMPADDR0), 0x2448_4dff);
+        assert_eq!(cpu.csr_read(CSR_PMPADDR0 + 1), 0x2448_51ff);
+        assert_eq!(cpu.csr_read(CSR_PMPCFG0) & 0xffff, 0x9999);
+    }
+
+    #[test]
     fn k230_builtin_boot_places_dtb_below_initrd_when_top_overlaps() {
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("Image");
@@ -268,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn k230_dtb_fixup_disables_sdk_sdhci_nodes() {
+    fn k230_dtb_fixup_preserves_sdk_sdhci_nodes() {
         let mut blob =
             machina_hw_riscv::k230_dtb::test_fixture_dtb_with_sdhci_nodes();
         blob = machina_hw_riscv::k230_dtb::fixup_k230_dtb(
@@ -284,7 +368,7 @@ mod tests {
                 "/soc/sdhci0@91580000"
             )
             .unwrap(),
-            Some("disabled".to_string()),
+            Some("okay".to_string()),
         );
         assert_eq!(
             machina_hw_riscv::k230_dtb::dtb_node_status(
@@ -292,7 +376,7 @@ mod tests {
                 "/soc/sdhci1@91581000"
             )
             .unwrap(),
-            Some("disabled".to_string()),
+            Some("okay".to_string()),
         );
         assert!(blob
             .windows(b"console=ttyS0,115200 earlycon=sbi cma=0".len())

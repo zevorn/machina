@@ -9,7 +9,9 @@ use machina_hw_sd::sdhci::{Sdhci, SdhciMmio};
 use machina_hw_sd::ssi_sd::SsiSd;
 use machina_hw_sd::{SdBus, SdBusHost, SdCard, SdError, SdRequest, SdVoltage};
 use machina_hw_ssi::{SpiBus, SpiCsPolarity, SpiSlave};
-use machina_hw_storage::{BlockMedia, MemBackend};
+use machina_hw_storage::{
+    BlockBackend, BlockMedia, FileBackend, MemBackend, StorageError,
+};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
@@ -163,6 +165,63 @@ impl IrqSink for Pl181IrqSink {
     }
 }
 
+#[derive(Default)]
+struct DmaProbe {
+    read_sizes: Mutex<Vec<u32>>,
+    writes: Mutex<Vec<(u32, u64)>>,
+}
+
+impl DmaProbe {
+    fn read_sizes(&self) -> Vec<u32> {
+        self.read_sizes.lock().unwrap().clone()
+    }
+
+    fn writes(&self) -> Vec<(u32, u64)> {
+        self.writes.lock().unwrap().clone()
+    }
+}
+
+impl MmioOps for DmaProbe {
+    fn read(&self, _offset: u64, size: u32) -> u64 {
+        self.read_sizes.lock().unwrap().push(size);
+        0x5a
+    }
+
+    fn write(&self, _offset: u64, size: u32, val: u64) {
+        self.writes.lock().unwrap().push((size, val));
+    }
+}
+
+struct SizedBackend {
+    size: u64,
+}
+
+impl BlockBackend for SizedBackend {
+    fn read(
+        &self,
+        _offset: u64,
+        _buf: &mut [u8],
+    ) -> Result<usize, StorageError> {
+        Ok(0)
+    }
+
+    fn write(&self, _offset: u64, buf: &[u8]) -> Result<usize, StorageError> {
+        Ok(buf.len())
+    }
+
+    fn flush(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn readonly(&self) -> bool {
+        false
+    }
+}
+
 fn sd_card(data: Vec<u8>) -> SdMemoryCard<MemBackend> {
     SdMemoryCard::new(
         BlockMedia::new(MemBackend::new(data, false), 512).unwrap(),
@@ -186,11 +245,29 @@ fn make_test_aspace() -> (AddressSpace, SysBus) {
     (aspace, bus)
 }
 
+fn make_ram_aspace(size: u64) -> Arc<AddressSpace> {
+    let mut root = MemoryRegion::container("root", size);
+    let (ram, _block) = MemoryRegion::ram("ram", size);
+    root.add_subregion(ram, GPA(0));
+    Arc::new(AddressSpace::new(root))
+}
+
+fn make_io_aspace<T: MmioOps + 'static>(
+    addr: u64,
+    size: u64,
+    ops: Arc<T>,
+) -> Arc<AddressSpace> {
+    let mut root = MemoryRegion::container("root", addr + size + 0x1000);
+    let ops: Arc<dyn MmioOps> = ops;
+    root.add_subregion(MemoryRegion::io("dma-probe", size, ops), GPA(addr));
+    Arc::new(AddressSpace::new(root))
+}
+
 fn resp_u32(resp: &[u8]) -> u32 {
     u32::from_be_bytes(resp[..4].try_into().unwrap())
 }
 
-fn power_up(card: &SdMemoryCard<MemBackend>) {
+fn power_up<B: BlockBackend>(card: &SdMemoryCard<B>) {
     let mut resp = [0; 16];
     assert_eq!(card.do_command(&SdRequest::new(55, 0), &mut resp), 4);
     assert_eq!(
@@ -199,7 +276,7 @@ fn power_up(card: &SdMemoryCard<MemBackend>) {
     );
 }
 
-fn select_card(card: &SdMemoryCard<MemBackend>) -> u32 {
+fn select_card<B: BlockBackend>(card: &SdMemoryCard<B>) -> u32 {
     let mut resp = [0; 16];
     power_up(card);
     assert_eq!(card.do_command(&SdRequest::new(2, 0), &mut resp), 16);
@@ -209,13 +286,40 @@ fn select_card(card: &SdMemoryCard<MemBackend>) -> u32 {
     rca
 }
 
-fn identify_card(card: &SdMemoryCard<MemBackend>) -> (u32, [u8; 16]) {
+fn identify_card<B: BlockBackend>(card: &SdMemoryCard<B>) -> (u32, [u8; 16]) {
     let mut resp = [0; 16];
     power_up(card);
     assert_eq!(card.do_command(&SdRequest::new(2, 0), &mut resp), 16);
     let cid = resp;
     assert_eq!(card.do_command(&SdRequest::new(3, 0), &mut resp), 4);
     (resp_u32(&resp) >> 16, cid)
+}
+
+fn sdsc_csd_sector_count(csd: &[u8; 16]) -> u64 {
+    let word1 = u32::from_be_bytes(csd[4..8].try_into().unwrap());
+    let word2 = u32::from_be_bytes(csd[8..12].try_into().unwrap());
+    let read_bl_len = 1u64 << ((word1 >> 16) & 0xf);
+    let c_size = ((word1 & 0x3ff) << 2) | ((word2 >> 30) & 0x3);
+    let c_size_mult = (word2 >> 15) & 0x7;
+    let blocks = u64::from(c_size + 1) << (c_size_mult + 2);
+    blocks * read_bl_len / 512
+}
+
+fn uboot_sdsc_sector_count(csd: [u32; 4]) -> u64 {
+    let read_bl_len = 1u64 << ((csd[1] >> 16) & 0xf);
+    let c_size = ((csd[1] & 0x3ff) << 2) | ((csd[2] >> 30) & 0x3);
+    let c_size_mult = (csd[2] >> 15) & 0x7;
+    let blocks = u64::from(c_size + 1) << (c_size_mult + 2);
+    blocks * read_bl_len / 512
+}
+
+fn sdhci_long_response_words(mmio: &SdhciMmio) -> [u32; 4] {
+    [
+        ((mmio.read(0x1c, 4) as u32) << 8) | mmio.read(0x1b, 1) as u32,
+        ((mmio.read(0x18, 4) as u32) << 8) | mmio.read(0x17, 1) as u32,
+        ((mmio.read(0x14, 4) as u32) << 8) | mmio.read(0x13, 1) as u32,
+        (mmio.read(0x10, 4) as u32) << 8,
+    ]
 }
 
 // -- Positive Tests --
@@ -305,6 +409,74 @@ fn test_sd_card_cmd9_returns_csd_in_standby() {
 
     assert_eq!(len, 16);
     assert_ne!(resp, [0; 16]);
+}
+
+#[test]
+fn test_sd_card_cmd9_reports_backing_media_capacity() {
+    let sector_count = 1_048_609u64;
+    let file = tempfile::NamedTempFile::new().unwrap();
+    file.as_file().set_len(sector_count * 512).unwrap();
+    let backend = FileBackend::open(file.path(), false).unwrap();
+    let media = BlockMedia::new(backend, 512).unwrap();
+    let card = SdMemoryCard::new(media, SdCardConfig::default()).unwrap();
+    let (rca, _) = identify_card(&card);
+    let mut resp = [0; 16];
+
+    assert_eq!(
+        card.do_command(&SdRequest::new(9, rca << 16), &mut resp),
+        16
+    );
+
+    assert_eq!(sdsc_csd_sector_count(&resp), 1_048_576);
+}
+
+#[test]
+fn test_sd_card_cmd9_reports_2g_sdsc_capacity() {
+    let sector_count = 4_194_304u64;
+    let media = BlockMedia::new(
+        SizedBackend {
+            size: sector_count * 512,
+        },
+        512,
+    )
+    .unwrap();
+    let card = SdMemoryCard::new(media, SdCardConfig::default()).unwrap();
+    let (rca, _) = identify_card(&card);
+    let mut resp = [0; 16];
+
+    assert_eq!(
+        card.do_command(&SdRequest::new(9, rca << 16), &mut resp),
+        16
+    );
+
+    assert_eq!(sdsc_csd_sector_count(&resp), sector_count);
+}
+
+#[test]
+fn test_sdhci_cmd9_reports_csd_capacity_through_long_response_regs() {
+    let sector_count = 1_048_609u64;
+    let file = tempfile::NamedTempFile::new().unwrap();
+    file.as_file().set_len(sector_count * 512).unwrap();
+    let backend = FileBackend::open(file.path(), false).unwrap();
+    let media = BlockMedia::new(backend, 512).unwrap();
+    let card =
+        Arc::new(SdMemoryCard::new(media, SdCardConfig::default()).unwrap());
+    let (rca, _) = identify_card(&card);
+
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    bus.set_host(controller.clone());
+    bus.insert_card(card);
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x08, 4, u64::from(rca << 16));
+    mmio.write(0x0e, 2, 9 << 8);
+
+    assert_eq!(
+        uboot_sdsc_sector_count(sdhci_long_response_words(&mmio)),
+        1_048_576
+    );
 }
 
 #[test]
@@ -688,6 +860,93 @@ fn test_sdhci_command_write_dispatches_to_card_and_stores_response() {
 }
 
 #[test]
+fn test_sdhci_combined_transfer_command_write_dispatches_to_card() {
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    bus.set_host(controller.clone());
+    let mmio = SdhciMmio(controller);
+
+    let card = MockSdCard::new(true);
+    card.set_response(&[0x00, 0x00, 0x01, 0xaa]);
+    bus.insert_card(card.clone());
+
+    mmio.write(0x08, 4, 0x1aa);
+    mmio.write(0x0c, 4, (8 << 24) | 1);
+
+    assert_eq!(card.commands(), vec![(8, 0x1aa)]);
+    assert_eq!(mmio.read(0x0c, 4), (8 << 24) | 1);
+    assert_eq!(mmio.read(0x10, 4), 0x1aa);
+    assert_ne!(mmio.read(0x30, 2) & 1, 0);
+}
+
+#[test]
+fn test_sdhci_non_data_command_does_not_consume_card_data() {
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    bus.set_host(controller.clone());
+    let mmio = SdhciMmio(controller);
+
+    let card = MockSdCard::new(true);
+    card.set_response(&[0x00, 0x00, 0x01, 0xaa]);
+    assert!(card.data_ready());
+    bus.insert_card(card.clone());
+
+    mmio.write(0x08, 4, 0x1aa);
+    mmio.write(0x0e, 2, 8 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 0), 0);
+    assert_eq!(mmio.read(0x30, 2) & (1 << 5), 0);
+    assert_eq!(mmio.read(0x20, 4), 0);
+    assert_eq!(*card.read_pos.lock().unwrap(), 0);
+}
+
+#[test]
+fn test_sdhci_normal_cmd13_does_not_consume_stale_card_data() {
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    bus.set_host(controller.clone());
+    let mmio = SdhciMmio(controller);
+
+    let card = MockSdCard::new(true);
+    card.set_response(&[0x00, 0x00, 0x09, 0x00]);
+    assert!(card.data_ready());
+    bus.insert_card(card.clone());
+
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x08, 4, 1 << 16);
+    mmio.write(0x0e, 2, 13 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 0), 0);
+    assert_eq!(mmio.read(0x30, 2) & (1 << 5), 0);
+    assert_eq!(*card.read_pos.lock().unwrap(), 0);
+}
+
+#[test]
+fn test_sdhci_acmd6_does_not_consume_stale_card_data() {
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    bus.set_host(controller.clone());
+    let mmio = SdhciMmio(controller);
+
+    let card = MockSdCard::new(true);
+    card.set_response(&[0x00, 0x00, 0x01, 0xaa]);
+    assert!(card.data_ready());
+    bus.insert_card(card.clone());
+
+    mmio.write(0x0e, 2, 55 << 8);
+    mmio.write(0x0e, 2, 6 << 8);
+
+    assert_eq!(card.commands(), vec![(55, 0), (6, 0)]);
+    assert_ne!(mmio.read(0x30, 2) & (1 << 0), 0);
+    assert_eq!(mmio.read(0x30, 2) & (1 << 5), 0);
+    assert_eq!(*card.read_pos.lock().unwrap(), 0);
+}
+
+#[test]
 fn test_sdhci_command_without_card_sets_error_interrupt_status() {
     let bus = Arc::new(SdBus::new());
     let controller = Arc::new(Sdhci::new());
@@ -740,6 +999,229 @@ fn test_sdhci_data_port_reads_single_block_after_cmd17() {
 }
 
 #[test]
+fn test_sdhci_sdma_reads_single_block_after_cmd17() {
+    let mut data = vec![0; 1024];
+    data[512..520]
+        .copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+    data[1023] = 0xee;
+    let card = Arc::new(sd_card(data));
+    select_card(&card);
+
+    let dma_addr = 0x2000;
+    let aspace = make_ram_aspace(0x4000);
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace.clone());
+    bus.set_host(controller.clone());
+    bus.insert_card(card);
+    let mmio = SdhciMmio(controller);
+
+    assert_ne!(mmio.read(0x40, 4) & (1 << 22), 0);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, 512);
+    mmio.write(0x0e, 2, 17 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 0), 0);
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_eq!(mmio.read(0x30, 2) & (1 << 5), 0);
+    assert_eq!(aspace.read(GPA(dma_addr), 4), 0x4433_2211);
+    assert_eq!(aspace.read(GPA(dma_addr + 4), 4), 0x8877_6655);
+    assert_eq!(aspace.read(GPA(dma_addr + 508), 4), 0xee00_0000);
+}
+
+#[test]
+fn test_sdhci_sdma_card_read_caps_dma_write_at_region_end() {
+    let mut data = vec![0; 1024];
+    data[512] = 0x5a;
+    let card = Arc::new(sd_card(data));
+    select_card(&card);
+
+    let dma_addr = 0x2000;
+    let probe = Arc::new(DmaProbe::default());
+    let aspace = make_io_aspace(dma_addr, 1, probe.clone());
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card);
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, 512);
+    mmio.write(0x0e, 2, 17 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_eq!(probe.writes(), vec![(1, 0x5a)]);
+}
+
+#[test]
+fn test_sdhci_sdma_reads_scr_after_acmd51() {
+    let card = Arc::new(sd_card(vec![0; 1024]));
+    let rca = select_card(&card);
+
+    let dma_addr = 0x2000;
+    let aspace = make_ram_aspace(0x4000);
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace.clone());
+    bus.set_host(controller.clone());
+    bus.insert_card(card);
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x08, 4, u64::from(rca << 16));
+    mmio.write(0x0e, 2, 55 << 8);
+    mmio.write(0x30, 2, 1);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 8);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, 0);
+    mmio.write(0x0e, 2, 51 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_ne!(aspace.read(GPA(dma_addr), 4), 0);
+}
+
+#[test]
+fn test_sdhci_sdma_reads_sd_status_after_acmd13() {
+    let card = Arc::new(sd_card(vec![0; 1024]));
+    let rca = select_card(&card);
+
+    let dma_addr = 0x2000;
+    let aspace = make_ram_aspace(0x4000);
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card.clone());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x08, 4, u64::from(rca << 16));
+    mmio.write(0x0e, 2, 55 << 8);
+    mmio.write(0x30, 2, 1);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 64);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, u64::from(rca << 16));
+    mmio.write(0x0e, 2, 13 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_eq!(mmio.read(0x30, 2) & (1 << 5), 0);
+    assert!(!card.data_ready());
+}
+
+#[test]
+fn test_sdhci_sdma_reads_switch_status_after_cmd6() {
+    let card = Arc::new(sd_card(vec![0; 1024]));
+    select_card(&card);
+
+    let dma_addr = 0x2000;
+    let aspace = make_ram_aspace(0x4000);
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace.clone());
+    bus.set_host(controller.clone());
+    bus.insert_card(card);
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 64);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, 0x00ff_fff1);
+    mmio.write(0x0e, 2, 6 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_eq!(aspace.read(GPA(dma_addr + 16), 4) & 0xff, 1);
+}
+
+#[test]
+fn test_sdhci_cmd12_reports_data_end_for_r1b_stop() {
+    let card = Arc::new(sd_card(vec![0; 4096]));
+    select_card(&card);
+
+    let dma_addr = 0x2000;
+    let aspace = make_ram_aspace(0x4000);
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card);
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x06, 2, 2);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, 0);
+    mmio.write(0x0e, 2, 18 << 8);
+    mmio.write(0x30, 2, u64::MAX);
+
+    mmio.write(0x08, 4, 0);
+    mmio.write(0x0e, 2, 12 << 8);
+
+    let status = mmio.read(0x30, 2);
+    assert_ne!(status & (1 << 0), 0);
+    assert_ne!(status & (1 << 1), 0);
+}
+
+#[test]
+fn test_sdhci_auto_cmd12_stops_sdma_multi_block_read() {
+    let card = Arc::new(sd_card(vec![0; 4096]));
+    let rca = select_card(&card);
+
+    let dma_addr = 0x2000;
+    let aspace = make_ram_aspace(0x4000);
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card.clone());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x06, 2, 2);
+    mmio.write(0x0c, 2, 0x05);
+    mmio.write(0x08, 4, 0);
+    mmio.write(0x0e, 2, 18 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert!(!card.data_ready());
+
+    let mut resp = [0; 16];
+    assert_eq!(
+        card.do_command(&SdRequest::new(13, rca << 16), &mut resp),
+        4
+    );
+    assert_eq!(resp_u32(&resp), 0x900);
+}
+
+#[test]
+fn test_sdhci_command_and_data_reset_bits_self_clear() {
+    let controller = Arc::new(Sdhci::new());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x2f, 1, 0x02);
+    assert_eq!(mmio.read(0x2f, 1), 0);
+
+    mmio.write(0x2f, 1, 0x04);
+    assert_eq!(mmio.read(0x2f, 1), 0);
+}
+
+#[test]
 fn test_sdhci_data_port_writes_single_block_after_cmd24() {
     let card = Arc::new(sd_card(vec![0; 1024]));
     select_card(&card);
@@ -775,6 +1257,158 @@ fn test_sdhci_data_port_writes_single_block_after_cmd24() {
     for index in 0..512 {
         assert_eq!(card.read_byte(), (index & 0xff) as u8);
     }
+}
+
+#[test]
+fn test_sdhci_sdma_writes_single_block_after_cmd24() {
+    let card = Arc::new(sd_card(vec![0; 1024]));
+    select_card(&card);
+
+    let dma_addr = 0x2000;
+    let aspace = make_ram_aspace(0x4000);
+    for offset in (0..512).step_by(4) {
+        let bytes = [
+            offset as u8,
+            (offset + 1) as u8,
+            (offset + 2) as u8,
+            (offset + 3) as u8,
+        ];
+        aspace.write(
+            GPA(dma_addr + offset as u64),
+            4,
+            u64::from(u32::from_le_bytes(bytes)),
+        );
+    }
+
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card.clone());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, 512);
+    mmio.write(0x0e, 2, 24 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 0), 0);
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_eq!(mmio.read(0x30, 2) & (1 << 4), 0);
+
+    let mut resp = [0; 16];
+    assert_eq!(card.do_command(&SdRequest::new(17, 512), &mut resp), 4);
+    for index in 0..512 {
+        assert_eq!(card.read_byte(), (index & 0xff) as u8);
+    }
+}
+
+#[test]
+fn test_sdhci_sdma_card_write_caps_dma_read_at_region_end() {
+    let card = Arc::new(sd_card(vec![0; 1024]));
+    select_card(&card);
+
+    let dma_addr = 0x2000;
+    let probe = Arc::new(DmaProbe::default());
+    let aspace = make_io_aspace(dma_addr, 1, probe.clone());
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card.clone());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x0c, 2, 1);
+    mmio.write(0x08, 4, 512);
+    mmio.write(0x0e, 2, 24 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert_eq!(probe.read_sizes(), vec![1]);
+
+    let mut resp = [0; 16];
+    assert_eq!(card.do_command(&SdRequest::new(17, 512), &mut resp), 4);
+    assert_eq!(card.read_byte(), 0x5a);
+    for _ in 1..512 {
+        assert_eq!(card.read_byte(), 0);
+    }
+}
+
+#[test]
+fn test_sdhci_snps_phy_and_vendor_registers_are_tolerated() {
+    let controller = Arc::new(Sdhci::new());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x300, 2, 0);
+    assert_ne!(mmio.read(0x300, 4) & (1 << 1), 0);
+
+    mmio.write(0x304, 2, 0x0262);
+    assert_eq!(mmio.read(0x304, 2), 0x0262);
+
+    mmio.write(0x31d, 1, 0x44);
+    assert_eq!(mmio.read(0x31d, 1), 0x44);
+
+    mmio.write(0x540, 4, 0x001b_0000);
+    mmio.write(0x544, 4, 0);
+    assert_eq!(mmio.read(0x540, 4), 0x001b_0000);
+    assert_eq!(mmio.read(0x544, 4), 0);
+}
+
+#[test]
+fn test_sdhci_clock_control_reports_internal_clock_stable() {
+    let controller = Arc::new(Sdhci::new());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x2c, 2, 1);
+
+    assert_eq!(mmio.read(0x2c, 2) & 0x3, 0x3);
+}
+
+#[test]
+fn test_sdhci_capabilities_advertise_sdma_clock_and_3v3() {
+    let controller = Arc::new(Sdhci::new());
+    let mmio = SdhciMmio(controller);
+    let caps = mmio.read(0x40, 4);
+
+    assert_ne!(caps & (1 << 22), 0);
+    assert_ne!(caps & (1 << 24), 0);
+    assert_ne!(caps & 0x3f, 0);
+    assert_ne!(caps & (0xff << 8), 0);
+}
+
+#[test]
+fn test_sdhci_masked_status_drives_irq_line() {
+    const INT_COMMAND_COMPLETE: u64 = 1 << 0;
+
+    let sink = Pl181IrqSink::new(1);
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_irq(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    let sd_bus = Arc::new(SdBus::new());
+    controller.connect_bus(sd_bus.clone());
+    let mmio = SdhciMmio(controller);
+
+    let card = MockSdCard::new(true);
+    card.set_response(&[0x00]);
+    sd_bus.insert_card(card);
+
+    mmio.write(0x34, 2, INT_COMMAND_COMPLETE);
+    mmio.write(0x38, 2, INT_COMMAND_COMPLETE);
+    assert!(!sink.level(0));
+
+    mmio.write(0x08, 4, 0x1aa);
+    mmio.write(0x0e, 2, 8 << 8);
+    assert!(sink.level(0));
+
+    mmio.write(0x30, 2, INT_COMMAND_COMPLETE);
+    assert!(!sink.level(0));
 }
 
 #[test]

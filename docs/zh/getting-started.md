@@ -154,17 +154,13 @@ Machina 当前暴露三个用户可见机器：
 Linux，Machina 也会基于它更新 `/chosen` 里的 `-append` 和 `-initrd`
 信息。
 
-请把 SDK Linux 编译成标准 RISC-V PTE。当前 Machina K230 路径暂不建模
-T-HEAD MAEE 页属性位，这一点和作为 oracle 的 QEMU K230 路径保持一致。
-在 Kendryte SDK 源码树里，重编 little-core Linux 时传入
-`-DQEMU_NO_THEAD_MAEE`：
+Machina 的 C908 profile 支持 K230 SDK kernel 在强序 MMIO 映射上使用的
+T-HEAD MAEE PTE 属性位。因此可以直接使用 SDK 生成的 little-core Linux
+镜像；只有和 QEMU 的 K230 oracle 路径对比时才需要
+`-DQEMU_NO_THEAD_MAEE`。
 
 ```bash
 cd ~/k230_sdk
-make CONF=k230_canmv_defconfig linux-clean
-make CONF=k230_canmv_defconfig \
-    KCFLAGS="-DDBGLV=0 -DQEMU_NO_THEAD_MAEE" \
-    linux-rebuild
 cp output/k230_canmv_defconfig/little/linux/arch/riscv/boot/Image \
    output/k230_canmv_defconfig/images/little-core/Image
 ```
@@ -414,8 +410,8 @@ SDK=k230_sdk/output/k230_canmv_defconfig
 
 此流程通过 `-bios` 从 M-mode 启动 SDK U-Boot。在 SDK 存储路径建模之前，
 需要用 loader device 把 OpenSBI、Linux、initrd 和 DTB 放入 RAM，再手动
-执行 `bootm`。Linux Image 需要用标准 RISC-V PTE bit 重新构建后再在
-Machina 下运行。
+执行 `bootm`。带 T-HEAD MAEE PTE 属性的原生 SDK Linux 镜像可以在 C908
+profile 下运行。
 
 ```bash
 SDK=k230_sdk/output/k230_canmv_defconfig

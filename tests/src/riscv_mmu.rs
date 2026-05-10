@@ -53,6 +53,7 @@ const PTE_X: u64 = 1 << 3;
 const PTE_U: u64 = 1 << 4;
 const PTE_A: u64 = 1 << 6;
 const PTE_D: u64 = 1 << 7;
+const PTE_N: u64 = 1 << 63;
 
 const MSTATUS_SUM: u64 = 1 << 18;
 
@@ -76,6 +77,8 @@ fn satp_sv48(asid: u16, root_ppn: u64) -> u64 {
 }
 
 const PTE_PBMT_NC: u64 = 1 << 61;
+const THEAD_PAGE_SHARE: u64 = 1 << 60;
+const THEAD_PAGE_SO: u64 = 1 << 63;
 
 // -- Tests --
 
@@ -579,7 +582,7 @@ fn test_sv48_identity_map_when_profile_allows() {
     write_pte(&mut mem, 0x4000, leaf_pte(0, flags));
 
     let mut mmu = Mmu::new();
-    mmu.configure_profile(9, false);
+    mmu.configure_profile(9, false, false, false);
     mmu.set_satp(satp_sv48(0, 1));
 
     let reader = mem_reader(&mem);
@@ -599,7 +602,7 @@ fn test_sv48_identity_map_when_profile_allows() {
 #[test]
 fn test_sv48_faults_when_profile_restricts_satp_mode() {
     let mut mmu = Mmu::new();
-    mmu.configure_profile(8, false);
+    mmu.configure_profile(8, false, false, false);
     mmu.set_satp(satp_sv48(0, 1));
 
     let dummy = |_addr: u64| -> u64 { 0 };
@@ -642,7 +645,7 @@ fn test_pbmt_bits_fault_without_svpbmt_and_are_ignored_when_enabled() {
     assert_eq!(err, Err(Exception::LoadPageFault));
 
     let mut mmu = Mmu::new();
-    mmu.configure_profile(8, true);
+    mmu.configure_profile(8, true, false, false);
     mmu.set_satp(satp_sv39(0, 1));
     let pa = mmu.translate(
         0x0100,
@@ -655,4 +658,113 @@ fn test_pbmt_bits_fault_without_svpbmt_and_are_ignored_when_enabled() {
         no_write,
     );
     assert_eq!(pa, Ok(0x0100));
+}
+
+#[test]
+fn test_thead_maee_attrs_translate_only_when_enabled() {
+    let mem_size = 0x10000;
+    let mut mem = vec![0u8; mem_size];
+
+    const IO_VA: u64 = 0xffff_ffd0_0000_2080;
+    const IO_PA: u64 = 0x0000_000f_0000_2080;
+    const ROOT_PA: u64 = 0x1000;
+    const L1_PA: u64 = 0x2000;
+    const L0_PA: u64 = 0x3000;
+
+    let root_idx = ((IO_VA >> 30) & 0x1ff) * 8;
+    let l1_idx = ((IO_VA >> 21) & 0x1ff) * 8;
+    let l0_idx = ((IO_VA >> 12) & 0x1ff) * 8;
+
+    write_pte(&mut mem, ROOT_PA + root_idx, ptr_pte(L1_PA >> 12));
+    write_pte(&mut mem, L1_PA + l1_idx, ptr_pte(L0_PA >> 12));
+    write_pte(
+        &mut mem,
+        L0_PA + l0_idx,
+        leaf_pte(
+            IO_PA >> 12,
+            PTE_V
+                | PTE_R
+                | PTE_W
+                | PTE_A
+                | PTE_D
+                | THEAD_PAGE_SHARE
+                | THEAD_PAGE_SO,
+        ),
+    );
+    let reader = mem_reader(&mem);
+
+    let mut mmu = Mmu::new();
+    mmu.configure_profile(8, true, true, false);
+    mmu.set_satp(satp_sv39(0, ROOT_PA >> 12));
+    let err = mmu.translate(
+        IO_VA,
+        AccessType::Read,
+        PrivLevel::Supervisor,
+        0,
+        4,
+        None,
+        &reader,
+        no_write,
+    );
+    assert_eq!(err, Err(Exception::LoadPageFault));
+
+    let mut mmu = Mmu::new();
+    mmu.configure_profile(8, true, true, true);
+    mmu.set_satp(satp_sv39(0, ROOT_PA >> 12));
+    let pa = mmu.translate(
+        IO_VA,
+        AccessType::Read,
+        PrivLevel::Supervisor,
+        0,
+        4,
+        None,
+        &reader,
+        no_write,
+    );
+    assert_eq!(pa, Ok(IO_PA));
+}
+
+#[test]
+fn test_thead_maee_preserves_valid_svnapot_n_bit() {
+    let mem_size = 0x10000;
+    let mut mem = vec![0u8; mem_size];
+
+    const VA: u64 = 0x5000;
+    const ROOT_PA: u64 = 0x1000;
+    const L1_PA: u64 = 0x2000;
+    const L0_PA: u64 = 0x3000;
+    const ENCODED_PPN: u64 = 0x20008;
+
+    let root_idx = ((VA >> 30) & 0x1ff) * 8;
+    let l1_idx = ((VA >> 21) & 0x1ff) * 8;
+    let l0_idx = ((VA >> 12) & 0x1ff) * 8;
+
+    write_pte(&mut mem, ROOT_PA + root_idx, ptr_pte(L1_PA >> 12));
+    write_pte(&mut mem, L1_PA + l1_idx, ptr_pte(L0_PA >> 12));
+    write_pte(
+        &mut mem,
+        L0_PA + l0_idx,
+        leaf_pte(
+            ENCODED_PPN,
+            PTE_V | PTE_R | PTE_A | PTE_D | PTE_N | THEAD_PAGE_SHARE,
+        ),
+    );
+    let reader = mem_reader(&mem);
+
+    let mut mmu = Mmu::new();
+    mmu.configure_profile(8, true, true, true);
+    mmu.set_satp(satp_sv39(0, ROOT_PA >> 12));
+
+    let expected_ppn = (ENCODED_PPN & !0xf) | ((VA >> 12) & 0xf);
+    let pa = mmu.translate(
+        VA,
+        AccessType::Read,
+        PrivLevel::Supervisor,
+        0,
+        4,
+        None,
+        &reader,
+        no_write,
+    );
+    assert_eq!(pa, Ok(expected_ppn << 12));
 }

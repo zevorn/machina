@@ -1618,6 +1618,7 @@ fn cfg_rv64i_only() -> RiscvCfg {
         ext_xtheadfmv: false,
         ext_xtheadfmemidx: false,
         ext_xtheadmac: false,
+        ext_xtheadmaee: false,
         ext_xtheadmemidx: false,
         ext_xtheadmempair: false,
         ext_xtheadsync: false,

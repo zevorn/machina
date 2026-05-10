@@ -990,10 +990,10 @@ SDK-compatible board. It wires one T-HEAD C908 CPU profile, PLIC, ACLINT, five
 UARTs, two K230 watchdogs, and unimplemented SDK address windows so Linux,
 OpenSBI, and SDK U-Boot see the expected memory map.
 
-K230 Linux should be built with standard RISC-V PTE attributes for the current
-Machina target. T-HEAD MAEE PTE attributes are vendor-specific and are left as
-future work; this keeps the first K230 Linux slice aligned with QEMU's K230
-model, which also runs the SDK kernel with `QEMU_NO_THEAD_MAEE`.
+The C908 profile enables T-HEAD MAEE page-table attributes, so native K230 SDK
+Linux images may use the vendor SHARE/SO bits for strongly ordered MMIO
+mappings. QEMU's K230 oracle path still requires `QEMU_NO_THEAD_MAEE`, because
+upstream QEMU leaves MAEE disabled.
 
 #### boot.rs -- Boot Setup
 

@@ -64,6 +64,7 @@ pub struct SdMemoryCard<B: BlockBackend> {
     state: Mutex<MDeviceState>,
     media: BlockMedia<B>,
     config: SdCardConfig,
+    csd: [u8; 16],
     regs: DeviceRegs<SdCardRegs>,
 }
 
@@ -80,11 +81,14 @@ impl<B: BlockBackend> SdMemoryCard<B> {
         media: BlockMedia<B>,
         config: SdCardConfig,
     ) -> Result<Self, StorageError> {
-        let ocr = initial_ocr(media.sector_count());
+        let sector_count = media.sector_count();
+        let ocr = initial_ocr(sector_count);
+        let csd = default_csd(sector_count);
         Ok(Self {
             state: Mutex::new(MDeviceState::new(local_id)),
             media,
             config,
+            csd,
             regs: DeviceRegs::new(SdCardRegs {
                 state: CardState::Idle,
                 expecting_acmd: false,
@@ -186,6 +190,15 @@ impl<B: BlockBackend> SdCard for SdMemoryCard<B> {
                     regs.state = CardState::SendingData;
                     write_r1(resp, CardState::Transfer, false)
                 }
+                13 if regs.state == CardState::Transfer => {
+                    regs.data = DEFAULT_SD_STATUS.to_vec();
+                    regs.data_offset = 0;
+                    regs.state = CardState::SendingData;
+                    write_r1(resp, CardState::Transfer, false)
+                }
+                6 if regs.state == CardState::Transfer => {
+                    write_r1(resp, CardState::Transfer, false)
+                }
                 _ => 0,
             };
         }
@@ -210,7 +223,7 @@ impl<B: BlockBackend> SdCard for SdMemoryCard<B> {
             9 if regs.state == CardState::Standby
                 && req.arg >> 16 == u32::from(self.config.rca) =>
             {
-                write_bytes(resp, &DEFAULT_CSD)
+                write_bytes(resp, &self.csd)
             }
             10 if regs.state == CardState::Standby
                 && req.arg >> 16 == u32::from(self.config.rca) =>
@@ -347,6 +360,13 @@ impl<B: BlockBackend> SdCard for SdMemoryCard<B> {
                     false,
                     regs.status_flags,
                 )
+            }
+            6 if regs.state == CardState::Transfer => {
+                regs.status_flags = 0;
+                regs.data = switch_status(req.arg).to_vec();
+                regs.data_offset = 0;
+                regs.state = CardState::SendingData;
+                write_r1(resp, CardState::Transfer, false)
             }
             17 if regs.state == CardState::Transfer => {
                 let Some(sector) = byte_address_to_sector(req.arg) else {
@@ -597,11 +617,53 @@ const DEFAULT_CID: [u8; 16] = [
 ];
 
 const DEFAULT_CSD: [u8; 16] = [
-    0x40, 0x0e, 0x00, 0x32, 0x5b, 0x59, 0x00, 0x00, 0x00, 0x01, 0x7f, 0x80,
+    0x00, 0x0e, 0x00, 0x32, 0x5b, 0x59, 0x00, 0x00, 0x00, 0x01, 0x7f, 0x80,
     0x0a, 0x40, 0x00, 0xff,
 ];
 
 const DEFAULT_SCR: [u8; 8] = [0x02, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+const DEFAULT_SD_STATUS: [u8; 64] = [0; 64];
+
+fn default_csd(sector_count: u64) -> [u8; 16] {
+    let mut csd = DEFAULT_CSD;
+    let (c_size, c_size_mult, read_bl_len) = sdsc_capacity_fields(sector_count);
+    let mut word1 = u32::from_be_bytes(csd[4..8].try_into().unwrap());
+    let mut word2 = u32::from_be_bytes(csd[8..12].try_into().unwrap());
+
+    word1 = (word1 & !(0x000f_0000 | 0x3ff))
+        | ((read_bl_len & 0xf) << 16)
+        | ((c_size >> 2) & 0x3ff);
+    word2 = (word2 & !(0xc000_0000 | 0x0003_8000))
+        | ((c_size & 0x3) << 30)
+        | ((c_size_mult & 0x7) << 15);
+    csd[4..8].copy_from_slice(&word1.to_be_bytes());
+    csd[8..12].copy_from_slice(&word2.to_be_bytes());
+    csd
+}
+
+fn sdsc_capacity_fields(sector_count: u64) -> (u32, u32, u32) {
+    for read_bl_len in 9..=10u32 {
+        let sectors_per_block = 1u64 << (read_bl_len - 9);
+        for c_size_mult in 0..=7u32 {
+            let unit = (1u64 << (c_size_mult + 2)) * sectors_per_block;
+            let units = sector_count / unit;
+            if units <= 4096 {
+                return (units.max(1) as u32 - 1, c_size_mult, read_bl_len);
+            }
+        }
+    }
+    (0xfff, 7, 10)
+}
+
+fn switch_status(arg: u32) -> [u8; 64] {
+    const SD_HIGHSPEED_SUPPORTED: u32 = 0x0002_0000;
+
+    let mut status = [0u8; 64];
+    let selected_function = arg & 0xf;
+    status[12..16].copy_from_slice(&SD_HIGHSPEED_SUPPORTED.to_be_bytes());
+    status[16..20].copy_from_slice(&(selected_function << 24).to_be_bytes());
+    status
+}
 
 fn write_r6(resp: &mut [u8], rca: u16) -> usize {
     let status = status::READY_FOR_DATA as u16;

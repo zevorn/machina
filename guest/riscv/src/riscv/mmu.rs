@@ -46,6 +46,7 @@ const PTE_D: u8 = 1 << 7;
 const PTE_N: u64 = 1 << 63;
 const PTE_PBMT: u64 = 0x6000_0000_0000_0000;
 const PTE_PPN_MASK: u64 = (1u64 << 44) - 1;
+const PTE_THEAD_MAEE_ATTRS: u64 = 0xf800_0000_0000_0000;
 
 // mstatus bits used by permission checks
 const MSTATUS_MXR: u64 = 1 << 19;
@@ -155,6 +156,8 @@ pub struct Mmu {
     stats: MmuStats,
     max_satp_mode: u64,
     ext_svpbmt: bool,
+    ext_ssvnapot: bool,
+    ext_xtheadmaee: bool,
     /// Reusable buffer for dirty page collection.
     /// Avoids per-call Vec allocation.
     dirty_pages_buf: Vec<u64>,
@@ -170,6 +173,14 @@ fn vpn_index(va: u64, level: usize) -> u64 {
 /// Page size for a given leaf level (0=4K, 1=2M, 2=1G, 3=512G).
 fn level_page_size(level: usize) -> u64 {
     PAGE_SIZE << (level as u32 * VPN_BITS)
+}
+
+fn is_supported_svnapot_pte(pte: u64) -> bool {
+    if (pte & PTE_N) == 0 {
+        return false;
+    }
+    let ppn = (pte >> 10) & PTE_PPN_MASK;
+    ppn.trailing_zeros() as u64 + 1 == 4
 }
 
 /// Map an access type to the corresponding page-fault
@@ -224,13 +235,23 @@ impl Mmu {
             stats: MmuStats::default(),
             max_satp_mode: SATP_MODE_SV39,
             ext_svpbmt: false,
+            ext_ssvnapot: false,
+            ext_xtheadmaee: false,
             dirty_pages_buf: Vec::with_capacity(16),
         }
     }
 
-    pub fn configure_profile(&mut self, max_satp_mode: u64, ext_svpbmt: bool) {
+    pub fn configure_profile(
+        &mut self,
+        max_satp_mode: u64,
+        ext_svpbmt: bool,
+        ext_ssvnapot: bool,
+        ext_xtheadmaee: bool,
+    ) {
         self.max_satp_mode = max_satp_mode;
         self.ext_svpbmt = ext_svpbmt;
+        self.ext_ssvnapot = ext_ssvnapot;
+        self.ext_xtheadmaee = ext_xtheadmaee;
     }
 
     pub fn set_satp(&mut self, val: u64) {
@@ -244,6 +265,22 @@ impl Mmu {
     /// Return the SATP mode field (bits [63:60]).
     pub fn satp_mode(&self) -> u64 {
         (self.satp >> SATP_MODE_SHIFT) & 0xF
+    }
+
+    fn pte_standard_view(&self, pte: u64) -> u64 {
+        if self.ext_xtheadmaee {
+            pte & !self.thead_maee_attr_mask(pte)
+        } else {
+            pte
+        }
+    }
+
+    fn thead_maee_attr_mask(&self, pte: u64) -> u64 {
+        if self.ext_ssvnapot && is_supported_svnapot_pte(pte) {
+            PTE_THEAD_MAEE_ATTRS & !PTE_N
+        } else {
+            PTE_THEAD_MAEE_ATTRS
+        }
     }
 
     // ── Three-way TLB lookup API ──────────────────────
@@ -545,11 +582,12 @@ impl Mmu {
                 .map_err(|_| access_fault(access))?;
             }
             let pte = mem_read(pte_addr);
-            if !self.ext_svpbmt && (pte & PTE_PBMT) != 0 {
+            let pte_view = self.pte_standard_view(pte);
+            if !self.ext_svpbmt && (pte_view & PTE_PBMT) != 0 {
                 return Err(page_fault(access));
             }
 
-            let flags = (pte & 0xFF) as u8;
+            let flags = (pte_view & 0xFF) as u8;
 
             if flags & PTE_V == 0 {
                 return Err(page_fault(access));
@@ -564,8 +602,11 @@ impl Mmu {
 
             // Leaf PTE
             if r || x {
-                let mut ppn = (pte >> 10) & PTE_PPN_MASK;
-                if (pte & PTE_N) != 0 {
+                let mut ppn = (pte_view >> 10) & PTE_PPN_MASK;
+                if (pte_view & PTE_N) != 0 {
+                    if !self.ext_ssvnapot {
+                        return Err(page_fault(access));
+                    }
                     if level != 0 {
                         return Err(page_fault(access));
                     }
@@ -578,7 +619,7 @@ impl Mmu {
                     ppn = (ppn & !napot_mask) | (vpn & napot_mask);
                 }
                 if level > 0 {
-                    let ppn_raw = (pte >> 10) & PTE_PPN_MASK;
+                    let ppn_raw = (pte_view >> 10) & PTE_PPN_MASK;
                     let align_mask = (1u64 << (level as u32 * VPN_BITS)) - 1;
                     if ppn_raw & align_mask != 0 {
                         return Err(page_fault(access));

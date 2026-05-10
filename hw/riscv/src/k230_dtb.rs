@@ -54,12 +54,6 @@ pub fn fixup_k230_dtb(
         set_u64_prop(chosen, "linux,initrd-end", end);
     }
 
-    for path in ["/soc/sdhci0@91580000", "/soc/sdhci1@91581000"] {
-        if let Some(node) = find_node_mut(&mut root, path) {
-            set_string_prop(node, "status", "disabled");
-        }
-    }
-
     let mut builder = FdtBuilder::new();
     for reservation in reservations {
         builder.reserve_memory(reservation.address, reservation.size);
@@ -273,20 +267,6 @@ fn find_node<'a>(node: &'a FdtNode, path: &str) -> Option<&'a FdtNode> {
     let mut current = node;
     for part in path.split('/').filter(|part| !part.is_empty()) {
         current = current.children.iter().find(|child| child.name == part)?;
-    }
-    Some(current)
-}
-
-fn find_node_mut<'a>(
-    node: &'a mut FdtNode,
-    path: &str,
-) -> Option<&'a mut FdtNode> {
-    let mut current = node;
-    for part in path.split('/').filter(|part| !part.is_empty()) {
-        current = current
-            .children
-            .iter_mut()
-            .find(|child| child.name == part)?;
     }
     Some(current)
 }

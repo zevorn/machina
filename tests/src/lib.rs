@@ -57,7 +57,11 @@ mod hw_ipi;
 #[cfg(test)]
 mod hw_irq;
 #[cfg(test)]
+mod hw_k230_gzip_dma;
+#[cfg(test)]
 mod hw_k230_machine;
+#[cfg(test)]
+mod hw_k230_pufs;
 #[cfg(test)]
 mod hw_k230_wdt;
 #[cfg(test)]

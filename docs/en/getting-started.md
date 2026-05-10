@@ -162,17 +162,13 @@ does not synthesize a K230 device tree. Linux direct boot requires the SDK DTB
 so firmware can pass the board topology to Linux and Machina can update
 `/chosen` for `-append` and `-initrd`.
 
-Build the SDK Linux kernel with standard RISC-V PTE bits. Current Machina K230
-support intentionally does not model T-HEAD MAEE page attributes yet, matching
-the QEMU K230 path used as the oracle. In a Kendryte SDK tree, pass
-`-DQEMU_NO_THEAD_MAEE` when rebuilding the little-core Linux kernel:
+Machina's C908 profile accepts the T-HEAD MAEE PTE attributes used by the
+K230 SDK kernel for strongly ordered MMIO mappings. A stock SDK little-core
+Linux image can therefore be used directly; `-DQEMU_NO_THEAD_MAEE` is only
+needed when comparing against QEMU's K230 oracle path.
 
 ```bash
 cd ~/k230_sdk
-make CONF=k230_canmv_defconfig linux-clean
-make CONF=k230_canmv_defconfig \
-    KCFLAGS="-DDBGLV=0 -DQEMU_NO_THEAD_MAEE" \
-    linux-rebuild
 cp output/k230_canmv_defconfig/little/linux/arch/riscv/boot/Image \
    output/k230_canmv_defconfig/images/little-core/Image
 ```
@@ -423,8 +419,8 @@ SDK=k230_sdk/output/k230_canmv_defconfig
 
 This flow starts SDK U-Boot in M-mode with `-bios`. Until the SDK storage path
 is modeled, place OpenSBI, Linux, initrd, and DTB in RAM with loader devices and
-run `bootm` manually. The Linux Image must be rebuilt with standard RISC-V PTE
-bits before running under Machina.
+run `bootm` manually. Native SDK Linux images with T-HEAD MAEE PTE attributes
+can run under the C908 profile.
 
 ```bash
 SDK=k230_sdk/output/k230_canmv_defconfig

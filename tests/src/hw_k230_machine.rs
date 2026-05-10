@@ -30,6 +30,7 @@ fn k230_memmap_matches_qemu_reference_points() {
     assert_eq!(K230_MEMMAP[K230MemMap::Ddr as usize].base, 0x0000_0000);
     assert_eq!(K230_MEMMAP[K230MemMap::Sram as usize].base, 0x8020_0000);
     assert_eq!(K230_MEMMAP[K230MemMap::Bootrom as usize].base, 0x9120_0000);
+    assert_eq!(K230_MEMMAP[K230MemMap::Noc as usize].base, 0x9130_0000);
     assert_eq!(
         K230_MEMMAP[K230MemMap::Plic as usize].base,
         0x000f_0000_0000
@@ -41,6 +42,8 @@ fn k230_memmap_matches_qemu_reference_points() {
     assert_eq!(K230_PLIC_NUM_SOURCES, 208);
     assert_eq!(K230IrqMap::UART0, 16);
     assert_eq!(K230IrqMap::WDT0, 107);
+    assert_eq!(K230IrqMap::SD0, 0x8e);
+    assert_eq!(K230IrqMap::SD1, 0x90);
 }
 
 #[test]
@@ -58,6 +61,52 @@ fn k230_machine_maps_real_devices_and_unimp_windows() {
     assert!(sysbus.mappings().iter().any(|m| m.owner == "kpu.l2-cache"));
     assert!(machine.wdt(K230WdtIndex::Wdt0).is_some());
     assert!(machine.wdt(K230WdtIndex::Wdt1).is_some());
+}
+
+#[test]
+fn k230_machine_maps_drive_as_sd1_sdhci_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("sd.img");
+    std::fs::write(&image, vec![0u8; 1024]).unwrap();
+
+    let mut machine = K230Machine::new();
+    machine
+        .init(&MachineOpts {
+            drive: Some(image),
+            ..opts()
+        })
+        .unwrap();
+
+    let sd1 = K230_MEMMAP[K230MemMap::Sd1 as usize].base;
+    let capabilities = machine.address_space().read(GPA(sd1 + 0x40), 4);
+    let present = machine.address_space().read(GPA(sd1 + 0x24), 4);
+
+    assert_ne!(capabilities & (1 << 22), 0);
+    assert_ne!(present & (1 << 16), 0);
+}
+
+#[test]
+fn k230_machine_maps_gzip_dma_registers() {
+    let mut machine = K230Machine::new();
+    machine.init(&opts()).unwrap();
+
+    let gzip = K230_MEMMAP[K230MemMap::Gzip as usize].base;
+    machine.address_space().write(GPA(gzip + 0x08), 4, 0x1234);
+
+    assert_eq!(machine.address_space().read(GPA(gzip + 0x08), 4), 0x1234);
+}
+
+#[test]
+fn k230_machine_maps_pufs_security_registers() {
+    let mut machine = K230Machine::new();
+    machine.init(&opts()).unwrap();
+
+    let security = K230_MEMMAP[K230MemMap::Security as usize].base;
+    machine
+        .address_space()
+        .write(GPA(security + 0x818), 4, 0x03);
+
+    assert_eq!(machine.address_space().read(GPA(security + 0x818), 4), 0x03);
 }
 
 #[test]

@@ -79,5 +79,6 @@ fn c908_profile_sets_standard_and_thead_extension_flags() {
     assert!(cfg.ext_xtheadbs);
     assert!(cfg.ext_xtheadcmo);
     assert!(cfg.ext_xtheadfmv);
+    assert!(cfg.ext_xtheadmaee);
     assert!(cfg.ext_xtheadsync);
 }

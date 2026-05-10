@@ -32,6 +32,7 @@ pub const CSR_TH_SMCIR: u16 = 0x9c3;
 pub const CSR_TH_FXCR: u16 = 0x800;
 
 pub const TH_STATUS_UCME: u64 = 1 << 16;
+pub const TH_STATUS_MAEE: u64 = 1 << 21;
 pub const TH_STATUS_THEADISAEE: u64 = 1 << 22;
 
 const CAUSE_ILLEGAL_INSN: u64 = 2;
@@ -74,9 +75,13 @@ pub fn read(
     }
     require_priv(addr, current)?;
     match addr {
-        CSR_TH_MXSTATUS | CSR_TH_SXSTATUS => {
-            Ok(TH_STATUS_UCME | TH_STATUS_THEADISAEE)
-        }
+        CSR_TH_MXSTATUS | CSR_TH_SXSTATUS => Ok(TH_STATUS_UCME
+            | TH_STATUS_THEADISAEE
+            | if profile.cfg.ext_xtheadmaee {
+                TH_STATUS_MAEE
+            } else {
+                0
+            }),
         CSR_TH_MHCR
         | CSR_TH_MCOR
         | CSR_TH_MCCR2
@@ -126,6 +131,7 @@ pub fn has_xthead(cfg: RiscvCfg) -> bool {
         || cfg.ext_xtheadfmv
         || cfg.ext_xtheadfmemidx
         || cfg.ext_xtheadmac
+        || cfg.ext_xtheadmaee
         || cfg.ext_xtheadmemidx
         || cfg.ext_xtheadmempair
         || cfg.ext_xtheadsync

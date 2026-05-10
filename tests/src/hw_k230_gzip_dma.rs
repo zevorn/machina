@@ -1,0 +1,342 @@
+use std::io::Write;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
+
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use machina_core::address::GPA;
+use machina_hw_riscv::k230_gzip_dma::{K230GzipDma, K230GzipDmaMmio};
+use machina_memory::address_space::AddressSpace;
+use machina_memory::region::{MemoryRegion, MmioOps};
+
+fn make_ram_aspace(size: u64) -> Arc<AddressSpace> {
+    let mut root = MemoryRegion::container("root", size);
+    let (ram, _block) = MemoryRegion::ram("ram", size);
+    root.add_subregion(ram, GPA(0));
+    Arc::new(AddressSpace::new(root))
+}
+
+struct BoundaryProbe {
+    len: u64,
+    reads: Mutex<Vec<(u64, u32)>>,
+}
+
+impl BoundaryProbe {
+    fn new(len: u64) -> Arc<Self> {
+        Arc::new(Self {
+            len,
+            reads: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn reads(&self) -> Vec<(u64, u32)> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+impl MmioOps for BoundaryProbe {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        assert!(
+            offset + u64::from(size) <= self.len,
+            "descriptor read crosses IO region boundary"
+        );
+        self.reads.lock().unwrap().push((offset, size));
+        0
+    }
+
+    fn write(&self, _offset: u64, _size: u32, _value: u64) {}
+}
+
+fn make_probe_aspace(
+    base: u64,
+    len: u64,
+    probe: Arc<BoundaryProbe>,
+) -> Arc<AddressSpace> {
+    let mut root = MemoryRegion::container("root", base + len + 0x1000);
+    let ops: Arc<dyn MmioOps> = probe;
+    root.add_subregion(MemoryRegion::io("boundary-probe", len, ops), GPA(base));
+    Arc::new(AddressSpace::new(root))
+}
+
+fn write_bytes(aspace: &AddressSpace, addr: u64, data: &[u8]) {
+    for (index, byte) in data.iter().copied().enumerate() {
+        aspace.write(GPA(addr + index as u64), 1, u64::from(byte));
+    }
+}
+
+fn read_bytes(aspace: &AddressSpace, addr: u64, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|index| aspace.read(GPA(addr + index as u64), 1) as u8)
+        .collect()
+}
+
+fn write_u32(aspace: &AddressSpace, addr: u64, value: u32) {
+    aspace.write(GPA(addr), 4, u64::from(value));
+}
+
+fn write_llt(
+    aspace: &AddressSpace,
+    addr: u64,
+    src_addr: u32,
+    line_size: u32,
+    dst_addr: u32,
+    next_addr: u32,
+) {
+    write_u32(aspace, addr, 1 << 28);
+    write_u32(aspace, addr + 0x04, src_addr);
+    write_u32(aspace, addr + 0x08, line_size);
+    write_u32(aspace, addr + 0x0c, 0);
+    write_u32(aspace, addr + 0x10, dst_addr);
+    write_u32(aspace, addr + 0x14, next_addr);
+}
+
+fn gzip_method_9(payload: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(payload).unwrap();
+    let mut gzip = encoder.finish().unwrap();
+    gzip[2] = 0x09;
+    gzip
+}
+
+fn start_decompress(
+    mmio: &K230GzipDmaMmio,
+    read_llt: u64,
+    write_llt: u64,
+    src_len: usize,
+    out_len: usize,
+) {
+    mmio.write(0x60, 4, read_llt);
+    mmio.write(0x90, 4, write_llt);
+    mmio.write(0x8004, 4, 0x8000_0000 | src_len as u64);
+    mmio.write(0x8008, 4, out_len as u64);
+    mmio.write(0x8000, 4, 0x3);
+}
+
+#[test]
+fn k230_gzip_dma_decompresses_sdk_llt_chain() {
+    let payload = b"k230 hardware gzip output";
+    let compressed = gzip_method_9(payload);
+    let aspace = make_ram_aspace(0x1_0000);
+    let compressed_addr = 0x1000;
+    let output_addr = 0x8000;
+    let read_llt = 0x4000;
+    let write_llt_addr = 0x4100;
+
+    write_bytes(&aspace, compressed_addr, &compressed);
+    write_llt(
+        &aspace,
+        read_llt,
+        compressed_addr as u32,
+        compressed.len() as u32,
+        0x8028_0000,
+        0,
+    );
+    write_llt(
+        &aspace,
+        write_llt_addr,
+        0x8020_0000,
+        payload.len() as u32,
+        output_addr as u32,
+        0,
+    );
+
+    let dev = K230GzipDma::new_named("k230-gzip-dma");
+    dev.set_dma_address_space(aspace.clone());
+    let mmio = K230GzipDmaMmio(dev);
+
+    start_decompress(
+        &mmio,
+        read_llt,
+        write_llt_addr,
+        compressed.len(),
+        payload.len(),
+    );
+
+    assert_ne!(mmio.read(0x08, 4) & 0x2, 0);
+    assert_ne!(mmio.read(0x800c, 4) & (1 << 10), 0);
+    assert_eq!(read_bytes(&aspace, output_addr, payload.len()), payload);
+}
+
+#[test]
+fn k230_gzip_dma_limits_output_before_decoding_full_stream() {
+    let payload = vec![0x5a; 4096];
+    let mut compressed = gzip_method_9(&payload);
+    let footer = compressed.len() - 1;
+    compressed[footer] ^= 0xff;
+    let aspace = make_ram_aspace(0x1_0000);
+    let compressed_addr = 0x1000;
+    let output_addr = 0x8000;
+    let read_llt = 0x4000;
+    let write_llt_addr = 0x4100;
+    let output_len = 16;
+
+    write_bytes(&aspace, compressed_addr, &compressed);
+    write_llt(
+        &aspace,
+        read_llt,
+        compressed_addr as u32,
+        compressed.len() as u32,
+        0x8028_0000,
+        0,
+    );
+    write_llt(
+        &aspace,
+        write_llt_addr,
+        0x8020_0000,
+        output_len as u32,
+        output_addr as u32,
+        0,
+    );
+
+    let dev = K230GzipDma::new_named("k230-gzip-dma");
+    dev.set_dma_address_space(aspace.clone());
+    let mmio = K230GzipDmaMmio(dev);
+
+    start_decompress(
+        &mmio,
+        read_llt,
+        write_llt_addr,
+        compressed.len(),
+        output_len,
+    );
+
+    assert_ne!(mmio.read(0x800c, 4) & (1 << 10), 0);
+    assert_eq!(read_bytes(&aspace, output_addr, output_len), payload[..16]);
+}
+
+#[test]
+fn k230_gzip_dma_rejects_truncated_output_llt_chain() {
+    let payload = b"k230 gzip dma output";
+    let compressed = gzip_method_9(payload);
+    let aspace = make_ram_aspace(0x1_0000);
+    let compressed_addr = 0x1000;
+    let output_addr = 0x8000;
+    let read_llt = 0x4000;
+    let write_llt_addr = 0x4100;
+
+    write_bytes(&aspace, compressed_addr, &compressed);
+    write_llt(
+        &aspace,
+        read_llt,
+        compressed_addr as u32,
+        compressed.len() as u32,
+        0x8028_0000,
+        0,
+    );
+    write_llt(
+        &aspace,
+        write_llt_addr,
+        0x8020_0000,
+        (payload.len() - 1) as u32,
+        output_addr as u32,
+        0,
+    );
+
+    let dev = K230GzipDma::new_named("k230-gzip-dma");
+    dev.set_dma_address_space(aspace);
+    let mmio = K230GzipDmaMmio(dev);
+
+    start_decompress(
+        &mmio,
+        read_llt,
+        write_llt_addr,
+        compressed.len(),
+        payload.len(),
+    );
+
+    assert_eq!(mmio.read(0x800c, 4) & (1 << 10), 0);
+}
+
+#[test]
+fn k230_gzip_dma_rejects_truncated_input_llt_chain() {
+    let payload = b"k230 gzip dma input";
+    let compressed = gzip_method_9(payload);
+    let aspace = make_ram_aspace(0x1_0000);
+    let compressed_addr = 0x1000;
+    let output_addr = 0x8000;
+    let read_llt = 0x4000;
+    let write_llt_addr = 0x4100;
+
+    write_bytes(&aspace, compressed_addr, &compressed);
+    write_llt(
+        &aspace,
+        read_llt,
+        compressed_addr as u32,
+        (compressed.len() - 1) as u32,
+        0x8028_0000,
+        0,
+    );
+    write_llt(
+        &aspace,
+        write_llt_addr,
+        0x8020_0000,
+        payload.len() as u32,
+        output_addr as u32,
+        0,
+    );
+
+    let dev = K230GzipDma::new_named("k230-gzip-dma");
+    dev.set_dma_address_space(aspace);
+    let mmio = K230GzipDmaMmio(dev);
+
+    start_decompress(
+        &mmio,
+        read_llt,
+        write_llt_addr,
+        compressed.len(),
+        payload.len(),
+    );
+
+    assert_eq!(mmio.read(0x800c, 4) & (1 << 10), 0);
+}
+
+#[test]
+fn k230_gzip_dma_rejects_unmapped_llt_descriptor_word() {
+    let llt_addr = 0x4000;
+    let probe = BoundaryProbe::new(0x16);
+    let aspace = make_probe_aspace(llt_addr, 0x16, probe.clone());
+
+    let dev = K230GzipDma::new_named("k230-gzip-dma");
+    dev.set_dma_address_space(aspace);
+    let mmio = K230GzipDmaMmio(dev);
+
+    mmio.write(0x60, 4, llt_addr);
+    mmio.write(0x90, 4, llt_addr);
+    mmio.write(0x8004, 4, 0x8000_0004);
+    mmio.write(0x8008, 4, 4);
+    mmio.write(0x8000, 4, 0x3);
+
+    assert_eq!(mmio.read(0x800c, 4) & (1 << 10), 0);
+    assert_eq!(
+        probe.reads(),
+        vec![(0, 4), (4, 4), (8, 4), (12, 4), (16, 4)]
+    );
+}
+
+#[test]
+fn k230_gzip_dma_rejects_zero_progress_llt_cycle() {
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let aspace = make_ram_aspace(0x8000);
+        let llt_addr = 0x4000;
+        write_llt(&aspace, llt_addr, 0x1000, 0, 0x2000, llt_addr as u32);
+
+        let dev = K230GzipDma::new_named("k230-gzip-dma");
+        dev.set_dma_address_space(aspace);
+        let mmio = K230GzipDmaMmio(dev);
+
+        mmio.write(0x60, 4, llt_addr);
+        mmio.write(0x90, 4, llt_addr);
+        mmio.write(0x8004, 4, 0x8000_0004);
+        mmio.write(0x8008, 4, 4);
+        mmio.write(0x8000, 4, 0x3);
+
+        let _ = tx.send(mmio.read(0x800c, 4));
+    });
+
+    let status = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("zero-progress LLT traversal should terminate");
+    assert_eq!(status & (1 << 10), 0);
+}

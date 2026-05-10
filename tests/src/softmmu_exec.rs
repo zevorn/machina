@@ -1085,6 +1085,155 @@ fn test_fullsys_sc_faults_after_pte_wrprotect() {
     assert_eq!(data, 1, "SC must not write through a read-only TLB addend",);
 }
 
+/// Regression: C908 page walks must accept T-HEAD MAEE
+/// attributes in leaf PTEs.
+///
+/// The K230 SDK Linux kernel marks strongly ordered MMIO
+/// mappings with vendor bits such as SHARE and SO.  Those
+/// bits overlap standard Svpbmt/Svnapot positions, so a
+/// C908 profile must treat them as T-HEAD attributes
+/// instead of raising a page fault.
+#[test]
+fn test_fullsys_c908_accepts_thead_maee_leaf_pte_attrs() {
+    use machina_guest_riscv::riscv::csr::{
+        PrivLevel, CSR_PMPADDR0, CSR_PMPCFG0,
+    };
+
+    const CODE_VA: u64 = 0x4000_0000;
+    const DATA_VA: u64 = 0xffff_ffd0_0000_2080;
+    const ROOT_OFF: usize = 0x2000;
+    const CODE_L1_OFF: usize = 0x3000;
+    const CODE_L0_OFF: usize = 0x4000;
+    const DATA_L1_OFF: usize = 0x5000;
+    const DATA_L0_OFF: usize = 0x6000;
+    const ASID: u64 = 7;
+    const PTE_V: u64 = 1 << 0;
+    const PTE_R: u64 = 1 << 1;
+    const PTE_W: u64 = 1 << 2;
+    const PTE_X: u64 = 1 << 3;
+    const PTE_A: u64 = 1 << 6;
+    const PTE_D: u64 = 1 << 7;
+    const THEAD_PAGE_SHARE: u64 = 1 << 60;
+    const THEAD_PAGE_SO: u64 = 1 << 63;
+
+    fn vpn(va: u64, level: u32) -> usize {
+        ((va >> (12 + level * 9)) & 0x1ff) as usize
+    }
+
+    fn pte(pa: u64, flags: u64) -> u64 {
+        ((pa >> 12) << 10) | flags
+    }
+
+    unsafe fn write_u64(ram: *const u8, off: usize, val: u64) {
+        // SAFETY: The test passes page-table/data offsets inside RAM.
+        (ram as *mut u8)
+            .add(off)
+            .copy_from_nonoverlapping(val.to_le_bytes().as_ptr(), 8);
+    }
+
+    let mut code = vec![0u8; 0x200];
+    let main = encode(&[
+        ld(4, 3, 0), // read through the MAEE-marked data PTE
+        ecall(),
+    ]);
+    code[..main.len()].copy_from_slice(&main);
+
+    let trap = encode(&[
+        csrrs(10, 0x342, 0), // mcause
+        csrrs(11, 0x343, 0), // mtval
+        ecall(),
+    ]);
+    code[0x100..0x100 + trap.len()].copy_from_slice(&trap);
+
+    let ram_size = 64 * 1024;
+    let cpu_model = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
+    let (mut env, mut cpu, _as, ram) =
+        setup_fullsys_with_cpu(ram_size, &code, cpu_model);
+
+    let root_pa = RAM_BASE + ROOT_OFF as u64;
+    let code_l1_pa = RAM_BASE + CODE_L1_OFF as u64;
+    let code_l0_pa = RAM_BASE + CODE_L0_OFF as u64;
+    let data_l1_pa = RAM_BASE + DATA_L1_OFF as u64;
+    let data_l0_pa = RAM_BASE + DATA_L0_OFF as u64;
+    let code_pa = RAM_BASE;
+    let data_pa = RAM_BASE + 0x1000;
+    let data_value = 0x1122_3344_5566_7788u64;
+
+    // SAFETY: The page-table pages and data page all live in test RAM.
+    unsafe {
+        write_u64(ram, ROOT_OFF + vpn(CODE_VA, 2) * 8, pte(code_l1_pa, PTE_V));
+        write_u64(
+            ram,
+            CODE_L1_OFF + vpn(CODE_VA, 1) * 8,
+            pte(code_l0_pa, PTE_V),
+        );
+        write_u64(
+            ram,
+            CODE_L0_OFF + vpn(CODE_VA, 0) * 8,
+            pte(code_pa, PTE_V | PTE_R | PTE_X | PTE_A | PTE_D),
+        );
+
+        write_u64(ram, ROOT_OFF + vpn(DATA_VA, 2) * 8, pte(data_l1_pa, PTE_V));
+        write_u64(
+            ram,
+            DATA_L1_OFF + vpn(DATA_VA, 1) * 8,
+            pte(data_l0_pa, PTE_V),
+        );
+        write_u64(
+            ram,
+            DATA_L0_OFF + vpn(DATA_VA, 0) * 8,
+            pte(
+                data_pa,
+                PTE_V
+                    | PTE_R
+                    | PTE_W
+                    | PTE_A
+                    | PTE_D
+                    | THEAD_PAGE_SHARE
+                    | THEAD_PAGE_SO,
+            ),
+        );
+        write_u64(
+            ram,
+            (data_pa - RAM_BASE + (DATA_VA & 0xfff)) as usize,
+            data_value,
+        );
+    }
+
+    let satp = (8u64 << 60) | (ASID << 44) | (root_pa >> 12);
+    cpu.cpu.priv_level = PrivLevel::Supervisor;
+    cpu.cpu.gpr[3] = DATA_VA;
+    cpu.cpu
+        .csr
+        .write(CSR_PMPADDR0, 0x3fff_ffff_ffff, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .csr
+        .write(CSR_PMPCFG0, 0x0f, PrivLevel::Machine)
+        .unwrap();
+    cpu.cpu
+        .pmp
+        .sync_from_csr(&cpu.cpu.csr.pmpcfg, &cpu.cpu.csr.pmpaddr);
+    cpu.cpu.csr.satp = satp;
+    cpu.cpu.mmu.set_satp(satp);
+    cpu.cpu.csr.mtvec = RAM_BASE + 0x100;
+    cpu.cpu.pc = CODE_VA;
+
+    // SAFETY: The test VM owns its CPU state and mapped RAM for this run.
+    let r = unsafe { run_with_retry(&mut env, &mut cpu) };
+
+    assert_eq!(
+        r,
+        ExitReason::Ecall {
+            priv_level: PrivLevel::Supervisor as u8,
+        },
+        "unexpected trap mcause={} mtval={:#x}",
+        cpu.cpu.gpr[10],
+        cpu.cpu.gpr[11],
+    );
+    assert_eq!(cpu.cpu.gpr[4], data_value);
+}
+
 /// Regression: LR helper faults must report the LR
 /// instruction PC, not the start of the translated block.
 ///
