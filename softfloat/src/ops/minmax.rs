@@ -32,6 +32,18 @@ pub fn min<F: FloatFormat>(a: F, b: F, env: &mut FloatEnv) -> F {
         return a;
     }
 
+    // Infinities short-circuit the magnitude comparison below: the
+    // `exp` field returned by `unpack` is not meaningful for Inf, so
+    // comparing it against a finite `exp` would produce the wrong
+    // ordering. -Inf is always the smallest non-NaN value, +Inf the
+    // largest.
+    if pa.cls == FloatClass::Inf {
+        return if pa.sign { a } else { b };
+    }
+    if pb.cls == FloatClass::Inf {
+        return if pb.sign { b } else { a };
+    }
+
     // Both zeros: prefer -0.
     if pa.cls == FloatClass::Zero && pb.cls == FloatClass::Zero {
         return if pb.sign { b } else { a };
@@ -85,6 +97,18 @@ pub fn max<F: FloatFormat>(a: F, b: F, env: &mut FloatEnv) -> F {
     }
     if pb.is_nan() {
         return a;
+    }
+
+    // Infinities short-circuit the magnitude comparison below: the
+    // `exp` field returned by `unpack` is not meaningful for Inf, so
+    // comparing it against a finite `exp` would produce the wrong
+    // ordering. +Inf is always the largest non-NaN value, -Inf the
+    // smallest.
+    if pa.cls == FloatClass::Inf {
+        return if pa.sign { b } else { a };
+    }
+    if pb.cls == FloatClass::Inf {
+        return if pb.sign { a } else { b };
     }
 
     // Both zeros: prefer +0.
