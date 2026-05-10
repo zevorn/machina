@@ -234,6 +234,8 @@ impl RiscvCpu {
                 mmu.configure_profile(
                     profile.max_satp_mode,
                     profile.cfg.ext_svpbmt,
+                    profile.cfg.ext_ssvnapot,
+                    profile.cfg.ext_xtheadmaee,
                 );
                 mmu
             },

@@ -379,6 +379,8 @@ impl K230IrqMap {
     pub const UART4: u32 = 20;
     pub const WDT0: u32 = 107;
     pub const WDT1: u32 = 108;
+    pub const SD0: u32 = 0x8e;
+    pub const SD1: u32 = 0x90;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1005,6 +1007,12 @@ impl Machine for K230Machine {
             let bus = Arc::new(SdBus::new());
             let sdhci =
                 Self::map_sdhci(&mut sysbus, &name, K230_MEMMAP[map as usize])?;
+            let irq = if index == 0 {
+                K230IrqMap::SD0
+            } else {
+                K230IrqMap::SD1
+            };
+            sdhci.connect_irq(Self::plic_irq_source(&plic, irq));
             sdhci.connect_bus(Arc::clone(&bus));
             bus.set_host(
                 Arc::clone(&sdhci) as Arc<dyn machina_hw_sd::SdBusHost>

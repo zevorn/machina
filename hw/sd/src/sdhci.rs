@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use machina_core::address::GPA;
 use machina_core::device_cell::DeviceRegs;
 use machina_hw_core::bus::SysBusDeviceState;
+use machina_hw_core::irq::InterruptSource;
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::MmioOps;
 
@@ -61,8 +62,13 @@ const INT_ERROR: u16 = 1 << 15;
 const ERR_COMMAND_TIMEOUT: u16 = 1 << 0;
 
 const SOFTWARE_RESET_ALL: u8 = 1 << 0;
+const SOFTWARE_RESET_CMD: u8 = 1 << 1;
+const SOFTWARE_RESET_DATA: u8 = 1 << 2;
 
 const TRANSFER_MODE_DMA_ENABLE: u16 = 1 << 0;
+const TRANSFER_MODE_AUTO_CMD12: u16 = 1 << 2;
+const CAPABILITIES_TIMEOUT_CLOCK_MHZ: u32 = 1;
+const CAPABILITIES_TIMEOUT_CLOCK_UNIT_MHZ: u32 = 1 << 7;
 const CAPABILITIES_BASE_CLOCK_SHIFT: u32 = 8;
 const CAPABILITIES_BASE_CLOCK_MHZ: u32 = 100;
 const CAPABILITIES_CAN_DO_HISPD: u32 = 1 << 21;
@@ -111,6 +117,7 @@ struct SdhciRegs {
     data_offset: usize,
     write_transfer_active: bool,
     app_command_pending: bool,
+    auto_cmd12_pending: bool,
     snps_vendor_regs: Vec<u32>,
 }
 
@@ -141,6 +148,7 @@ impl SdhciRegs {
             data_offset: 0,
             write_transfer_active: false,
             app_command_pending: false,
+            auto_cmd12_pending: false,
             snps_vendor_regs: vec![0; SNPS_VENDOR_REG_WORDS],
         }
     }
@@ -191,12 +199,13 @@ impl SdhciRegs {
 }
 
 #[derive(machina_hw_core::SysBusDevice)]
-#[mom(state = state, lock = "std")]
+#[mom(state = state, lock = "std", irq = "manual")]
 pub struct Sdhci {
     state: Mutex<SysBusDeviceState>,
     regs: DeviceRegs<SdhciRegs>,
     bus: Mutex<Option<Arc<SdBus>>>,
     dma_address_space: Mutex<Option<Arc<AddressSpace>>>,
+    irq: Mutex<Option<InterruptSource>>,
 }
 
 impl Sdhci {
@@ -212,6 +221,7 @@ impl Sdhci {
             regs: DeviceRegs::new(SdhciRegs::new()),
             bus: Mutex::new(None),
             dma_address_space: Mutex::new(None),
+            irq: Mutex::new(None),
         }
     }
 
@@ -223,8 +233,14 @@ impl Sdhci {
         *self.dma_address_space.lock().unwrap() = Some(address_space);
     }
 
+    pub fn connect_irq(&self, irq: InterruptSource) {
+        *self.irq.lock().unwrap() = Some(irq);
+        self.update_irq();
+    }
+
     pub fn reset_runtime(&self) {
         self.regs.lock().reset_runtime();
+        self.update_irq();
     }
 
     #[must_use]
@@ -312,13 +328,29 @@ impl Sdhci {
                 let argument = regs.argument;
                 drop(regs);
                 self.dispatch_command(command, argument);
+                self.update_irq();
+                return;
             }
             REG_SOFTWARE_RESET => {
-                regs.software_reset = value as u8;
-                if regs.software_reset & SOFTWARE_RESET_ALL != 0 {
+                let reset = value as u8;
+                if reset & SOFTWARE_RESET_ALL != 0 {
                     regs.reset_runtime();
-                    regs.software_reset = 0;
+                } else {
+                    if reset & SOFTWARE_RESET_CMD != 0 {
+                        regs.command = 0;
+                        regs.normal_int_status &= !INT_COMMAND_COMPLETE;
+                    }
+                    if reset & SOFTWARE_RESET_DATA != 0 {
+                        regs.data_buffer.clear();
+                        regs.data_offset = 0;
+                        regs.write_transfer_active = false;
+                        regs.auto_cmd12_pending = false;
+                        regs.normal_int_status &= !(INT_TRANSFER_COMPLETE
+                            | INT_BUFFER_READ_READY
+                            | INT_BUFFER_WRITE_READY);
+                    }
                 }
+                regs.software_reset = 0;
             }
             REG_HOST_CONTROL => {
                 regs.host_control = value as u8;
@@ -361,6 +393,8 @@ impl Sdhci {
             }
             _ => {}
         }
+        drop(regs);
+        self.update_irq();
     }
 
     fn dispatch_command(&self, command: u16, argument: u32) {
@@ -378,6 +412,7 @@ impl Sdhci {
                     dma_address,
                     dma_enabled,
                     app_command_pending,
+                    auto_cmd12,
                 ) = {
                     let regs = self.regs.lock();
                     (
@@ -386,6 +421,7 @@ impl Sdhci {
                         regs.dma_address,
                         regs.transfer_mode & TRANSFER_MODE_DMA_ENABLE != 0,
                         regs.app_command_pending,
+                        should_auto_cmd12(cmd, regs.transfer_mode),
                     )
                 };
                 let dma_address_space = if dma_enabled {
@@ -396,6 +432,7 @@ impl Sdhci {
                 let mut read_buffer = None;
                 let mut write_buffer_len = None;
                 let mut dma_complete = false;
+                let mut send_auto_cmd12 = false;
 
                 if n > 0
                     && is_read_data_command(cmd, app_command_pending)
@@ -411,6 +448,7 @@ impl Sdhci {
                         } else {
                             read_buffer = Some(data);
                         }
+                        send_auto_cmd12 = auto_cmd12;
                     }
                 } else if n > 0
                     && is_write_data_command(cmd)
@@ -423,6 +461,7 @@ impl Sdhci {
                             read_dma_buffer(aspace, dma_address, transfer_len);
                         if bus.write_data(&data).is_ok() {
                             dma_complete = true;
+                            send_auto_cmd12 = auto_cmd12;
                         }
                     } else {
                         write_buffer_len = Some(transfer_len);
@@ -431,6 +470,7 @@ impl Sdhci {
 
                 let mut regs = self.regs.lock();
                 regs.app_command_pending = cmd == CMD_APP_CMD && n > 0;
+                regs.auto_cmd12_pending = false;
                 regs.response = response_words(cmd, &response);
                 regs.normal_int_status |= INT_COMMAND_COMPLETE;
                 if cmd == CMD_STOP_TRANSMISSION {
@@ -446,6 +486,7 @@ impl Sdhci {
                     regs.data_buffer = vec![0; len];
                     regs.data_offset = 0;
                     regs.write_transfer_active = true;
+                    regs.auto_cmd12_pending = auto_cmd12;
                     regs.normal_int_status |= INT_BUFFER_WRITE_READY;
                     regs.normal_int_status &= !INT_TRANSFER_COMPLETE;
                 } else if dma_complete {
@@ -455,6 +496,10 @@ impl Sdhci {
                     regs.normal_int_status &=
                         !(INT_BUFFER_READ_READY | INT_BUFFER_WRITE_READY);
                     regs.normal_int_status |= INT_TRANSFER_COMPLETE;
+                }
+                drop(regs);
+                if send_auto_cmd12 {
+                    issue_auto_cmd12(&bus);
                 }
             }
             Err(err) => {
@@ -468,6 +513,8 @@ impl Sdhci {
         let mut regs = self.regs.lock();
         regs.error_int_status |= ERR_COMMAND_TIMEOUT;
         regs.normal_int_status |= INT_ERROR;
+        drop(regs);
+        self.update_irq();
     }
 
     fn read_data_port(&self, size: u32) -> u64 {
@@ -485,13 +532,19 @@ impl Sdhci {
             *byte = regs.data_buffer[regs.data_offset];
             regs.data_offset += 1;
         }
-        if regs.data_offset >= regs.data_buffer.len() {
+        let update_irq = regs.data_offset >= regs.data_buffer.len();
+        if update_irq {
             regs.data_buffer.clear();
             regs.data_offset = 0;
             regs.normal_int_status &= !INT_BUFFER_READ_READY;
             regs.normal_int_status |= INT_TRANSFER_COMPLETE;
         }
-        u64::from_le_bytes(bytes) & mask_for_size(size)
+        let value = u64::from_le_bytes(bytes) & mask_for_size(size);
+        drop(regs);
+        if update_irq {
+            self.update_irq();
+        }
+        value
     }
 
     fn write_data_port(&self, size: u32, value: u64) {
@@ -502,6 +555,7 @@ impl Sdhci {
         let bytes = value.to_le_bytes();
         let mut chunk = Vec::new();
         let mut completed = false;
+        let mut send_auto_cmd12 = false;
 
         {
             let mut regs = self.regs.lock();
@@ -516,6 +570,8 @@ impl Sdhci {
                 regs.data_buffer.clear();
                 regs.data_offset = 0;
                 regs.write_transfer_active = false;
+                send_auto_cmd12 = regs.auto_cmd12_pending;
+                regs.auto_cmd12_pending = false;
                 regs.normal_int_status &= !INT_BUFFER_WRITE_READY;
                 regs.normal_int_status |= INT_TRANSFER_COMPLETE;
                 completed = true;
@@ -525,6 +581,24 @@ impl Sdhci {
         if bus.write_data(&chunk).is_err() && completed {
             let mut regs = self.regs.lock();
             regs.normal_int_status &= !INT_TRANSFER_COMPLETE;
+            send_auto_cmd12 = false;
+        }
+        if send_auto_cmd12 {
+            issue_auto_cmd12(&bus);
+        }
+        self.update_irq();
+    }
+
+    fn update_irq(&self) {
+        let level = {
+            let regs = self.regs.lock();
+            regs.normal_int_status
+                & regs.normal_int_enable
+                & regs.normal_int_signal_enable
+                != 0
+        };
+        if let Some(ref irq) = *self.irq.lock().unwrap() {
+            irq.set(level);
         }
     }
 }
@@ -547,6 +621,8 @@ impl SdBusHost for Sdhci {
         } else {
             regs.normal_int_status |= INT_CARD_REMOVAL;
         }
+        drop(regs);
+        self.update_irq();
     }
 
     fn set_readonly(&self, readonly: bool) {
@@ -620,7 +696,9 @@ fn clock_control_value(regs: &SdhciRegs) -> u16 {
 }
 
 fn default_capabilities() -> u32 {
-    (CAPABILITIES_BASE_CLOCK_MHZ << CAPABILITIES_BASE_CLOCK_SHIFT)
+    CAPABILITIES_TIMEOUT_CLOCK_MHZ
+        | CAPABILITIES_TIMEOUT_CLOCK_UNIT_MHZ
+        | (CAPABILITIES_BASE_CLOCK_MHZ << CAPABILITIES_BASE_CLOCK_SHIFT)
         | CAPABILITIES_CAN_DO_HISPD
         | CAPABILITIES_CAN_DO_SDMA
         | CAPABILITIES_CAN_VDD_330
@@ -628,6 +706,17 @@ fn default_capabilities() -> u32 {
 
 fn is_write_data_command(cmd: u8) -> bool {
     matches!(cmd, CMD_WRITE_BLOCK | CMD_WRITE_MULTIPLE_BLOCK)
+}
+
+fn should_auto_cmd12(cmd: u8, transfer_mode: u16) -> bool {
+    transfer_mode & TRANSFER_MODE_AUTO_CMD12 != 0
+        && matches!(cmd, CMD_READ_MULTIPLE_BLOCK | CMD_WRITE_MULTIPLE_BLOCK)
+}
+
+fn issue_auto_cmd12(bus: &SdBus) {
+    let mut response = [0; 16];
+    let _ = bus
+        .do_command(&SdRequest::new(CMD_STOP_TRANSMISSION, 0), &mut response);
 }
 
 fn is_read_data_command(cmd: u8, app_command_pending: bool) -> bool {

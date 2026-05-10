@@ -42,6 +42,8 @@ fn k230_memmap_matches_qemu_reference_points() {
     assert_eq!(K230_PLIC_NUM_SOURCES, 208);
     assert_eq!(K230IrqMap::UART0, 16);
     assert_eq!(K230IrqMap::WDT0, 107);
+    assert_eq!(K230IrqMap::SD0, 0x8e);
+    assert_eq!(K230IrqMap::SD1, 0x90);
 }
 
 #[test]

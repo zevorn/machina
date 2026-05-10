@@ -2,12 +2,12 @@ use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::cpu_model::RiscvCpuModel;
 use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_guest_riscv::riscv::vendor::thead::{
-    CSR_TH_MHCR, CSR_TH_MXSTATUS, CSR_TH_SXSTATUS, TH_STATUS_THEADISAEE,
-    TH_STATUS_UCME,
+    CSR_TH_MHCR, CSR_TH_MXSTATUS, CSR_TH_SXSTATUS, TH_STATUS_MAEE,
+    TH_STATUS_THEADISAEE, TH_STATUS_UCME,
 };
 
 #[test]
-fn c908_reads_thead_status_csrs_with_maee_clear() {
+fn c908_reads_thead_status_csrs_with_maee_enabled() {
     let cpu = RiscvCpu::new_with_model(RiscvCpuModel::TheadC908);
     let mx = cpu
         .csr
@@ -17,8 +17,8 @@ fn c908_reads_thead_status_csrs_with_maee_clear() {
         .csr
         .read_for_profile(CSR_TH_SXSTATUS, PrivLevel::Supervisor, cpu.profile())
         .unwrap();
-    assert_eq!(mx, TH_STATUS_UCME | TH_STATUS_THEADISAEE);
-    assert_eq!(sx, TH_STATUS_UCME | TH_STATUS_THEADISAEE);
+    assert_eq!(mx, TH_STATUS_UCME | TH_STATUS_MAEE | TH_STATUS_THEADISAEE);
+    assert_eq!(sx, TH_STATUS_UCME | TH_STATUS_MAEE | TH_STATUS_THEADISAEE);
 }
 
 #[test]

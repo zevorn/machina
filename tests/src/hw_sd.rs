@@ -1134,6 +1134,51 @@ fn test_sdhci_cmd12_reports_data_end_for_r1b_stop() {
 }
 
 #[test]
+fn test_sdhci_auto_cmd12_stops_sdma_multi_block_read() {
+    let card = Arc::new(sd_card(vec![0; 4096]));
+    let rca = select_card(&card);
+
+    let dma_addr = 0x2000;
+    let aspace = make_ram_aspace(0x4000);
+    let bus = Arc::new(SdBus::new());
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_bus(bus.clone());
+    controller.set_dma_address_space(aspace);
+    bus.set_host(controller.clone());
+    bus.insert_card(card.clone());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x00, 4, dma_addr);
+    mmio.write(0x04, 2, 512);
+    mmio.write(0x06, 2, 2);
+    mmio.write(0x0c, 2, 0x05);
+    mmio.write(0x08, 4, 0);
+    mmio.write(0x0e, 2, 18 << 8);
+
+    assert_ne!(mmio.read(0x30, 2) & (1 << 1), 0);
+    assert!(!card.data_ready());
+
+    let mut resp = [0; 16];
+    assert_eq!(
+        card.do_command(&SdRequest::new(13, rca << 16), &mut resp),
+        4
+    );
+    assert_eq!(resp_u32(&resp), 0x900);
+}
+
+#[test]
+fn test_sdhci_command_and_data_reset_bits_self_clear() {
+    let controller = Arc::new(Sdhci::new());
+    let mmio = SdhciMmio(controller);
+
+    mmio.write(0x2f, 1, 0x02);
+    assert_eq!(mmio.read(0x2f, 1), 0);
+
+    mmio.write(0x2f, 1, 0x04);
+    assert_eq!(mmio.read(0x2f, 1), 0);
+}
+
+#[test]
 fn test_sdhci_data_port_writes_single_block_after_cmd24() {
     let card = Arc::new(sd_card(vec![0; 1024]));
     select_card(&card);
@@ -1288,7 +1333,39 @@ fn test_sdhci_capabilities_advertise_sdma_clock_and_3v3() {
 
     assert_ne!(caps & (1 << 22), 0);
     assert_ne!(caps & (1 << 24), 0);
+    assert_ne!(caps & 0x3f, 0);
     assert_ne!(caps & (0xff << 8), 0);
+}
+
+#[test]
+fn test_sdhci_masked_status_drives_irq_line() {
+    const INT_COMMAND_COMPLETE: u64 = 1 << 0;
+
+    let sink = Pl181IrqSink::new(1);
+    let controller = Arc::new(Sdhci::new());
+    controller.connect_irq(InterruptSource::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        0,
+    ));
+
+    let sd_bus = Arc::new(SdBus::new());
+    controller.connect_bus(sd_bus.clone());
+    let mmio = SdhciMmio(controller);
+
+    let card = MockSdCard::new(true);
+    card.set_response(&[0x00]);
+    sd_bus.insert_card(card);
+
+    mmio.write(0x34, 2, INT_COMMAND_COMPLETE);
+    mmio.write(0x38, 2, INT_COMMAND_COMPLETE);
+    assert!(!sink.level(0));
+
+    mmio.write(0x08, 4, 0x1aa);
+    mmio.write(0x0e, 2, 8 << 8);
+    assert!(sink.level(0));
+
+    mmio.write(0x30, 2, INT_COMMAND_COMPLETE);
+    assert!(!sink.level(0));
 }
 
 #[test]
