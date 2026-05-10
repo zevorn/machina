@@ -9,7 +9,9 @@ use machina_hw_sd::sdhci::{Sdhci, SdhciMmio};
 use machina_hw_sd::ssi_sd::SsiSd;
 use machina_hw_sd::{SdBus, SdBusHost, SdCard, SdError, SdRequest, SdVoltage};
 use machina_hw_ssi::{SpiBus, SpiCsPolarity, SpiSlave};
-use machina_hw_storage::{BlockBackend, BlockMedia, FileBackend, MemBackend};
+use machina_hw_storage::{
+    BlockBackend, BlockMedia, FileBackend, MemBackend, StorageError,
+};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
 
@@ -190,6 +192,36 @@ impl MmioOps for DmaProbe {
     }
 }
 
+struct SizedBackend {
+    size: u64,
+}
+
+impl BlockBackend for SizedBackend {
+    fn read(
+        &self,
+        _offset: u64,
+        _buf: &mut [u8],
+    ) -> Result<usize, StorageError> {
+        Ok(0)
+    }
+
+    fn write(&self, _offset: u64, buf: &[u8]) -> Result<usize, StorageError> {
+        Ok(buf.len())
+    }
+
+    fn flush(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn readonly(&self) -> bool {
+        false
+    }
+}
+
 fn sd_card(data: Vec<u8>) -> SdMemoryCard<MemBackend> {
     SdMemoryCard::new(
         BlockMedia::new(MemBackend::new(data, false), 512).unwrap(),
@@ -266,9 +298,11 @@ fn identify_card<B: BlockBackend>(card: &SdMemoryCard<B>) -> (u32, [u8; 16]) {
 fn sdsc_csd_sector_count(csd: &[u8; 16]) -> u64 {
     let word1 = u32::from_be_bytes(csd[4..8].try_into().unwrap());
     let word2 = u32::from_be_bytes(csd[8..12].try_into().unwrap());
+    let read_bl_len = 1u64 << ((word1 >> 16) & 0xf);
     let c_size = ((word1 & 0x3ff) << 2) | ((word2 >> 30) & 0x3);
     let c_size_mult = (word2 >> 15) & 0x7;
-    u64::from(c_size + 1) << (c_size_mult + 2)
+    let blocks = u64::from(c_size + 1) << (c_size_mult + 2);
+    blocks * read_bl_len / 512
 }
 
 fn uboot_sdsc_sector_count(csd: [u32; 4]) -> u64 {
@@ -394,6 +428,28 @@ fn test_sd_card_cmd9_reports_backing_media_capacity() {
     );
 
     assert_eq!(sdsc_csd_sector_count(&resp), 1_048_576);
+}
+
+#[test]
+fn test_sd_card_cmd9_reports_2g_sdsc_capacity() {
+    let sector_count = 4_194_304u64;
+    let media = BlockMedia::new(
+        SizedBackend {
+            size: sector_count * 512,
+        },
+        512,
+    )
+    .unwrap();
+    let card = SdMemoryCard::new(media, SdCardConfig::default()).unwrap();
+    let (rca, _) = identify_card(&card);
+    let mut resp = [0; 16];
+
+    assert_eq!(
+        card.do_command(&SdRequest::new(9, rca << 16), &mut resp),
+        16
+    );
+
+    assert_eq!(sdsc_csd_sector_count(&resp), sector_count);
 }
 
 #[test]

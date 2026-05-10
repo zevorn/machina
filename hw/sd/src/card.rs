@@ -626,11 +626,13 @@ const DEFAULT_SD_STATUS: [u8; 64] = [0; 64];
 
 fn default_csd(sector_count: u64) -> [u8; 16] {
     let mut csd = DEFAULT_CSD;
-    let (c_size, c_size_mult) = sdsc_capacity_fields(sector_count);
+    let (c_size, c_size_mult, read_bl_len) = sdsc_capacity_fields(sector_count);
     let mut word1 = u32::from_be_bytes(csd[4..8].try_into().unwrap());
     let mut word2 = u32::from_be_bytes(csd[8..12].try_into().unwrap());
 
-    word1 = (word1 & !0x3ff) | ((c_size >> 2) & 0x3ff);
+    word1 = (word1 & !(0x000f_0000 | 0x3ff))
+        | ((read_bl_len & 0xf) << 16)
+        | ((c_size >> 2) & 0x3ff);
     word2 = (word2 & !(0xc000_0000 | 0x0003_8000))
         | ((c_size & 0x3) << 30)
         | ((c_size_mult & 0x7) << 15);
@@ -639,15 +641,18 @@ fn default_csd(sector_count: u64) -> [u8; 16] {
     csd
 }
 
-fn sdsc_capacity_fields(sector_count: u64) -> (u32, u32) {
-    for c_size_mult in 0..=7u32 {
-        let unit = 1u64 << (c_size_mult + 2);
-        let units = sector_count / unit;
-        if units <= 4096 {
-            return (units.max(1) as u32 - 1, c_size_mult);
+fn sdsc_capacity_fields(sector_count: u64) -> (u32, u32, u32) {
+    for read_bl_len in 9..=10u32 {
+        let sectors_per_block = 1u64 << (read_bl_len - 9);
+        for c_size_mult in 0..=7u32 {
+            let unit = (1u64 << (c_size_mult + 2)) * sectors_per_block;
+            let units = sector_count / unit;
+            if units <= 4096 {
+                return (units.max(1) as u32 - 1, c_size_mult, read_bl_len);
+            }
         }
     }
-    (0xfff, 7)
+    (0xfff, 7, 10)
 }
 
 fn switch_status(arg: u32) -> [u8; 64] {
