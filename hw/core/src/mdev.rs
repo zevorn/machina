@@ -64,6 +64,10 @@ pub struct MDeviceState {
 }
 
 impl MDeviceState {
+    /// Build a new device state in the `Created` lifecycle stage
+    /// with `local_id` as the underlying object id, no parent
+    /// bus, and an empty property set. Panics if `local_id` is
+    /// not a valid object id.
     pub fn new(local_id: &str) -> Self {
         Self {
             object: MObjectState::new_detached(local_id)
@@ -74,26 +78,37 @@ impl MDeviceState {
         }
     }
 
+    /// Borrow the underlying `MObjectState` (read-only).
     pub fn object(&self) -> &MObjectState {
         &self.object
     }
 
+    /// Mutably borrow the underlying `MObjectState`. Note that
+    /// the `MDeviceState` itself does not gate object-level
+    /// mutations on lifecycle.
     pub fn object_mut(&mut self) -> &mut MObjectState {
         &mut self.object
     }
 
+    /// The device's local id as registered on its parent bus.
     pub fn local_id(&self) -> &str {
         self.object.local_id()
     }
 
+    /// Current lifecycle stage (`Created` or `Realized`).
     pub fn lifecycle(&self) -> MDeviceLifecycle {
         self.lifecycle
     }
 
+    /// Convenience: `true` once `mark_realized` has succeeded
+    /// and `mark_unrealized` has not yet been called.
     pub fn is_realized(&self) -> bool {
         self.lifecycle == MDeviceLifecycle::Realized
     }
 
+    /// Record which parent bus this device is attached to.
+    /// Returns `LateMutation("parent_bus")` if the device is
+    /// already realized.
     pub fn set_parent_bus(&mut self, bus: &str) -> Result<(), MDeviceError> {
         if self.is_realized() {
             return Err(MDeviceError::LateMutation("parent_bus"));
@@ -102,10 +117,15 @@ impl MDeviceState {
         Ok(())
     }
 
+    /// The parent bus name, if `set_parent_bus` has been called.
     pub fn parent_bus(&self) -> Option<&str> {
         self.parent_bus.as_deref()
     }
 
+    /// Register a new property schema entry. Returns
+    /// `LateMutation("property_schema")` if the device is
+    /// already realized, or `DuplicateProperty(name)` if a
+    /// property with the same name was already defined.
     pub fn define_property(
         &mut self,
         spec: MPropertySpec,
@@ -116,6 +136,9 @@ impl MDeviceState {
         self.properties.define(spec)
     }
 
+    /// Assign `value` to the property `name`. Whether the
+    /// assignment is allowed at the current lifecycle stage is
+    /// decided by the property set.
     pub fn set_property(
         &mut self,
         name: &str,
@@ -124,22 +147,33 @@ impl MDeviceState {
         self.properties.set(self.lifecycle, name, value)
     }
 
+    /// Read the current value of property `name`, or `None` if
+    /// the property is not set (and not defined with a default).
     pub fn property(&self, name: &str) -> Option<&MPropertyValue> {
         self.properties.get(name)
     }
 
+    /// Look up the schema entry registered for property `name`.
     pub fn property_spec(&self, name: &str) -> Option<&MPropertySpec> {
         self.properties.spec(name)
     }
 
+    /// All property names currently registered, in insertion
+    /// order.
     pub fn property_names(&self) -> Vec<&str> {
         self.properties.names()
     }
 
+    /// Verify that every required property has a value. Returns
+    /// `MissingRequiredProperty(name)` for the first missing
+    /// required property encountered.
     pub fn validate_properties(&self) -> Result<(), MDeviceError> {
         self.properties.validate_required()
     }
 
+    /// Move the device from `Created` to `Realized`. Validates
+    /// required properties first; returns `AlreadyRealized` if
+    /// the device is already realized.
     pub fn mark_realized(&mut self) -> Result<(), MDeviceError> {
         if self.is_realized() {
             return Err(MDeviceError::AlreadyRealized);
@@ -149,6 +183,8 @@ impl MDeviceState {
         Ok(())
     }
 
+    /// Move the device back from `Realized` to `Created`.
+    /// Returns `NotRealized` if the device was not realized.
     pub fn mark_unrealized(&mut self) -> Result<(), MDeviceError> {
         if !self.is_realized() {
             return Err(MDeviceError::NotRealized);

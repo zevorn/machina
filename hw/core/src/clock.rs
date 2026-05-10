@@ -15,6 +15,9 @@ pub struct DeviceClock {
 }
 
 impl DeviceClock {
+    /// Create a new enabled clock at `freq_hz`. The clock has no
+    /// children and a 1:1 multiplier/divider, so by default it
+    /// propagates the parent frequency unchanged.
     pub fn new(freq_hz: u64) -> Self {
         Self {
             freq_hz,
