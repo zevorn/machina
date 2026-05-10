@@ -1,4 +1,21 @@
-// Thread-local event tracer for debugging and analysis.
+//! Thread-local event tracer for debugging and analysis.
+//!
+//! ## Multithreading model
+//!
+//! - The "tracing is active" gate is a single global atomic
+//!   ([`ENABLED`]); this gives a fast path for trace points on
+//!   threads that have not opted in.
+//! - The trace *destination* is per-thread: every public
+//!   `trace_*` function writes to the calling thread's
+//!   [`TRACE_FILE`]. A thread that has not called
+//!   [`init_trace`] has no destination, so its trace calls are
+//!   silently dropped even when [`trace_enabled`] reports true
+//!   because some *other* thread enabled tracing.
+//! - As a consequence, [`trace_enabled`] only tells you whether
+//!   *some* thread has initialised tracing; it does not imply
+//!   that the calling thread will produce output. To trace
+//!   events from multiple threads, every participating thread
+//!   must call [`init_trace`] with its own path.
 
 use std::cell::RefCell;
 use std::fs::File;
@@ -12,9 +29,13 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-/// Open a trace file for the current thread and enable
-/// tracing globally. Each thread should call this with its
-/// own path if multi-thread tracing is desired.
+/// Open a trace file for the **current thread** and enable
+/// tracing globally.
+///
+/// Each thread that should produce output must call this on
+/// itself with its own path; the trace destination is a
+/// thread-local. Calling `init_trace` on the main thread does
+/// not retroactively configure child threads.
 ///
 /// # Errors
 ///
@@ -28,9 +49,14 @@ pub fn init_trace(path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Fast check whether tracing is active. Returns false when
-/// no thread has called `init_trace`, making the cost of an
-/// unconfigured trace point a single relaxed atomic load.
+/// Fast check whether *some* thread has enabled tracing.
+///
+/// Returns `false` when no thread has ever called
+/// [`init_trace`], making the cost of an unconfigured trace
+/// point a single relaxed atomic load. A `true` result does
+/// **not** mean the calling thread has a trace file open: a
+/// thread that has not called [`init_trace`] still drops its
+/// own trace events even when this returns `true`.
 #[inline]
 pub fn trace_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
