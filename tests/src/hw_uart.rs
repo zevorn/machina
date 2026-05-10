@@ -1249,3 +1249,207 @@ fn test_htif_unknown_device() {
     assert_eq!(mmio.read(8, 4), 0);
     assert_eq!(mmio.read(12, 4), 0);
 }
+
+// ===== UART 16550 DLAB / FIFO register-level tests (#74) =====
+//
+// These tests exercise the 16550 register window directly via
+// Uart16550::{read,write} so they pin down register semantics
+// without depending on a full guest boot.
+//
+// Reference: PC16550D datasheet, table I (register summary):
+//   offset | DLAB=0          | DLAB=1
+//   ------ | --------------- | ------
+//     0    | RBR (R)/THR (W) | DLL
+//     1    | IER             | DLM
+//     2    | IIR (R)/FCR (W) | IIR (R)/FCR (W)
+//     3    | LCR (DLAB=bit7) | LCR
+//     5    | LSR             | LSR
+
+const LCR_DLAB_BIT: u8 = 0x80;
+const LSR_DR_BIT: u8 = 0x01;
+
+fn uart_set_dlab(uart: &Uart16550, dlab: bool) {
+    let lcr = uart.read(3);
+    let new = if dlab {
+        lcr | LCR_DLAB_BIT
+    } else {
+        lcr & !LCR_DLAB_BIT
+    };
+    uart.write(3, new);
+}
+
+#[test]
+fn test_uart_dlab1_offset0_1_select_dll_dlm_storage() {
+    let uart = Uart16550::new();
+
+    uart_set_dlab(&uart, true);
+    uart.write(0, 0x12); // DLL
+    uart.write(1, 0x34); // DLM
+
+    // While DLAB=1, offsets 0/1 must read back the divisor latches.
+    assert_eq!(uart.read(0), 0x12, "DLAB=1 offset 0 should read DLL");
+    assert_eq!(uart.read(1), 0x34, "DLAB=1 offset 1 should read DLM");
+}
+
+#[test]
+fn test_uart_dlab0_offset1_selects_ier_distinct_from_dlm() {
+    let uart = Uart16550::new();
+
+    // Stash a DLM value first.
+    uart_set_dlab(&uart, true);
+    uart.write(1, 0x55);
+
+    // DLAB=0 path: writes go to IER, reads return IER, DLM intact.
+    uart_set_dlab(&uart, false);
+    uart.write(1, 0x03); // IER = RX-avail + THR-empty (low nibble)
+    assert_eq!(
+        uart.read(1) & 0x0f,
+        0x03,
+        "DLAB=0 offset 1 should expose IER",
+    );
+
+    // Toggle back: the previously stashed DLM must be untouched.
+    uart_set_dlab(&uart, true);
+    assert_eq!(
+        uart.read(1),
+        0x55,
+        "DLM must not alias to IER across DLAB toggles",
+    );
+}
+
+#[test]
+fn test_uart_dlab1_write_to_offset0_does_not_touch_thr_or_chardev() {
+    use std::sync::Mutex;
+
+    let mut bus = SysBus::new("sysbus0");
+    let mut address_space =
+        AddressSpace::new(MemoryRegion::container("system", u64::MAX));
+    let uart = Arc::new(Uart16550::new_named("uart0"));
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+    struct CaptureChardev {
+        buf: Arc<Mutex<Vec<u8>>>,
+    }
+    impl Chardev for CaptureChardev {
+        fn read(&mut self) -> Option<u8> {
+            None
+        }
+        fn write(&mut self, data: u8) {
+            self.buf.lock().unwrap().push(data);
+        }
+        fn can_read(&self) -> bool {
+            false
+        }
+    }
+    let fe = CharFrontend::new(Box::new(CaptureChardev {
+        buf: Arc::clone(&buf),
+    }));
+
+    uart.attach_to_bus(&mut bus).unwrap();
+    let region = MemoryRegion::io(
+        "uart0",
+        0x100,
+        Arc::new(machina_hw_char::uart::Uart16550Mmio(Arc::clone(&uart))),
+    );
+    uart.register_mmio(region, GPA::new(0x1000_0000)).unwrap();
+    uart.attach_chardev(fe).unwrap();
+    let rx_cb: Arc<Mutex<dyn FnMut(u8) + Send>> =
+        Arc::new(Mutex::new(move |_byte: u8| {}));
+    uart.realize_onto(&mut bus, &mut address_space, rx_cb)
+        .unwrap();
+
+    // With DLAB=1, writes to offset 0 program DLL — they must not
+    // be transmitted through the chardev.
+    uart_set_dlab(&uart, true);
+    uart.write(0, 0x99);
+    assert!(
+        buf.lock().unwrap().is_empty(),
+        "DLAB=1 offset 0 write must not reach chardev",
+    );
+
+    // Confirm DLL was actually programmed.
+    assert_eq!(uart.read(0), 0x99);
+
+    // Drop DLAB and write 'A': now the byte should reach chardev.
+    uart_set_dlab(&uart, false);
+    uart.write(0, 0x41);
+    assert_eq!(*buf.lock().unwrap(), vec![0x41]);
+}
+
+#[test]
+fn test_uart_dlab1_offset0_read_does_not_drain_rx_fifo() {
+    let uart = Uart16550::new();
+
+    uart.receive(0xaa);
+    assert_ne!(uart.read(5) & LSR_DR_BIT, 0, "DR set after receive");
+
+    // Reading offset 0 with DLAB=1 must return DLL, NOT pop the
+    // RX FIFO. The DR bit must still be set afterwards and the
+    // pending byte must still be readable as RBR with DLAB=0.
+    uart_set_dlab(&uart, true);
+    let dll = uart.read(0);
+    assert_eq!(dll, 0, "DLAB=1 offset 0 should read DLL (default 0)");
+    assert_ne!(
+        uart.read(5) & LSR_DR_BIT,
+        0,
+        "DR must not be cleared by a DLAB=1 read of offset 0",
+    );
+
+    uart_set_dlab(&uart, false);
+    assert_eq!(uart.read(0), 0xaa, "RBR must still hold the queued byte");
+}
+
+#[test]
+fn test_uart_lsr_dr_persists_until_fifo_drained() {
+    let uart = Uart16550::new();
+
+    uart.receive(0x10);
+    uart.receive(0x20);
+    uart.receive(0x30);
+    assert_ne!(uart.read(5) & LSR_DR_BIT, 0);
+
+    // Pop the first byte; FIFO is non-empty so DR must remain set.
+    assert_eq!(uart.read(0), 0x10);
+    assert_ne!(
+        uart.read(5) & LSR_DR_BIT,
+        0,
+        "DR should stay high while RX FIFO has more bytes",
+    );
+
+    assert_eq!(uart.read(0), 0x20);
+    assert_ne!(uart.read(5) & LSR_DR_BIT, 0);
+
+    // Last byte: DR must clear after this pop.
+    assert_eq!(uart.read(0), 0x30);
+    assert_eq!(
+        uart.read(5) & LSR_DR_BIT,
+        0,
+        "DR should clear once RX FIFO drains",
+    );
+}
+
+#[test]
+fn test_uart_fcr_fifo_enable_toggle_clears_rx_fifo() {
+    let uart = Uart16550::new();
+
+    // Enable FIFO, push two bytes.
+    uart.write(2, 0x01);
+    uart.receive(0x01);
+    uart.receive(0x02);
+    assert_ne!(uart.read(5) & LSR_DR_BIT, 0);
+
+    // Toggling FIFO_ENABLE off-then-on must auto-clear the RX FIFO
+    // (datasheet: changing FIFO state forces both FIFOs reset).
+    uart.write(2, 0x00);
+    uart.write(2, 0x01);
+
+    assert_eq!(
+        uart.read(5) & LSR_DR_BIT,
+        0,
+        "FIFO toggle should clear RX FIFO and DR",
+    );
+    // Reading RBR now should not return either of the dropped bytes.
+    let stale = uart.read(0);
+    assert_ne!(stale, 0x01);
+    assert_ne!(stale, 0x02);
+}
