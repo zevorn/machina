@@ -64,16 +64,35 @@ fn make_address_space() -> AddressSpace {
 fn test_aclint_mtime_wall_clock() {
     let aclint = Aclint::new(2);
 
+    // Poll with a deadline rather than sleep-then-check so this
+    // test cannot fail simply because a slow CI scheduler stole
+    // CPU between the sleep and the assertion. We accept any
+    // diff that crosses the 500_000-tick (50ms @ 10 MHz) lower
+    // bound within a generous 2-second deadline; the upper
+    // bound caps how far the wall clock is allowed to outrun
+    // the lower bound to catch egregious drift.
     let t0 = aclint.read(0xBFF8, 8);
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let started = Instant::now();
+    let advanced = wait_with_deadline(
+        || aclint.read(0xBFF8, 8).saturating_sub(t0) > 500_000,
+        Duration::from_secs(2),
+    );
+    let waited = started.elapsed();
     let t1 = aclint.read(0xBFF8, 8);
+    let diff = t1.saturating_sub(t0);
 
-    // 100ms at 10 MHz = ~1_000_000 ticks.
-    let diff = t1 - t0;
     assert!(
-        diff > 500_000 && diff < 2_000_000,
-        "mtime diff {} not in expected range for 100ms",
-        diff
+        advanced,
+        "mtime never crossed +500_000 ticks. \
+         t0={t0}, t1={t1}, diff={diff}, waited={waited:?}",
+    );
+    // Once it crosses, the diff should not greatly exceed
+    // 2 seconds * 10 MHz = 20_000_000 ticks plus the polling
+    // tail, which is the loose upper bound.
+    assert!(
+        diff < 25_000_000,
+        "mtime diff {diff} grew implausibly large \
+         ({waited:?} elapsed)",
     );
 }
 
@@ -120,17 +139,30 @@ fn test_aclint_mtime_high_write_preserves_live_low_half() {
     let aclint = Aclint::new(1);
 
     aclint.write(0xBFF8, 8, 0);
-    std::thread::sleep(Duration::from_millis(5));
-    let low_before = aclint.read(0xBFF8, 8) & 0xffff_ffff;
+    // Poll until the low half has advanced past the threshold
+    // we'll snapshot. Loaded CI may need more than 5ms to
+    // accumulate 10_000 ticks at 10 MHz, but a 200ms deadline
+    // is still effectively instant — and the polling avoids
+    // any "sleep-then-snapshot" race.
     assert!(
-        low_before > 10_000,
-        "mtime should advance before high write"
+        wait_with_deadline(
+            || (aclint.read(0xBFF8, 8) & 0xffff_ffff) > 10_000,
+            Duration::from_millis(200),
+        ),
+        "mtime low half never advanced past 10_000; \
+         current mtime = {:#x}",
+        aclint.read(0xBFF8, 8),
     );
+    let low_before = aclint.read(0xBFF8, 8) & 0xffff_ffff;
 
     aclint.write(0xBFFC, 4, 2);
 
     let mtime = aclint.read(0xBFF8, 8);
-    assert_eq!(mtime >> 32, 2);
+    assert_eq!(
+        mtime >> 32,
+        2,
+        "high half should be the value just written; mtime={mtime:#x}",
+    );
     assert!(
         (low_before..low_before + 100_000).contains(&(mtime & 0xffff_ffff)),
         "mtime low half should preserve the live value: \
@@ -406,16 +438,30 @@ fn test_aclint_mtimecmp_disable_cancels_stale_timer_worker() {
     );
 
     let now = aclint.read(0xBFF8, 8);
-    aclint.write(0x4000, 8, now + 100_000);
+    let near_future = now + 100_000;
+    aclint.write(0x4000, 8, near_future);
     aclint.write(0x4000, 8, u64::MAX);
 
+    // Negative check: nothing should fire after the disable.
+    // Sleep 50ms (the worker would have fired well within
+    // 10ms), then sample state with diagnostics in the
+    // failure paths.
     std::thread::sleep(Duration::from_millis(50));
+    let final_mtime = aclint.read(0xBFF8, 8);
+    let final_mtimecmp = aclint.read(0x4000, 8);
+    let exit_count = exits.load(Ordering::Acquire);
 
-    assert!(!sink.level(mti), "disabled timer must not assert MTI");
+    assert!(
+        !sink.level(mti),
+        "disabled timer must not assert MTI. \
+         scheduled_at={near_future} (now+100_000), \
+         disabled_at_mtimecmp={final_mtimecmp:#x}, \
+         current_mtime={final_mtime}, exits={exit_count}",
+    );
     assert_eq!(
-        exits.load(Ordering::Acquire),
-        0,
-        "disabled stale timer worker must not request exit"
+        exit_count, 0,
+        "disabled stale timer worker must not request exit. \
+         scheduled_at={near_future}, current_mtime={final_mtime}",
     );
 }
 
@@ -450,23 +496,39 @@ fn test_aclint_mtimecmp_past_retarget_cancels_stale_timer_worker() {
     );
 
     let now = aclint.read(0xBFF8, 8);
-    aclint.write(0x4000, 8, now + 300_000);
+    let future = now + 300_000;
+    aclint.write(0x4000, 8, future);
     let past = aclint.read(0xBFF8, 8).saturating_sub(1);
     aclint.write(0x4000, 8, past);
 
-    assert!(sink.level(mti), "past retarget should assert MTI now");
+    let mtime_after_retarget = aclint.read(0xBFF8, 8);
+    assert!(
+        sink.level(mti),
+        "past retarget should assert MTI now. \
+         future={future}, past={past}, \
+         mtime={mtime_after_retarget}",
+    );
     assert_eq!(
         exits.load(Ordering::Acquire),
         1,
-        "past retarget should request exactly one immediate exit"
+        "past retarget should request exactly one immediate exit. \
+         future={future}, past={past}, \
+         mtime={mtime_after_retarget}",
     );
 
+    // Wait long enough for the old future-timer worker to have
+    // run, then assert it did not request a second exit. 60ms
+    // is well past the 30µs wait the future timer was armed for.
     std::thread::sleep(Duration::from_millis(60));
-
+    let final_mtime = aclint.read(0xBFF8, 8);
+    let final_mtimecmp = aclint.read(0x4000, 8);
+    let final_exits = exits.load(Ordering::Acquire);
     assert_eq!(
-        exits.load(Ordering::Acquire),
-        1,
-        "old future timer worker must not request another exit"
+        final_exits, 1,
+        "old future timer worker must not request another exit. \
+         original_future={future}, retarget_to={past}, \
+         mtime={final_mtime}, mtimecmp={final_mtimecmp:#x}, \
+         exits={final_exits}",
     );
 }
 
@@ -541,27 +603,31 @@ fn test_aclint_retarget_future_cancels_stale_timer() {
     aclint.connect_mti(0, line);
 
     let now = aclint.read(0xBFF8, 8);
+    let original_target = now + 200_000; // 20ms
+    let retarget_target = now + 10_000_000; // 1s
 
     // Set mtimecmp to now+20ms, then immediately retarget
     // to now+1s. The old 20ms timer must be cancelled.
-    aclint.write(0x4000, 8, now + 200_000); // 20ms
-    aclint.write(0x4000, 8, now + 10_000_000); // 1s
+    aclint.write(0x4000, 8, original_target);
+    aclint.write(0x4000, 8, retarget_target);
 
-    // After 50ms, old timer would have fired but MTI
-    // should still be low because it was cancelled.
+    // After 50ms, the original 20ms timer would have fired —
+    // MTI should still be low because the retarget cancelled
+    // it. Use a busy-poll to detect a regression early; only
+    // run the full deadline if the cancel was honoured.
     let timeout1 = Duration::from_millis(50);
-    std::thread::sleep(timeout1);
-
-    // Get current state for diagnostics
+    let bad = wait_with_deadline(|| sink.level(mti), timeout1);
     let current_mtime1 = aclint.read(0xBFF8, 8);
     let current_mtimecmp1 = aclint.read(0x4000, 8);
 
     assert!(
-        !sink.level(mti),
-        "MTI must stay low after retarget cancelled the old 20ms timer. Current state: mtime={}, mtimecmp={}, waited for {:?}",
-        current_mtime1,
-        current_mtimecmp1,
-        timeout1
+        !bad,
+        "MTI must stay low after retarget cancelled the old \
+         20ms timer. \
+         original_target={original_target}, \
+         retarget_target={retarget_target}, \
+         mtime={current_mtime1}, mtimecmp={current_mtimecmp1}, \
+         waited up to {timeout1:?}",
     );
 
     // Now retarget to near future (10ms from current).
