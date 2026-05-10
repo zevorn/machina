@@ -3,7 +3,8 @@
 //! The Kendryte SDK U-Boot `unzip.c` path programs two SDMA LLT chains and
 //! then starts the gzip block. This model implements that narrow contract.
 
-use std::io::Read;
+use std::collections::HashSet;
+use std::io::{Error, ErrorKind, Read};
 use std::sync::Arc;
 
 use flate2::read::GzDecoder;
@@ -44,6 +45,8 @@ const GZIP_DONE_INT: u32 = 1 << 10;
 const GSDMA_WRITE_DONE_INT: u32 = 0x2;
 const LLT_WORDS: usize = 6;
 const LLT_SIZE: u32 = (LLT_WORDS * 4) as u32;
+const MAX_GZIP_INPUT_LEN: usize = 128 * 1024 * 1024;
+const MAX_GZIP_OUTPUT_LEN: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct SdmaChannel {
@@ -187,6 +190,11 @@ impl K230GzipDma {
         };
 
         let result = (|| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            if src_size as usize > MAX_GZIP_INPUT_LEN
+                || out_size as usize > MAX_GZIP_OUTPUT_LEN
+            {
+                return Err(invalid_llt("gzip transfer size too large"));
+            }
             let mut compressed =
                 read_llt_data(&address_space, src_llt, src_size as usize)?;
             if compressed.get(2).copied() == Some(0x09) {
@@ -267,10 +275,15 @@ fn read_llt_data(
     len: usize,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut data = Vec::with_capacity(len);
+    let mut seen = HashSet::new();
     while llt_addr != 0 && data.len() < len {
+        validate_llt_progress(&mut seen, llt_addr)?;
         let desc = read_llt(address_space, llt_addr)?;
         let remaining = len - data.len();
         let chunk_len = remaining.min(desc.line_size as usize);
+        if chunk_len == 0 {
+            return Err(invalid_llt("zero-length LLT descriptor"));
+        }
         data.extend(read_guest_bytes(address_space, desc.src_addr, chunk_len));
         llt_addr = desc.next_llt_addr;
     }
@@ -283,10 +296,15 @@ fn write_llt_data(
     data: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut offset = 0;
+    let mut seen = HashSet::new();
     while llt_addr != 0 && offset < data.len() {
+        validate_llt_progress(&mut seen, llt_addr)?;
         let desc = read_llt(address_space, llt_addr)?;
         let remaining = data.len() - offset;
         let chunk_len = remaining.min(desc.line_size as usize);
+        if chunk_len == 0 {
+            return Err(invalid_llt("zero-length LLT descriptor"));
+        }
         write_guest_bytes(
             address_space,
             desc.dst_addr,
@@ -296,6 +314,20 @@ fn write_llt_data(
         llt_addr = desc.next_llt_addr;
     }
     Ok(())
+}
+
+fn validate_llt_progress(
+    seen: &mut HashSet<u32>,
+    llt_addr: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !seen.insert(llt_addr) {
+        return Err(invalid_llt("cyclic LLT descriptor chain"));
+    }
+    Ok(())
+}
+
+fn invalid_llt(message: &'static str) -> Box<dyn std::error::Error> {
+    Box::new(Error::new(ErrorKind::InvalidData, message))
 }
 
 #[derive(Clone, Copy)]

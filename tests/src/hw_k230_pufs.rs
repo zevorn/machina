@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use machina_core::address::GPA;
-use machina_hw_riscv::k230_pufs::{K230Pufs, K230PufsMmio};
+use machina_hw_riscv::k230_pufs::{
+    K230Pufs, K230PufsMmio, K230_PUFS_MAX_HASH_LEN,
+};
 use machina_memory::address_space::AddressSpace;
 use machina_memory::region::{MemoryRegion, MmioOps};
 use sha2::{Digest, Sha256};
@@ -106,4 +108,23 @@ fn k230_pufs_hashes_chunked_sha256_dma_segments() {
     expected_input.extend_from_slice(second);
     let expected = Sha256::digest(&expected_input);
     assert_eq!(uboot_digest(&mmio).as_slice(), expected.as_slice());
+}
+
+#[test]
+fn k230_pufs_rejects_oversized_dma_hash_segment() {
+    let aspace = make_ram_aspace(0x1000);
+    let dev = K230Pufs::new_named("k230-pufs");
+    dev.set_dma_address_space(aspace);
+    let mmio = K230PufsMmio(dev);
+
+    run_hash_chunk(
+        &mmio,
+        0x100,
+        K230_PUFS_MAX_HASH_LEN + 1,
+        0,
+        DMA_DSC_CFG_4_HEAD | DMA_DSC_CFG_4_TAIL,
+    );
+
+    assert_eq!(mmio.read(HMAC_ALEN, 4), 0);
+    assert_eq!(uboot_digest(&mmio), [0; 32]);
 }

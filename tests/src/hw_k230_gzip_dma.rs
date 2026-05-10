@@ -1,5 +1,6 @@
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -96,4 +97,32 @@ fn k230_gzip_dma_decompresses_sdk_llt_chain() {
     assert_ne!(mmio.read(0x08, 4) & 0x2, 0);
     assert_ne!(mmio.read(0x800c, 4) & (1 << 10), 0);
     assert_eq!(read_bytes(&aspace, output_addr, payload.len()), payload);
+}
+
+#[test]
+fn k230_gzip_dma_rejects_zero_progress_llt_cycle() {
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let aspace = make_ram_aspace(0x8000);
+        let llt_addr = 0x4000;
+        write_llt(&aspace, llt_addr, 0x1000, 0, 0x2000, llt_addr as u32);
+
+        let dev = K230GzipDma::new_named("k230-gzip-dma");
+        dev.set_dma_address_space(aspace);
+        let mmio = K230GzipDmaMmio(dev);
+
+        mmio.write(0x60, 4, llt_addr);
+        mmio.write(0x90, 4, llt_addr);
+        mmio.write(0x8004, 4, 0x8000_0004);
+        mmio.write(0x8008, 4, 4);
+        mmio.write(0x8000, 4, 0x3);
+
+        let _ = tx.send(mmio.read(0x800c, 4));
+    });
+
+    let status = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("zero-progress LLT traversal should terminate");
+    assert_eq!(status & (1 << 10), 0);
 }

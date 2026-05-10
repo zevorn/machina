@@ -51,6 +51,7 @@ const RT_OTP_LEN: usize = 1024;
 
 const DMA_DSC_CFG_4_TAIL: u32 = 1 << 30;
 const DMA_DSC_CFG_4_HEAD: u32 = 1 << 31;
+pub const K230_PUFS_MAX_HASH_LEN: usize = 128 * 1024 * 1024;
 
 const DMA_VERSION_VALUE: u32 = 0x5044_30d6;
 const CRYPTO_VERSION_VALUE: u32 = 0x5043_30d6;
@@ -237,12 +238,18 @@ impl K230Pufs {
             let regs = self.regs.lock();
             (regs.dsc_cfg_0, regs.dsc_cfg_2, regs.dsc_cfg_4)
         };
-        let chunk = read_dma_bytes(&address_space, src, len as usize);
-
+        let len = len as usize;
         let mut input = self.hash_input.lock().unwrap();
         if block_cfg & DMA_DSC_CFG_4_HEAD != 0 {
             input.clear();
         }
+        let Some(total_len) = input.len().checked_add(len) else {
+            return;
+        };
+        if total_len > K230_PUFS_MAX_HASH_LEN {
+            return;
+        }
+        let chunk = read_dma_bytes(&address_space, src, len);
         input.extend_from_slice(&chunk);
 
         let mut regs = self.regs.lock();
