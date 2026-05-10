@@ -4,6 +4,7 @@ use machina_core::address::GPA;
 use machina_memory::AddressSpace;
 
 /// Information returned after a successful load.
+#[derive(Debug)]
 pub struct LoadInfo {
     /// Entry point address.
     pub entry: GPA,
@@ -112,6 +113,17 @@ fn parse_elf_header(data: &[u8]) -> Result<ElfHeader, String> {
     })
 }
 
+/// Pre-validated PT_LOAD descriptor produced by the first pass
+/// of `load_elf`. Once one of these exists every offset is known
+/// to be in bounds and every address sum is known not to wrap, so
+/// the second pass can write without re-checking.
+struct PtLoadSeg {
+    load_addr: u64,
+    p_offset: usize,
+    p_filesz: usize,
+    p_memsz: u64,
+}
+
 /// Load an ELF-64 binary into the address space and return
 /// the entry point.
 ///
@@ -119,6 +131,12 @@ fn parse_elf_header(data: &[u8]) -> Result<ElfHeader, String> {
 /// For ET_DYN (PIE) segments are loaded relative to
 /// `base_addr`.  The `LoadInfo.bias` field carries the
 /// offset so the caller can relocate the entry address.
+///
+/// All PT_LOAD segments are validated in a first pass — header
+/// bounds, file-data bounds, `p_filesz <= p_memsz`, and address
+/// arithmetic are all checked — before any byte is written, so a
+/// malformed ELF cannot leave guest memory in a partially loaded
+/// state.
 pub fn load_elf(
     data: &[u8],
     base_addr: u64,
@@ -128,14 +146,25 @@ pub fn load_elf(
 
     let is_dyn = hdr.e_type == ET_DYN;
 
-    let mut total_loaded: u64 = 0;
+    let mut segs: Vec<PtLoadSeg> = Vec::new();
+    let mut total_memsz: u64 = 0;
     let mut low_addr: u64 = u64::MAX;
     let mut high_addr: u64 = 0;
 
+    // Pass 1: parse and validate every PT_LOAD segment.
     for i in 0..hdr.e_phnum {
-        let off = hdr.e_phoff + i * hdr.e_phentsize;
-        if off + ELF64_PHDR_SIZE > data.len() {
-            return Err("phdr out of bounds".into());
+        let stride = i
+            .checked_mul(hdr.e_phentsize)
+            .ok_or_else(|| format!("phdr {i} offset arithmetic overflow"))?;
+        let off = hdr
+            .e_phoff
+            .checked_add(stride)
+            .ok_or_else(|| format!("phdr {i} offset arithmetic overflow"))?;
+        let off_end = off
+            .checked_add(ELF64_PHDR_SIZE)
+            .ok_or_else(|| format!("phdr {i} extends past usize"))?;
+        if off_end > data.len() {
+            return Err(format!("phdr {i} out of bounds"));
         }
 
         let p_type = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
@@ -143,39 +172,74 @@ pub fn load_elf(
             continue;
         }
 
-        let p_offset =
-            u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap())
-                as usize;
+        let p_offset_u64 =
+            u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
         let p_vaddr =
             u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
         let p_paddr =
             u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap());
-        let p_filesz =
-            u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap())
-                as usize;
+        let p_filesz_u64 =
+            u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap());
         let p_memsz =
             u64::from_le_bytes(data[off + 40..off + 48].try_into().unwrap());
 
-        // For ET_DYN: load address = base_addr + p_vaddr.
-        // For ET_EXEC: load address = p_paddr (absolute).
-        let load_addr = if is_dyn { base_addr + p_vaddr } else { p_paddr };
+        if p_filesz_u64 > p_memsz {
+            return Err(format!("PT_LOAD segment {i}: p_filesz > p_memsz"));
+        }
 
-        if p_offset + p_filesz > data.len() {
+        let p_offset = usize::try_from(p_offset_u64).map_err(|_| {
+            format!("PT_LOAD segment {i}: p_offset exceeds usize")
+        })?;
+        let p_filesz = usize::try_from(p_filesz_u64).map_err(|_| {
+            format!("PT_LOAD segment {i}: p_filesz exceeds usize")
+        })?;
+        let file_end = p_offset.checked_add(p_filesz).ok_or_else(|| {
+            format!("PT_LOAD segment {i}: file range arithmetic overflow")
+        })?;
+        if file_end > data.len() {
             return Err(format!(
-                "PT_LOAD segment {i} file data \
-                 out of bounds"
+                "PT_LOAD segment {i}: segment file data out of bounds"
             ));
         }
 
-        let seg = &data[p_offset..p_offset + p_filesz];
-        write_bytes(as_, GPA::new(load_addr), seg);
+        let load_addr = if is_dyn {
+            base_addr.checked_add(p_vaddr).ok_or_else(|| {
+                format!("PT_LOAD segment {i}: base_addr + p_vaddr overflow")
+            })?
+        } else {
+            p_paddr
+        };
+        let seg_end = load_addr.checked_add(p_memsz).ok_or_else(|| {
+            format!("PT_LOAD segment {i}: load_addr + p_memsz overflow")
+        })?;
+
         if load_addr < low_addr {
             low_addr = load_addr;
         }
+        if seg_end > high_addr {
+            high_addr = seg_end;
+        }
+        total_memsz = total_memsz.checked_add(p_memsz).ok_or_else(|| {
+            format!("PT_LOAD segment {i}: total memsz overflow")
+        })?;
+
+        segs.push(PtLoadSeg {
+            load_addr,
+            p_offset,
+            p_filesz,
+            p_memsz,
+        });
+    }
+
+    // Pass 2: write all validated segments. Arithmetic here cannot
+    // overflow because pass 1 already vetted every address.
+    for s in &segs {
+        let seg = &data[s.p_offset..s.p_offset + s.p_filesz];
+        write_bytes(as_, GPA::new(s.load_addr), seg);
 
         // BSS: zero-fill [p_filesz .. p_memsz)
-        let bss_start = load_addr + p_filesz as u64;
-        let bss_end = load_addr + p_memsz;
+        let bss_start = s.load_addr + s.p_filesz as u64;
+        let bss_end = s.load_addr + s.p_memsz;
         let mut cur = bss_start;
         while cur < bss_end {
             let remain = bss_end - cur;
@@ -187,17 +251,13 @@ pub fn load_elf(
                 cur += 1;
             }
         }
-
-        total_loaded += p_memsz;
-        let seg_end = load_addr + p_memsz;
-        if seg_end > high_addr {
-            high_addr = seg_end;
-        }
     }
 
     // For ET_DYN the actual entry = base_addr + e_entry.
     let entry = if is_dyn {
-        base_addr + hdr.e_entry
+        base_addr
+            .checked_add(hdr.e_entry)
+            .ok_or_else(|| "entry address overflow".to_string())?
     } else {
         hdr.e_entry
     };
@@ -206,7 +266,7 @@ pub fn load_elf(
 
     Ok(LoadInfo {
         entry: GPA::new(entry),
-        size: total_loaded,
+        size: total_memsz,
         low_addr: if low_addr == u64::MAX { 0 } else { low_addr },
         high_addr,
         bias,
@@ -337,8 +397,10 @@ pub fn elf_phys_entry(data: &[u8], virt_entry: u64) -> Option<u64> {
         return None;
     }
     for i in 0..hdr.e_phnum {
-        let off = hdr.e_phoff + i * hdr.e_phentsize;
-        if off + ELF64_PHDR_SIZE > data.len() {
+        let stride = i.checked_mul(hdr.e_phentsize)?;
+        let off = hdr.e_phoff.checked_add(stride)?;
+        let off_end = off.checked_add(ELF64_PHDR_SIZE)?;
+        if off_end > data.len() {
             return None;
         }
         let p_type = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
