@@ -111,6 +111,36 @@ fn k230_pufs_hashes_chunked_sha256_dma_segments() {
 }
 
 #[test]
+fn k230_pufs_reset_clears_partial_hash_state() {
+    let first = b"discarded ";
+    let second = b"kept";
+    let aspace = make_ram_aspace(0x1000);
+    write_bytes(&aspace, 0x100, first);
+    write_bytes(&aspace, 0x200, second);
+
+    let dev = K230Pufs::new_named("k230-pufs");
+    dev.set_dma_address_space(aspace);
+    let mmio = K230PufsMmio(dev.clone());
+
+    run_hash_chunk(&mmio, 0x100, first.len(), 0, DMA_DSC_CFG_4_HEAD);
+    assert_eq!(mmio.read(HMAC_ALEN, 4), first.len() as u64);
+
+    dev.reset_runtime();
+    assert_eq!(mmio.read(HMAC_ALEN, 4), 0);
+
+    run_hash_chunk(
+        &mmio,
+        0x200,
+        second.len(),
+        0,
+        DMA_DSC_CFG_4_HEAD | DMA_DSC_CFG_4_TAIL,
+    );
+
+    let expected = Sha256::digest(second);
+    assert_eq!(uboot_digest(&mmio).as_slice(), expected.as_slice());
+}
+
+#[test]
 fn k230_pufs_rejects_oversized_dma_hash_segment() {
     let aspace = make_ram_aspace(0x1000);
     let dev = K230Pufs::new_named("k230-pufs");

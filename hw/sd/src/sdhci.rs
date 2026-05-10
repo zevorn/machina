@@ -73,12 +73,15 @@ const CLOCK_INTERNAL_STABLE: u16 = 1 << 1;
 const HOST_VERSION_SPEC_3_00: u16 = 0x0002;
 const DEFAULT_BLOCK_SIZE: usize = 512;
 const CMD_ALL_SEND_CID: u8 = 2;
+const CMD_SWITCH_FUNC: u8 = 6;
 const CMD_SEND_CSD: u8 = 9;
 const CMD_SEND_CID: u8 = 10;
 const CMD_STOP_TRANSMISSION: u8 = 12;
+const CMD_READ_SINGLE_BLOCK: u8 = 17;
 const CMD_READ_MULTIPLE_BLOCK: u8 = 18;
 const CMD_WRITE_BLOCK: u8 = 24;
 const CMD_WRITE_MULTIPLE_BLOCK: u8 = 25;
+const ACMD_SEND_SCR: u8 = 51;
 
 #[derive(Debug, PartialEq, Eq)]
 struct SdhciRegs {
@@ -383,7 +386,7 @@ impl Sdhci {
                 let mut write_buffer_len = None;
                 let mut dma_complete = false;
 
-                if bus.data_ready() {
+                if is_read_data_command(cmd) && bus.data_ready() {
                     let transfer_len =
                         block_len * transfer_blocks(cmd, block_count);
                     let mut data = vec![0; transfer_len];
@@ -606,6 +609,16 @@ fn default_capabilities() -> u32 {
 
 fn is_write_data_command(cmd: u8) -> bool {
     matches!(cmd, CMD_WRITE_BLOCK | CMD_WRITE_MULTIPLE_BLOCK)
+}
+
+fn is_read_data_command(cmd: u8) -> bool {
+    matches!(
+        cmd,
+        CMD_SWITCH_FUNC
+            | CMD_READ_SINGLE_BLOCK
+            | CMD_READ_MULTIPLE_BLOCK
+            | ACMD_SEND_SCR
+    )
 }
 
 fn transfer_blocks(cmd: u8, block_count: usize) -> usize {

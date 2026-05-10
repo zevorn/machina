@@ -128,8 +128,8 @@ impl K230Pufs {
     }
 
     pub fn reset_runtime(&self) {
-        *self.regs.lock() = K230PufsRegs::default();
         self.hash_input.lock().unwrap().clear();
+        *self.regs.lock() = K230PufsRegs::default();
     }
 
     fn read_reg(&self, offset: u64, size: u32) -> u64 {
@@ -239,26 +239,38 @@ impl K230Pufs {
             (regs.dsc_cfg_0, regs.dsc_cfg_2, regs.dsc_cfg_4)
         };
         let len = len as usize;
-        let mut input = self.hash_input.lock().unwrap();
-        if block_cfg & DMA_DSC_CFG_4_HEAD != 0 {
-            input.clear();
-        }
-        let Some(total_len) = input.len().checked_add(len) else {
-            return;
+        let (alen, digest) = {
+            let mut input = self.hash_input.lock().unwrap();
+            if block_cfg & DMA_DSC_CFG_4_HEAD != 0 {
+                input.clear();
+            }
+            let Some(total_len) = input.len().checked_add(len) else {
+                return;
+            };
+            if total_len > K230_PUFS_MAX_HASH_LEN {
+                return;
+            }
+            let chunk = read_dma_bytes(&address_space, src, len);
+            input.extend_from_slice(&chunk);
+
+            let alen = input.len() as u32;
+            let digest = if block_cfg & DMA_DSC_CFG_4_TAIL != 0 {
+                let hash = Sha256::digest(input.as_slice());
+                let mut digest = [0; 32];
+                digest.copy_from_slice(&hash);
+                input.clear();
+                Some(digest)
+            } else {
+                None
+            };
+            (alen, digest)
         };
-        if total_len > K230_PUFS_MAX_HASH_LEN {
-            return;
-        }
-        let chunk = read_dma_bytes(&address_space, src, len);
-        input.extend_from_slice(&chunk);
 
         let mut regs = self.regs.lock();
-        regs.hmac_alen = input.len() as u32;
-        if block_cfg & DMA_DSC_CFG_4_TAIL != 0 {
-            let digest = Sha256::digest(input.as_slice());
+        regs.hmac_alen = alen;
+        if let Some(digest) = digest {
             regs.digest_out.fill(0);
             regs.digest_out[..32].copy_from_slice(&digest);
-            input.clear();
         }
     }
 }
