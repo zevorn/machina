@@ -12,7 +12,7 @@ mod riscv_zbs;
 use machina_accel::code_buffer::CodeBuffer;
 use machina_accel::ir::tb::{
     EXCP_EBREAK, EXCP_ECALL, EXCP_MRET, EXCP_SFENCE_VMA, EXCP_SRET, EXCP_UNDEF,
-    EXCP_WFI,
+    EXCP_WFI, TB_EXIT_NOCHAIN,
 };
 use machina_accel::ir::Context;
 use machina_accel::translate::translate_and_execute;
@@ -185,6 +185,9 @@ fn wfi() -> u32 {
 fn sfence_vma(rs1: u32, rs2: u32) -> u32 {
     rv_r(0b0001001, rs2, rs1, 0b000, 0, 0b1110011)
 }
+fn sinval_vma(rs1: u32, rs2: u32) -> u32 {
+    rv_r(0b0001011, rs2, rs1, 0b000, 0, 0b1110011)
+}
 // RV64I W-suffix
 fn addiw(rd: u32, rs1: u32, imm: i32) -> u32 {
     rv_i(imm, rs1, 0b000, rd, OP_IMM32)
@@ -291,6 +294,19 @@ fn run_rv_insns_with_cfg(
 /// Like `run_rv` but with a custom extension config.
 fn run_rv_with_cfg(cpu: &mut RiscvCpu, insn: u32, cfg: RiscvCfg) -> usize {
     run_rv_insns_with_cfg(cpu, &[insn], cfg)
+}
+
+fn run_rv_with_cfg_and_guest_base(
+    cpu: &mut RiscvCpu,
+    insn: u32,
+    cfg: RiscvCfg,
+    guest_base: u64,
+) -> usize {
+    let old_guest_base = cpu.guest_base;
+    cpu.guest_base = guest_base;
+    let exit = run_rv_with_cfg(cpu, insn, cfg);
+    cpu.guest_base = old_guest_base;
+    exit
 }
 
 // ── RV32I: Upper immediate ────────────────────────────────────
@@ -729,6 +745,22 @@ fn test_sfence_vma_with_rs1() {
     assert_eq!(cpu.pc, 4);
     // GPR unchanged (sfence_vma doesn't modify registers).
     assert_eq!(cpu.gpr[5], 0x1000);
+}
+
+#[test]
+fn test_sinval_vma_exits_like_sfence_vma_with_svinval() {
+    let mut cpu = RiscvCpu::new();
+    let exit =
+        run_rv_with_cfg(&mut cpu, sinval_vma(0, 0), RiscvCfg::THEAD_C908);
+    assert_eq!(exit, EXCP_SFENCE_VMA as usize);
+    assert_eq!(cpu.pc, 4);
+}
+
+#[test]
+fn test_sinval_vma_rejected_without_svinval() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, sinval_vma(0, 0), cfg_rv64i_only());
+    assert_eq!(exit, EXCP_UNDEF as usize);
 }
 
 // ── RV64I: W-suffix ALU ───────────────────────────────────────
@@ -1571,9 +1603,24 @@ fn cfg_rv64i_only() -> RiscvCfg {
         ext_zbs: false,
         ext_zfh: false,
         ext_zfhmin: false,
+        ext_svpbmt: false,
         ext_ssvnapot: false,
         ext_svadu: false,
+        ext_svinval: false,
         ext_sstc: false,
+        ext_smepmp: false,
+        ext_sscofpmf: false,
+        ext_xtheadba: false,
+        ext_xtheadbb: false,
+        ext_xtheadbs: false,
+        ext_xtheadcmo: false,
+        ext_xtheadcondmov: false,
+        ext_xtheadfmv: false,
+        ext_xtheadfmemidx: false,
+        ext_xtheadmac: false,
+        ext_xtheadmemidx: false,
+        ext_xtheadmempair: false,
+        ext_xtheadsync: false,
     }
 }
 
@@ -1668,6 +1715,263 @@ fn test_ext_c_insn_rejected_without_c() {
     // C.LI x1, 42 — should fail without C extension
     let exit = run_rvc_with_cfg(&mut cpu, c_li(1, 42), cfg);
     assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+#[test]
+fn test_thead_cmo_hint_accepted_with_xtheadcmo() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x0100_000b, RiscvCfg::THEAD_C908);
+    assert_ne!(exit, EXCP_UNDEF as usize);
+    assert_eq!(cpu.pc, 4);
+}
+
+#[test]
+fn test_thead_cmo_hint_rejected_without_xtheadcmo() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x0100_000b, cfg_rv64i_only());
+    assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+#[test]
+fn test_thead_sync_hint_exits_tb_with_xtheadsync() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x01b0_000b, RiscvCfg::THEAD_C908);
+    assert_eq!(exit, TB_EXIT_NOCHAIN as usize);
+    assert_eq!(cpu.pc, 4);
+}
+
+#[test]
+fn test_thead_sfence_vmas_exits_as_sfence_vma() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x0400_000b, RiscvCfg::THEAD_C908);
+    assert_eq!(exit, EXCP_SFENCE_VMA as usize);
+    assert_eq!(cpu.pc, 4);
+}
+
+#[test]
+fn test_thead_sync_hint_rejected_without_xtheadsync() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x01b0_000b, cfg_rv64i_only());
+    assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+#[test]
+fn test_thead_sfence_vmas_rejected_without_xtheadsync() {
+    let mut cpu = RiscvCpu::new();
+    let exit = run_rv_with_cfg(&mut cpu, 0x0400_000b, cfg_rv64i_only());
+    assert_eq!(exit, EXCP_UNDEF as usize);
+}
+
+fn th_addsl(rd: u32, rs1: u32, rs2: u32, shamt: u32) -> u32 {
+    (shamt << 25) | (rs2 << 20) | (rs1 << 15) | (0b001 << 12) | (rd << 7) | 0x0b
+}
+
+fn th_ext(rd: u32, rs1: u32, lsb: u32, msb: u32) -> u32 {
+    (msb << 26) | (lsb << 20) | (rs1 << 15) | (0b010 << 12) | (rd << 7) | 0x0b
+}
+
+fn th_extu(rd: u32, rs1: u32, lsb: u32, msb: u32) -> u32 {
+    (msb << 26) | (lsb << 20) | (rs1 << 15) | (0b011 << 12) | (rd << 7) | 0x0b
+}
+
+fn th_srri(rd: u32, rs1: u32, shamt: u32) -> u32 {
+    (0b000100 << 26)
+        | (shamt << 20)
+        | (rs1 << 15)
+        | (0b001 << 12)
+        | (rd << 7)
+        | 0x0b
+}
+
+fn th_srriw(rd: u32, rs1: u32, shamt: u32) -> u32 {
+    (0b0001010 << 25)
+        | (shamt << 20)
+        | (rs1 << 15)
+        | (0b001 << 12)
+        | (rd << 7)
+        | 0x0b
+}
+
+fn th_condmov(rd: u32, rs1: u32, rs2: u32, funct7: u32) -> u32 {
+    (funct7 << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (0b001 << 12)
+        | (rd << 7)
+        | 0x0b
+}
+
+fn th_memidx(
+    top5: u32,
+    imm2: u32,
+    rs2: u32,
+    rs1: u32,
+    is_load: bool,
+    rd: u32,
+) -> u32 {
+    (top5 << 27)
+        | (imm2 << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | ((if is_load { 0b100 } else { 0b101 }) << 12)
+        | (rd << 7)
+        | 0x0b
+}
+
+fn th_lrw(rd: u32, rs1: u32, rs2: u32, imm2: u32) -> u32 {
+    th_memidx(8, imm2, rs2, rs1, true, rd)
+}
+
+fn th_lurw(rd: u32, rs1: u32, rs2: u32, imm2: u32) -> u32 {
+    th_memidx(10, imm2, rs2, rs1, true, rd)
+}
+
+fn th_lrwu(rd: u32, rs1: u32, rs2: u32, imm2: u32) -> u32 {
+    th_memidx(24, imm2, rs2, rs1, true, rd)
+}
+
+fn th_srw(rs_data: u32, rs1: u32, rs2: u32, imm2: u32) -> u32 {
+    th_memidx(8, imm2, rs2, rs1, false, rs_data)
+}
+
+fn th_srb(rs_data: u32, rs1: u32, rs2: u32, imm2: u32) -> u32 {
+    th_memidx(0, imm2, rs2, rs1, false, rs_data)
+}
+
+#[test]
+fn test_xtheadba_addsl() {
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[2] = 5;
+    cpu.gpr[3] = 7;
+    run_rv_with_cfg(&mut cpu, th_addsl(1, 2, 3, 3), RiscvCfg::THEAD_C908);
+    assert_eq!(cpu.gpr[1], 5 + (7 << 3));
+}
+
+#[test]
+fn test_xtheadbb_extract_and_rotate() {
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[2] = 0xf0;
+    run_rv_with_cfg(&mut cpu, th_extu(1, 2, 4, 7), RiscvCfg::THEAD_C908);
+    assert_eq!(cpu.gpr[1], 0xf);
+
+    cpu.gpr[2] = 0x80;
+    run_rv_with_cfg(&mut cpu, th_ext(3, 2, 7, 7), RiscvCfg::THEAD_C908);
+    assert_eq!(cpu.gpr[3], u64::MAX);
+
+    cpu.gpr[4] = 0x0123_4567_89ab_cdef;
+    run_rv_with_cfg(&mut cpu, th_srri(5, 4, 12), RiscvCfg::THEAD_C908);
+    assert_eq!(cpu.gpr[5], 0x0123_4567_89ab_cdefu64.rotate_right(12));
+
+    cpu.gpr[6] = 0x8000_0001;
+    run_rv_with_cfg(&mut cpu, th_srriw(7, 6, 4), RiscvCfg::THEAD_C908);
+    let expected = 0x8000_0001u32.rotate_right(4) as i32 as i64 as u64;
+    assert_eq!(cpu.gpr[7], expected);
+}
+
+#[test]
+fn test_xtheadcondmov_mveqz_mvnez() {
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[1] = 0xaa;
+    cpu.gpr[2] = 0xbb;
+    cpu.gpr[3] = 0;
+    run_rv_with_cfg(
+        &mut cpu,
+        th_condmov(1, 2, 3, 0b0100000),
+        RiscvCfg::THEAD_C908,
+    );
+    assert_eq!(cpu.gpr[1], 0xbb);
+
+    cpu.gpr[1] = 0xcc;
+    cpu.gpr[3] = 1;
+    run_rv_with_cfg(
+        &mut cpu,
+        th_condmov(1, 2, 3, 0b0100001),
+        RiscvCfg::THEAD_C908,
+    );
+    assert_eq!(cpu.gpr[1], 0xbb);
+}
+
+#[test]
+fn test_xtheadmemidx_lrw_sign_extends_word() {
+    let mut data = [0u8; 64];
+    data[24..28].copy_from_slice(&0x8000_0011u32.to_le_bytes());
+
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[2] = 8;
+    cpu.gpr[3] = 4;
+    run_rv_with_cfg_and_guest_base(
+        &mut cpu,
+        th_lrw(1, 2, 3, 2),
+        RiscvCfg::THEAD_C908,
+        data.as_mut_ptr() as u64,
+    );
+
+    assert_eq!(cpu.gpr[1], 0xffff_ffff_8000_0011);
+}
+
+#[test]
+fn test_xtheadmemidx_lurw_zero_extends_offset_source() {
+    let mut data = [0u8; 8];
+    data[0..4].copy_from_slice(&0x8000_0011u32.to_le_bytes());
+
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[2] = 0;
+    cpu.gpr[3] = 0xffff_ffff;
+    let guest_base = (data.as_mut_ptr() as u64).wrapping_sub(0xffff_ffff);
+    run_rv_with_cfg_and_guest_base(
+        &mut cpu,
+        th_lurw(1, 2, 3, 0),
+        RiscvCfg::THEAD_C908,
+        guest_base,
+    );
+
+    assert_eq!(cpu.gpr[1], 0xffff_ffff_8000_0011);
+}
+
+#[test]
+fn test_xtheadmemidx_lrwu_zero_extends_word() {
+    let mut data = [0u8; 64];
+    data[20..24].copy_from_slice(&0x8000_0011u32.to_le_bytes());
+
+    let mut cpu = RiscvCpu::new();
+    cpu.gpr[2] = 20;
+    cpu.gpr[3] = 0;
+    run_rv_with_cfg_and_guest_base(
+        &mut cpu,
+        th_lrwu(1, 2, 3, 0),
+        RiscvCfg::THEAD_C908,
+        data.as_mut_ptr() as u64,
+    );
+
+    assert_eq!(cpu.gpr[1], 0x8000_0011);
+}
+
+#[test]
+fn test_xtheadmemidx_srw_and_srb_store_register_source() {
+    let mut data = [0u8; 64];
+    let mut cpu = RiscvCpu::new();
+    let guest_base = data.as_mut_ptr() as u64;
+
+    cpu.gpr[2] = 8;
+    cpu.gpr[3] = 4;
+    cpu.gpr[4] = 0x1122_3344;
+    run_rv_with_cfg_and_guest_base(
+        &mut cpu,
+        th_srw(4, 2, 3, 2),
+        RiscvCfg::THEAD_C908,
+        guest_base,
+    );
+    assert_eq!(&data[24..28], &[0x44, 0x33, 0x22, 0x11]);
+
+    cpu.gpr[5] = 0xab;
+    cpu.gpr[6] = 23;
+    run_rv_with_cfg_and_guest_base(
+        &mut cpu,
+        th_srb(5, 2, 6, 0),
+        RiscvCfg::THEAD_C908,
+        guest_base,
+    );
+    assert_eq!(data[31], 0xab);
 }
 
 // ── Zicbom / Zicboz — CBO instruction encoders ─────

@@ -42,17 +42,77 @@ make release
 
 ## 机器类型
 
-Machina 当前暴露两个用户可见的参考机器：
+Machina 当前暴露三个用户可见机器：
 
 | 机器 | 客户 ISA | 用途 |
 |------|----------|------|
 | `riscv64-ref` | RISC-V 64-bit | RISC-V 参考平台，包含 SBI、PLIC、ACLINT、UART 和 VirtIO MMIO |
+| `k230` | RISC-V 64-bit | Kendryte K230 SDK 兼容平台，包含 C908 CPU profile、PLIC、ACLINT、UART、WDT、带 `-dtb` 的 Linux 直接启动和 SDK U-Boot loader 启动 |
 | `loongarch64-ref` | LoongArch64 | LoongArch64 参考平台，包含 Linux 直接启动、IOCSR、IPI、EIOINTC、PCH-PIC、UART 和 VirtIO block |
 
 列出支持的机器：
 
 ```bash
 ./target/release/machina -M ?
+```
+
+## 启动 K230 SDK Linux
+
+`k230` machine 对齐 QEMU 的 K230 SDK 兼容启动约定：Machina 不生成 K230
+设备树。Linux direct boot 需要传入 SDK DTB，固件用它把板级拓扑交给
+Linux，Machina 也会基于它更新 `/chosen` 里的 `-append` 和 `-initrd`
+信息。
+
+请把 SDK Linux 编译成标准 RISC-V PTE。当前 Machina K230 路径暂不建模
+T-HEAD MAEE 页属性位，这一点和作为 oracle 的 QEMU K230 路径保持一致。
+在 Kendryte SDK 源码树里，重编 little-core Linux 时传入
+`-DQEMU_NO_THEAD_MAEE`：
+
+```bash
+cd ~/k230_sdk
+make CONF=k230_canmv_defconfig linux-clean
+make CONF=k230_canmv_defconfig \
+    KCFLAGS="-DDBGLV=0 -DQEMU_NO_THEAD_MAEE" \
+    linux-rebuild
+cp output/k230_canmv_defconfig/little/linux/arch/riscv/boot/Image \
+   output/k230_canmv_defconfig/images/little-core/Image
+```
+
+Linux direct boot 使用 SDK 的 `Image`、`k230.dtb` 和 initramfs：
+
+```bash
+SDK=~/k230_sdk/output/k230_canmv_defconfig
+./target/release/machina -M k230 \
+    -kernel "$SDK/images/little-core/Image" \
+    -dtb "$SDK/images/little-core/k230.dtb" \
+    -initrd "$SDK/images/little-core/rootfs.cpio.gz" \
+    -append "console=ttyS0,115200 earlycon=sbi cma=0" \
+    -nographic
+```
+
+SDK U-Boot 流程用 `-bios` 从 M-mode 启动 U-Boot。在 SDK 存储路径建模前，
+先通过 loader device 把 OpenSBI、Linux、initrd 和 DTB 放入内存，然后在
+U-Boot 里手动执行 `bootm`：
+
+```bash
+SDK=~/k230_sdk/output/k230_canmv_defconfig
+IMAGE=$SDK/images/little-core/Image
+INITRD=$SDK/images/little-core/rootfs.cpio.gz
+DTB=$SDK/images/little-core/k230.dtb
+FWJUMP_UIMAGE=/tmp/k230-fw-jump.uImage
+
+"$SDK/little/buildroot-ext/host/bin/mkimage" \
+    -A riscv -O linux -T kernel -C none \
+    -a 0x08000000 -e 0x08000000 -n opensbi \
+    -d "$SDK/images/little-core/fw_jump.bin" "$FWJUMP_UIMAGE"
+
+./target/release/machina -M k230 \
+    -bios "$SDK/little/uboot/u-boot" \
+    -device loader,file="$FWJUMP_UIMAGE",addr=0x0c100000,force-raw=on \
+    -device loader,file="$IMAGE",addr=0x08200000,force-raw=on \
+    -device loader,file="$INITRD",addr=0x0a100000,force-raw=on \
+    -device loader,file="$DTB",addr=0x0a000000,force-raw=on \
+    -nographic
 ```
 
 ## 在 Machina 上启动 RISC-V Linux 内核
@@ -238,6 +298,52 @@ find . | cpio -o --format=newc | gzip > ../rootfs.cpio.gz
 | DRAM | `0x8000_0000` | — |
 
 指令集：`rv64imafdc_zba_zbb_zbc_zbs_zicsr_zifencei`
+
+## 在 Machina 上启动 K230 SDK Linux
+
+`k230` machine 对齐 QEMU 的 K230 SDK 兼容板级模型，使用 T-HEAD
+C908 CPU profile，并且不生成 K230 device tree。Linux 直接启动时需要
+通过 `-dtb` 传入 SDK DTB，Machina 会把它交给 OpenSBI，并根据
+`-append` 与 `-initrd` 更新 `/chosen`。裸机、RTOS 或自带 DTB 的固件可
+以省略 `-dtb`。
+
+### K230 SDK Linux 直接启动
+
+```bash
+SDK=k230_sdk/output/k230_canmv_defconfig
+./target/release/machina -M k230 \
+    -kernel "$SDK/images/little-core/Image" \
+    -dtb "$SDK/images/little-core/k230.dtb" \
+    -initrd "$SDK/images/little-core/rootfs.cpio.gz" \
+    -append "console=ttyS0,115200 earlycon=sbi cma=0" \
+    -nographic
+```
+
+### K230 SDK U-Boot 启动
+
+此流程通过 `-bios` 从 M-mode 启动 SDK U-Boot。在 SDK 存储路径建模之前，
+需要用 loader device 把 OpenSBI、Linux、initrd 和 DTB 放入 RAM，再手动
+执行 `bootm`。Linux Image 需要用标准 RISC-V PTE bit 重新构建后再在
+Machina 下运行。
+
+```bash
+SDK=k230_sdk/output/k230_canmv_defconfig
+IMAGE=$SDK/images/little-core/Image
+INITRD=$SDK/images/little-core/rootfs.cpio.gz
+DTB=$SDK/images/little-core/k230.dtb
+FWJUMP_UIMAGE=/tmp/k230-fw-jump.uImage
+"$SDK/little/buildroot-ext/host/bin/mkimage" \
+    -A riscv -O linux -T kernel -C none \
+    -a 0x08000000 -e 0x08000000 -n opensbi \
+    -d "$SDK/images/little-core/fw_jump.bin" "$FWJUMP_UIMAGE"
+./target/release/machina -M k230 \
+    -bios "$SDK/little/uboot/u-boot" \
+    -device loader,file="$FWJUMP_UIMAGE",addr=0x0c100000,force-raw=on \
+    -device loader,file="$IMAGE",addr=0x08200000,force-raw=on \
+    -device loader,file="$INITRD",addr=0x0a100000,force-raw=on \
+    -device loader,file="$DTB",addr=0x0a000000,force-raw=on \
+    -nographic
+```
 
 ## 在 Machina 上启动 LoongArch64 Linux
 

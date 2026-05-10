@@ -1,5 +1,7 @@
 //! Watchdog devices.
 
+pub mod k230;
+
 use std::sync::Arc;
 
 use machina_core::device_cell::DeviceRegs;

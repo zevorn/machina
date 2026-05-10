@@ -977,6 +977,23 @@ fn test_serve_integration_full_path() {
     let _ = exec_handle.join();
 }
 
+#[test]
+fn test_gdb_memory_access_uses_configured_ram_base() {
+    let mut ram = vec![0u8; 16];
+    ram[0..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+    let gs = GdbState::new();
+    gs.set_mem_access(ram.as_ptr(), ram.len() as u64, 0, 0);
+
+    assert_eq!(gs.read_memory(0, 4), vec![0xde, 0xad, 0xbe, 0xef]);
+    assert!(gs.write_memory(4, &[0xca, 0xfe]));
+    assert_eq!(gs.read_memory(4, 2), vec![0xca, 0xfe]);
+
+    let read = std::panic::catch_unwind(|| gs.read_memory(u64::MAX, 8));
+    assert_eq!(read.unwrap(), vec![0; 8]);
+    assert!(!gs.write_memory(u64::MAX, &[0xaa]));
+}
+
 // ── Production path: subprocess GDB integration test ──
 
 use std::process::{Child, Command, Stdio};

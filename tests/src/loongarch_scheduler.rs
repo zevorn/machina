@@ -42,6 +42,8 @@ fn default_opts() -> MachineOpts {
         nographic: false,
         drive: None,
         initrd: None,
+        dtb: None,
+        loaders: Vec::new(),
         netdev: None,
     }
 }

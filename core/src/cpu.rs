@@ -12,6 +12,8 @@ pub enum ArchExitAction {
     FlushAllTb,
     FlushDirtyTbPages(Vec<u64>),
     FlushPendingTb,
+    FlushPendingTbInstretDiscarded,
+    FlushPendingTbNonRetired(u16),
 }
 
 /// Trait for guest CPU state used by the execution loop.
@@ -78,6 +80,9 @@ pub trait GuestCpu {
     fn handle_priv_csr(&mut self) -> bool {
         false
     }
+    fn take_instret_write_suppression(&mut self) -> bool {
+        false
+    }
 
     /// Check whether any interrupt is pending (regardless
     /// of whether it can be delivered in the current
@@ -115,9 +120,18 @@ pub trait GuestCpu {
         false
     }
 
+    /// Tail instructions in the just-executed TB that did not
+    /// architecturally retire for `exit_code`.
+    fn tb_exit_nonretired_insns(&self, _exit_code: u64) -> u16 {
+        0
+    }
+
     /// Advance architecture runtime state after one translated TB executed.
+    ///
     /// `guest_size` is the translated guest byte span for the TB.
-    fn on_tb_executed(&mut self, _guest_size: u32) {}
+    /// `guest_insns` is the guest instruction count for retired-instruction
+    /// accounting after architecture-specific suppressions.
+    fn on_tb_executed(&mut self, _guest_size: u32, _guest_insns: u16) {}
 
     /// Returns true if all TBs should be invalidated
     /// (e.g. after satp write). Clears the flag.

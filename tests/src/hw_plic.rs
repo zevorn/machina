@@ -197,15 +197,14 @@ fn test_plic_set_irq_propagates() {
     plic.set_irq(1, true);
     assert!(sink.level(out_irq), "output should go high after set_irq");
 
-    // Deassert source 1. With edge-triggered semantics,
-    // pending stays set until claimed. Output remains high.
+    // Deassert source 1. QEMU's SiFive PLIC ignores low input updates;
+    // pending remains latched until software claims it.
     plic.set_irq(1, false);
     assert!(
         sink.level(out_irq),
-        "output stays high until claimed (edge-triggered)"
+        "output should stay high until pending is claimed"
     );
 
-    // Claim and complete to clear.
     let claimed = plic.read(0x200004, 4);
     assert_eq!(claimed, 1);
     plic.write(0x200004, 4, 1); // complete
@@ -240,11 +239,12 @@ fn test_plic_claim_on_read() {
     assert_eq!(claimed2, 0, "second claim should return 0");
 }
 
-/// Edge-triggered PLIC: complete does NOT re-pend even if
-/// the source wire is still high. A new interrupt requires
-/// the device to de-assert and re-assert (0→1 edge).
+/// QEMU's SiFive PLIC input path treats each device `set_irq`
+/// update as authoritative level state. Calling `set_irq(true)`
+/// again must refresh pending even if the source had not been
+/// lowered between claim and the next device-side update.
 #[test]
-fn test_plic_edge_triggered_no_resample() {
+fn test_plic_level_high_update_refreshes_pending_after_claim() {
     let plic = Plic::new(64, 1);
 
     let sink = Arc::new(TestIrqSink::new(16));
@@ -264,24 +264,24 @@ fn test_plic_edge_triggered_no_resample() {
     let claimed = plic.read(0x200004, 4);
     assert_eq!(claimed, 1);
 
-    // Complete while source still high — should NOT re-pend.
-    plic.write(0x200004, 4, 1);
+    // Device reports the line high again while the previous claim is still
+    // outstanding. This is how UART THR-empty can feed the next byte without
+    // needing an artificial low pulse at the PLIC input.
+    plic.set_irq(1, true);
     let pending = plic.read(0x1000, 4);
-    assert_eq!(
+    assert_ne!(
         pending & (1 << 1),
         0,
-        "pending must NOT re-set on complete (edge-triggered)"
+        "pending should refresh on repeated high level updates"
     );
 
-    // De-assert then re-assert → new pending.
+    plic.write(0x200004, 4, 1);
+    assert!(sink.level(out_irq));
+
+    assert_eq!(plic.read(0x200004, 4), 1);
     plic.set_irq(1, false);
-    plic.set_irq(1, true);
-    let pending2 = plic.read(0x1000, 4);
-    assert_ne!(
-        pending2 & (1 << 1),
-        0,
-        "pending should be set after 0→1 edge"
-    );
+    plic.write(0x200004, 4, 1);
+    assert!(!sink.level(out_irq));
 }
 
 #[test]

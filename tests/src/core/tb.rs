@@ -6,6 +6,7 @@ fn tb_new() {
     assert_eq!(tb.pc, 0x1000);
     assert_eq!(tb.size, 0);
     assert_eq!(tb.icount, 0);
+    assert_eq!(tb.instret_discarded, 0);
     assert_eq!(tb.jmp_insn_offset, [None, None]);
     assert_eq!(tb.jmp_reset_offset, [None, None]);
     let jmp = tb.jmp.lock().unwrap();

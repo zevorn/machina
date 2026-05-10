@@ -5,9 +5,10 @@ use crate::plat::{self, JmpBuf};
 use super::{ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING};
 use crate::cpu::{ArchExitAction, GuestCpu};
 use crate::ir::context::Context;
+use crate::ir::opcode::Opcode;
 use crate::ir::tb::{
     cflags::CF_SINGLE_STEP, decode_tb_exit, TranslationBlock, EXCP_ARCH_BASE,
-    EXCP_UNDEF, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
+    EXCP_PRIV_CSR, EXCP_UNDEF, EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
 };
 use crate::translate::translate;
 use crate::HostCodeGen;
@@ -71,6 +72,10 @@ where
 
     'dispatch: loop {
         if plat::do_setjmp(jmp_ptr) != 0 {
+            if per_cpu.atomic_lock_held {
+                per_cpu.atomic_lock_held = false;
+                shared.atomic_lock.force_unlock();
+            }
             // Helper raised an exception via longjmp.
             next_tb_hint = None;
         }
@@ -164,17 +169,30 @@ where
             continue;
         }
 
-        let _atomic_guard = if shared.tb_store.get(tb_idx).contains_atomic {
-            Some(shared.atomic_lock.lock().unwrap())
+        let raw_exit = if shared.tb_store.get(tb_idx).contains_atomic {
+            let atomic_guard = shared.atomic_lock.lock();
+            per_cpu.atomic_lock_held = true;
+            let raw_exit = cpu_tb_exec(shared, cpu, tb_idx);
+            per_cpu.atomic_lock_held = false;
+            drop(atomic_guard);
+            raw_exit
         } else {
-            None
+            cpu_tb_exec(shared, cpu, tb_idx)
         };
-        let raw_exit = cpu_tb_exec(shared, cpu, tb_idx);
-        drop(_atomic_guard);
         let (last_tb, exit_code) = decode_tb_exit(raw_exit);
 
         let src_tb = last_tb.unwrap_or(tb_idx);
-        cpu.on_tb_executed(shared.tb_store.get(src_tb).size);
+        let tb = shared.tb_store.get(src_tb);
+        let tb_size = tb.size;
+        let nonretired = cpu.tb_exit_nonretired_insns(exit_code as u64);
+        let instret = tb
+            .icount
+            .saturating_sub(tb.instret_discarded)
+            .saturating_sub(nonretired);
+        let account_after_arch_exit = exit_code == EXCP_PRIV_CSR as usize;
+        if !account_after_arch_exit {
+            cpu.on_tb_executed(tb_size, instret);
+        }
 
         // Self-modifying code detection: if stores wrote
         // to pages containing translated code, invalidate
@@ -304,7 +322,23 @@ where
             }
             v if v >= EXCP_ARCH_BASE as usize => {
                 per_cpu.stats.real_exit += 1;
-                match cpu.handle_arch_exit(v as u64) {
+                let action = cpu.handle_arch_exit(v as u64);
+                if account_after_arch_exit {
+                    let (post_discarded, post_nonretired) = match &action {
+                        ArchExitAction::FlushPendingTbInstretDiscarded => {
+                            (tb.icount, 0)
+                        }
+                        ArchExitAction::FlushPendingTbNonRetired(n) => (0, *n),
+                        _ => (0, 0),
+                    };
+                    cpu.on_tb_executed(
+                        tb_size,
+                        instret
+                            .saturating_sub(post_discarded)
+                            .saturating_sub(post_nonretired),
+                    );
+                }
+                match action {
                     ArchExitAction::Continue => {}
                     ArchExitAction::Halted => return ExitReason::Halted,
                     ArchExitAction::Ecall { priv_level } => {
@@ -338,7 +372,9 @@ where
                         per_cpu.jump_cache.invalidate();
                         next_tb_hint = None;
                     }
-                    ArchExitAction::FlushPendingTb => {
+                    ArchExitAction::FlushPendingTb
+                    | ArchExitAction::FlushPendingTbInstretDiscarded
+                    | ArchExitAction::FlushPendingTbNonRetired(_) => {
                         flush_pending_tbs(
                             shared,
                             per_cpu,
@@ -428,8 +464,15 @@ where
     // validation. After sfence.vma, the TLB is flushed
     // so this triggers a page walk in gen_code.
     // cur_phys == pc means bare/M-mode (no translation).
-    // cur_phys == u64::MAX means unknown (skip check).
+    // cur_phys == u64::MAX means the code TLB does not
+    // currently know this VA's physical page; do not reuse
+    // a cached TB for the same VA because the mapping may
+    // have changed after sfence.vma/satp activity.
     let cur_phys = cpu.translate_pc(pc);
+    if cur_phys == u64::MAX {
+        per_cpu.stats.translate += 1;
+        return tb_gen_code(shared, per_cpu, cpu, pc, flags, 0);
+    }
 
     // Fast path: jump cache (per-CPU, no lock needed)
     if let Some(idx) = per_cpu.jump_cache.lookup(pc) {
@@ -438,7 +481,7 @@ where
             && tb.gen.load(Ordering::Acquire) == shared.tb_store.global_gen()
             && tb.pc == pc
             && tb.flags == flags
-            && (cur_phys == u64::MAX || tb.phys_pc == cur_phys)
+            && tb.phys_pc == cur_phys
         {
             per_cpu.stats.jc_hit += 1;
             return Some(idx);
@@ -448,7 +491,7 @@ where
     // Slow path: hash table.
     if let Some(idx) = shared.tb_store.lookup(pc, flags) {
         let tb = shared.tb_store.get(idx);
-        if cur_phys == u64::MAX || tb.phys_pc == cur_phys {
+        if tb.phys_pc == cur_phys {
             per_cpu.jump_cache.insert(pc, idx);
             per_cpu.stats.ht_hit += 1;
             return Some(idx);
@@ -490,8 +533,12 @@ where
     // PC while we waited for the lock.
     if !ephemeral {
         if let Some(idx) = shared.tb_store.lookup(pc, flags) {
-            per_cpu.jump_cache.insert(pc, idx);
-            return Some(idx);
+            let cur_phys = cpu.translate_pc(pc);
+            let tb = shared.tb_store.get(idx);
+            if cur_phys != u64::MAX && tb.phys_pc == cur_phys {
+                per_cpu.jump_cache.insert(pc, idx);
+                return Some(idx);
+            }
         }
     }
 
@@ -542,10 +589,13 @@ where
         }
         return None;
     }
+    let guest_insns = count_guest_insns(&guard.ir_ctx);
     let phys_pc = cpu.last_phys_pc();
     unsafe {
         let tb = shared.tb_store.get_mut(tb_idx);
         tb.size = guest_size;
+        tb.icount = guest_insns;
+        tb.instret_discarded = guard.ir_ctx.instret_discarded;
         tb.phys_pc = phys_pc;
         // Stamp TB with current global generation so
         // that invalidate_all's O(1) generation bump
@@ -601,6 +651,15 @@ where
     }
 
     Some(tb_idx)
+}
+
+fn count_guest_insns(ir: &Context) -> u16 {
+    let count = ir
+        .ops()
+        .iter()
+        .filter(|op| op.opc == Opcode::InsnStart)
+        .count();
+    u16::try_from(count).unwrap_or(u16::MAX).max(1)
 }
 
 /// Execute a single TB and return the exit value.

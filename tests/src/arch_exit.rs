@@ -96,6 +96,15 @@ fn task46_riscv_ecall_dispatch_returns_privilege_action() {
 }
 
 #[test]
+fn task46_riscv_sfence_vma_flushes_tlb_and_tbs() {
+    let (mut cpu, _addr_space) = riscv_cpu();
+    assert_eq!(
+        cpu.handle_arch_exit(EXCP_RISCV_SFENCE_VMA),
+        ArchExitAction::FlushAllTb
+    );
+}
+
+#[test]
 fn task46_loongarch_done_and_idle_dispatch_through_arch_handler() {
     let mut cpu = loongarch_cpu();
     assert_eq!(

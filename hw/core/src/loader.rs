@@ -9,6 +9,8 @@ pub struct LoadInfo {
     pub entry: GPA,
     /// Total bytes loaded.
     pub size: u64,
+    /// Lowest guest physical address written.
+    pub low_addr: u64,
     /// Highest guest physical address written
     /// (load_addr + p_memsz of the last segment).
     pub high_addr: u64,
@@ -27,6 +29,7 @@ pub fn load_binary(
     Ok(LoadInfo {
         entry: addr,
         size: data.len() as u64,
+        low_addr: addr.0,
         high_addr: end,
         bias: None,
     })
@@ -126,6 +129,7 @@ pub fn load_elf(
     let is_dyn = hdr.e_type == ET_DYN;
 
     let mut total_loaded: u64 = 0;
+    let mut low_addr: u64 = u64::MAX;
     let mut high_addr: u64 = 0;
 
     for i in 0..hdr.e_phnum {
@@ -165,6 +169,9 @@ pub fn load_elf(
 
         let seg = &data[p_offset..p_offset + p_filesz];
         write_bytes(as_, GPA::new(load_addr), seg);
+        if load_addr < low_addr {
+            low_addr = load_addr;
+        }
 
         // BSS: zero-fill [p_filesz .. p_memsz)
         let bss_start = load_addr + p_filesz as u64;
@@ -200,6 +207,7 @@ pub fn load_elf(
     Ok(LoadInfo {
         entry: GPA::new(entry),
         size: total_loaded,
+        low_addr: if low_addr == u64::MAX { 0 } else { low_addr },
         high_addr,
         bias,
     })
@@ -317,5 +325,37 @@ pub fn elf_find_symbol(data: &[u8], name: &str) -> Option<u64> {
         }
     }
 
+    None
+}
+
+/// Convert an ET_EXEC virtual entry address to its physical
+/// counterpart by applying the entry's PT_LOAD segment offset
+/// to p_paddr.
+pub fn elf_phys_entry(data: &[u8], virt_entry: u64) -> Option<u64> {
+    let hdr = parse_elf_header(data).ok()?;
+    if hdr.e_type == ET_DYN {
+        return None;
+    }
+    for i in 0..hdr.e_phnum {
+        let off = hdr.e_phoff + i * hdr.e_phentsize;
+        if off + ELF64_PHDR_SIZE > data.len() {
+            return None;
+        }
+        let p_type = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+        if p_type != PT_LOAD {
+            continue;
+        }
+        let p_vaddr =
+            u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
+        let p_paddr =
+            u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap());
+        let p_memsz =
+            u64::from_le_bytes(data[off + 40..off + 48].try_into().unwrap());
+        if virt_entry >= p_vaddr && virt_entry < p_vaddr.saturating_add(p_memsz)
+        {
+            let offset = virt_entry.checked_sub(p_vaddr)?;
+            return p_paddr.checked_add(offset);
+        }
+    }
     None
 }

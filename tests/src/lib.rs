@@ -51,6 +51,10 @@ mod hw_ipi;
 #[cfg(test)]
 mod hw_irq;
 #[cfg(test)]
+mod hw_k230_machine;
+#[cfg(test)]
+mod hw_k230_wdt;
+#[cfg(test)]
 mod hw_loader;
 #[cfg(test)]
 mod hw_misc;
@@ -131,6 +135,8 @@ mod monitor;
 #[cfg(test)]
 mod oracle;
 #[cfg(test)]
+mod riscv_cpu_model;
+#[cfg(test)]
 mod riscv_csr;
 #[cfg(test)]
 mod riscv_exception;
@@ -140,6 +146,8 @@ mod riscv_mmu;
 mod riscv_pmp;
 #[cfg(test)]
 mod riscv_pmp_internal;
+#[cfg(test)]
+mod riscv_thead_csr;
 #[cfg(test)]
 mod softfloat;
 #[cfg(test)]

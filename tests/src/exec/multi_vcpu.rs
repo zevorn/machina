@@ -29,6 +29,9 @@ impl GuestCpu for TestCpu {
     fn get_flags(&self) -> u32 {
         0
     }
+    fn translate_pc(&self, pc: u64) -> u64 {
+        pc
+    }
     fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
         let base = self.code.as_ptr();
         let avail = (self.code.len() as u64 - pc) / 4;
@@ -117,6 +120,7 @@ fn new_per_cpu() -> PerCpuState {
     PerCpuState {
         jump_cache: machina_accel::ir::tb::JumpCache::new(),
         stats: machina_accel::exec::ExecStats::default(),
+        atomic_lock_held: false,
     }
 }
 

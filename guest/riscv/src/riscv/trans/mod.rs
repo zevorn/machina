@@ -18,6 +18,7 @@ mod gen_priv;
 mod gen_rva;
 mod gen_rvi;
 mod gen_rvm;
+mod gen_xthead;
 mod gen_zba;
 mod gen_zbb;
 mod gen_zbc;
@@ -26,6 +27,7 @@ mod gen_zbkx;
 mod gen_zbs;
 mod helpers;
 
+use self::gen_rva::{AMO_ADD, AMO_AND, AMO_OR, AMO_XOR};
 use super::ext::MisaExt;
 use super::fpu;
 use super::insn_decode::*;
@@ -57,6 +59,85 @@ macro_rules! require_cfg {
             return false;
         }
     };
+}
+
+pub(super) fn decode_vendor_thead(
+    ctx: &mut RiscvDisasContext,
+    ir: &mut Context,
+    insn: u32,
+) -> bool {
+    if !crate::riscv::vendor::thead::has_xthead(ctx.cfg) {
+        return false;
+    }
+
+    if is_xthead_cmo_hint(ctx, insn) {
+        return true;
+    }
+    if is_xthead_sfence_vmas(ctx, insn) {
+        let next = ctx.base.pc_next + ctx.cur_insn_len as u64;
+        let pc = ir.new_const(Type::I64, next);
+        ir.gen_mov(Type::I64, ctx.pc, pc);
+        ir.gen_exit_tb(EXCP_RISCV_SFENCE_VMA);
+        ctx.base.is_jmp = DisasJumpType::NoReturn;
+        return true;
+    }
+    if is_xthead_sync_hint(ctx, insn) {
+        let next = ctx.base.pc_next + ctx.cur_insn_len as u64;
+        let pc = ir.new_const(Type::I64, next);
+        ir.gen_mov(Type::I64, ctx.pc, pc);
+        ir.gen_exit_tb(TB_EXIT_NOCHAIN);
+        ctx.base.is_jmp = DisasJumpType::NoReturn;
+        return true;
+    }
+
+    gen_xthead::decode_xthead(ctx, ir, insn)
+}
+
+fn is_xthead_custom0_base(insn: u32) -> bool {
+    let opcode = insn & 0x7f;
+    let rd = (insn >> 7) & 0x1f;
+    let funct3 = (insn >> 12) & 0x7;
+    opcode == 0x0b && rd == 0 && funct3 == 0
+}
+
+fn is_xthead_cmo_hint(ctx: &RiscvDisasContext, insn: u32) -> bool {
+    if !ctx.cfg.ext_xtheadcmo || !is_xthead_custom0_base(insn) {
+        return false;
+    }
+
+    let rs1 = (insn >> 15) & 0x1f;
+    let rs2 = (insn >> 20) & 0x1f;
+    let funct7 = (insn >> 25) & 0x7f;
+    match funct7 {
+        0 => rs1 == 0 && matches!(rs2, 1 | 2 | 3 | 16 | 17 | 21 | 22 | 23),
+        1 => {
+            matches!(rs2, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 16 | 24)
+        }
+        _ => false,
+    }
+}
+
+fn is_xthead_sfence_vmas(ctx: &RiscvDisasContext, insn: u32) -> bool {
+    if !ctx.cfg.ext_xtheadsync || !is_xthead_custom0_base(insn) {
+        return false;
+    }
+
+    let funct7 = (insn >> 25) & 0x7f;
+    funct7 == 2
+}
+
+fn is_xthead_sync_hint(ctx: &RiscvDisasContext, insn: u32) -> bool {
+    if !ctx.cfg.ext_xtheadsync || !is_xthead_custom0_base(insn) {
+        return false;
+    }
+
+    let rs1 = (insn >> 15) & 0x1f;
+    let rs2 = (insn >> 20) & 0x1f;
+    let funct7 = (insn >> 25) & 0x7f;
+    match funct7 {
+        0 => rs1 == 0 && matches!(rs2, 24..=27),
+        _ => false,
+    }
 }
 
 // ── Decode trait implementation ──────────────────────
@@ -351,6 +432,28 @@ impl Decode<Context> for RiscvDisasContext {
         true
     }
 
+    fn trans_sinval_vma(&mut self, ir: &mut Context, _a: &ArgsR) -> bool {
+        require_cfg!(self, ext_svinval);
+        // QEMU currently treats Svinval's page invalidation
+        // like sfence.vma.
+        self.trans_sfence_vma(ir, _a)
+    }
+
+    // T-HEAD custom fence/inval cache operations. Treat as NOP
+    // since Machina is sequentially consistent and does not model
+    // microarchitectural caches.
+    fn trans_th_fence_spa(&mut self, _ir: &mut Context, _a: &ArgsR) -> bool {
+        true
+    }
+
+    fn trans_mfence_spa(&mut self, _ir: &mut Context, _a: &ArgsR) -> bool {
+        true
+    }
+
+    fn trans_minval_spa(&mut self, _ir: &mut Context, _a: &ArgsR) -> bool {
+        true
+    }
+
     // ── Zicsr: CSR access ────────────────────────────
 
     fn trans_csrrw(&mut self, ir: &mut Context, a: &ArgsCsr) -> bool {
@@ -360,7 +463,8 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let rs1 = self.gpr_or_zero(ir, a.rs1);
-                    self.gen_csr_helper(ir, a.csr, rs1, 1, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 1, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 1, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -370,12 +474,14 @@ impl Decode<Context> for RiscvDisasContext {
         let rs1 = self.gpr_or_zero(ir, a.rs1);
         if !self.gen_csr_write(ir, a.csr, rs1) {
             if self.csr_helper != 0 {
-                self.gen_csr_helper(ir, a.csr, rs1, 1, a.rd);
+                self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 1, a.rd);
+                self.suppress_instret_write_increment(ir, a.csr, 1, a.rs1);
                 return true;
             }
             self.gen_priv_csr_exit(ir);
             return true;
         }
+        self.suppress_instret_write_increment(ir, a.csr, 1, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
@@ -387,7 +493,8 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let rs1 = self.gpr_or_zero(ir, a.rs1);
-                    self.gen_csr_helper(ir, a.csr, rs1, 2, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 2, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 2, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -400,13 +507,15 @@ impl Decode<Context> for RiscvDisasContext {
             ir.gen_or(Type::I64, new, old, rs1);
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
-                    self.gen_csr_helper(ir, a.csr, rs1, 2, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 2, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 2, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
                 return true;
             }
         }
+        self.suppress_instret_write_increment(ir, a.csr, 2, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
@@ -418,7 +527,8 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let rs1 = self.gpr_or_zero(ir, a.rs1);
-                    self.gen_csr_helper(ir, a.csr, rs1, 3, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 3, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 3, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -433,13 +543,15 @@ impl Decode<Context> for RiscvDisasContext {
             ir.gen_and(Type::I64, new, old, inv);
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
-                    self.gen_csr_helper(ir, a.csr, rs1, 3, a.rd);
+                    self.gen_csr_helper(ir, a.csr, rs1, a.rs1, 3, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 3, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
                 return true;
             }
         }
+        self.suppress_instret_write_increment(ir, a.csr, 3, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
@@ -451,7 +563,8 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let z = ir.new_const(Type::I64, a.rs1 as u64);
-                    self.gen_csr_helper(ir, a.csr, z, 5, a.rd);
+                    self.gen_csr_helper(ir, a.csr, z, a.rs1, 5, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 5, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -461,12 +574,14 @@ impl Decode<Context> for RiscvDisasContext {
         let zimm = ir.new_const(Type::I64, a.rs1 as u64);
         if !self.gen_csr_write(ir, a.csr, zimm) {
             if self.csr_helper != 0 {
-                self.gen_csr_helper(ir, a.csr, zimm, 5, a.rd);
+                self.gen_csr_helper(ir, a.csr, zimm, a.rs1, 5, a.rd);
+                self.suppress_instret_write_increment(ir, a.csr, 5, a.rs1);
                 return true;
             }
             self.gen_priv_csr_exit(ir);
             return true;
         }
+        self.suppress_instret_write_increment(ir, a.csr, 5, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
@@ -478,7 +593,8 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let z = ir.new_const(Type::I64, a.rs1 as u64);
-                    self.gen_csr_helper(ir, a.csr, z, 6, a.rd);
+                    self.gen_csr_helper(ir, a.csr, z, a.rs1, 6, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 6, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -491,13 +607,15 @@ impl Decode<Context> for RiscvDisasContext {
             ir.gen_or(Type::I64, new, old, zimm);
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
-                    self.gen_csr_helper(ir, a.csr, zimm, 6, a.rd);
+                    self.gen_csr_helper(ir, a.csr, zimm, a.rs1, 6, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 6, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
                 return true;
             }
         }
+        self.suppress_instret_write_increment(ir, a.csr, 6, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
@@ -509,7 +627,8 @@ impl Decode<Context> for RiscvDisasContext {
             None => {
                 if self.csr_helper != 0 {
                     let z = ir.new_const(Type::I64, a.rs1 as u64);
-                    self.gen_csr_helper(ir, a.csr, z, 7, a.rd);
+                    self.gen_csr_helper(ir, a.csr, z, a.rs1, 7, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 7, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
@@ -524,13 +643,15 @@ impl Decode<Context> for RiscvDisasContext {
             ir.gen_and(Type::I64, new, old, inv);
             if !self.gen_csr_write(ir, a.csr, new) {
                 if self.csr_helper != 0 {
-                    self.gen_csr_helper(ir, a.csr, zimm, 7, a.rd);
+                    self.gen_csr_helper(ir, a.csr, zimm, a.rs1, 7, a.rd);
+                    self.suppress_instret_write_increment(ir, a.csr, 7, a.rs1);
                     return true;
                 }
                 self.gen_priv_csr_exit(ir);
                 return true;
             }
         }
+        self.suppress_instret_write_increment(ir, a.csr, 7, a.rs1);
         self.gen_set_gpr(ir, a.rd, old);
         true
     }
@@ -646,19 +767,19 @@ impl Decode<Context> for RiscvDisasContext {
     }
     fn trans_amoadd_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_add, MemOp::sl())
+        self.gen_amo(ir, a, AMO_ADD, MemOp::sl())
     }
     fn trans_amoxor_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_xor, MemOp::sl())
+        self.gen_amo(ir, a, AMO_XOR, MemOp::sl())
     }
     fn trans_amoand_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_and, MemOp::sl())
+        self.gen_amo(ir, a, AMO_AND, MemOp::sl())
     }
     fn trans_amoor_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_or, MemOp::sl())
+        self.gen_amo(ir, a, AMO_OR, MemOp::sl())
     }
     fn trans_amomin_w(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
@@ -691,19 +812,19 @@ impl Decode<Context> for RiscvDisasContext {
     }
     fn trans_amoadd_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_add, MemOp::uq())
+        self.gen_amo(ir, a, AMO_ADD, MemOp::uq())
     }
     fn trans_amoxor_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_xor, MemOp::uq())
+        self.gen_amo(ir, a, AMO_XOR, MemOp::uq())
     }
     fn trans_amoand_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_and, MemOp::uq())
+        self.gen_amo(ir, a, AMO_AND, MemOp::uq())
     }
     fn trans_amoor_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);
-        self.gen_amo(ir, a, Context::gen_or, MemOp::uq())
+        self.gen_amo(ir, a, AMO_OR, MemOp::uq())
     }
     fn trans_amomin_d(&mut self, ir: &mut Context, a: &ArgsAtomic) -> bool {
         require_ext!(self, MisaExt::A);

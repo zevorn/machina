@@ -6,18 +6,18 @@
 // pending_interrupt().
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use machina_core::wfi::WfiWaker;
 
 use machina_accel::ir::context::Context;
+use machina_accel::ir::tb::{EXCP_RISCV_EBREAK, EXCP_RISCV_ECALL, EXCP_UNDEF};
 use machina_accel::ir::TempIdx;
 use machina_accel::{ArchExitAction, GuestCpu};
 use machina_gdbstub::handler::{GdbTarget, StopReason};
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_guest_riscv::riscv::exception::Exception;
-use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
 use machina_guest_riscv::{DisasJumpType, TranslatorOps};
 
@@ -32,6 +32,13 @@ const MSTATUS_MIE: u64 = 1 << 3;
 const MSTATUS_MPRV: u64 = 1 << 17;
 const MSTATUS_MPP_MASK: u64 = 0x3 << 11;
 const MSTATUS_MPP_SHIFT: u32 = 11;
+static FULLSYSTEM_ATOMIC_LOCK: Mutex<()> = Mutex::new(());
+
+fn fullsystem_atomic_lock() -> MutexGuard<'static, ()> {
+    FULLSYSTEM_ATOMIC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn effective_data_priv(priv_level: PrivLevel, mstatus: u64) -> PrivLevel {
     if priv_level == PrivLevel::Machine && (mstatus & MSTATUS_MPRV) != 0 {
@@ -47,6 +54,18 @@ fn effective_data_priv(priv_level: PrivLevel, mstatus: u64) -> PrivLevel {
 fn should_flush_data_tlb_on_status_write(csr_addr: u16) -> bool {
     use machina_guest_riscv::riscv::csr::{CSR_MSTATUS, CSR_SSTATUS};
     matches!(csr_addr, CSR_MSTATUS | CSR_SSTATUS)
+}
+
+fn writes_instret_counter(csr_addr: u16, funct3: u32, rs1_idx: usize) -> bool {
+    use machina_guest_riscv::riscv::csr::{CSR_INSTRET, CSR_MINSTRET};
+    const CSR_MINSTRETH: u16 = 0xB82;
+
+    let writes = match funct3 {
+        1 | 5 => true,
+        2 | 3 | 6 | 7 => rs1_idx != 0,
+        _ => false,
+    };
+    writes && matches!(csr_addr, CSR_INSTRET | CSR_MINSTRET | CSR_MINSTRETH)
 }
 
 /// Compute the byte offset of the TLB Box pointer from
@@ -127,6 +146,7 @@ pub struct FullSystemCpu {
     /// in handle_interrupt so S-mode sees STI instead of
     /// a raw M-mode timer interrupt.  Set by builtin mode.
     pub builtin_mode: bool,
+    instret_write_suppression: bool,
 }
 
 // SAFETY: ram_ptr points to mmap'd memory owned by
@@ -172,6 +192,7 @@ impl FullSystemCpu {
             htif_tohost_off: None,
             htif_exit_code: Arc::new(AtomicU64::new(0)),
             builtin_mode: false,
+            instret_write_suppression: false,
         }
     }
 
@@ -214,16 +235,19 @@ impl FullSystemCpu {
         self.gdb_state = Some(gs);
     }
 
-    /// Read ACLINT mtime register via AddressSpace MMIO.
-    fn read_aclint_mtime(&self) -> u64 {
-        const ACLINT_MTIME: u64 = 0x0200_BFF8;
+    /// Read the board-configured time CSR source via MMIO.
+    fn read_time_mmio(&self) -> u64 {
+        let addr = self.cpu.time_mmio_addr;
+        if addr == 0 {
+            return 0;
+        }
         let asp = self.cpu.as_ptr;
         if asp == 0 {
             return 0;
         }
         unsafe {
             let as_ = &*(asp as *const AddressSpace);
-            as_.read(GPA::new(ACLINT_MTIME), 8)
+            as_.read(GPA::new(addr), 8)
         }
     }
 
@@ -523,7 +547,7 @@ impl GuestCpu for FullSystemCpu {
             return 0;
         }
 
-        let cfg = RiscvCfg::default();
+        let cfg = self.cpu.profile().cfg;
 
         // The virtual PC of the boundary instruction
         // (last 2 bytes of page A).
@@ -535,6 +559,9 @@ impl GuestCpu for FullSystemCpu {
 
         if ir.nb_globals() == 0 {
             let mut d = RiscvDisasContext::new(pc, base, cfg);
+            d.lr_helper = machina_lr_op as *const () as u64;
+            d.sc_helper = machina_sc_op as *const () as u64;
+            d.amo_helper = machina_amo_op as *const () as u64;
             d.base.max_insns = limit;
             d.cross_page_insn = cross_page;
             d.cross_page_pc = xpage_pc;
@@ -587,6 +614,9 @@ impl GuestCpu for FullSystemCpu {
             (d.base.pc_next - d.base.pc_first) as u32
         } else {
             let mut d = RiscvDisasContext::new(pc, base, cfg);
+            d.lr_helper = machina_lr_op as *const () as u64;
+            d.sc_helper = machina_sc_op as *const () as u64;
+            d.amo_helper = machina_amo_op as *const () as u64;
             d.base.max_insns = limit;
             d.cross_page_insn = cross_page;
             d.cross_page_pc = xpage_pc;
@@ -861,6 +891,24 @@ impl GuestCpu for FullSystemCpu {
         }
     }
 
+    fn tb_exit_nonretired_insns(&self, exit_code: u64) -> u16 {
+        if matches!(
+            exit_code,
+            EXCP_RISCV_ECALL | EXCP_RISCV_EBREAK | EXCP_UNDEF
+        ) {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn on_tb_executed(&mut self, guest_size: u32, guest_insns: u16) {
+        let cycles = u64::from(guest_size).max(1);
+        let insns = u64::from(guest_insns);
+        self.cpu.csr.cycle = self.cpu.csr.cycle.wrapping_add(cycles);
+        self.cpu.csr.instret = self.cpu.csr.instret.wrapping_add(insns);
+    }
+
     fn take_tb_flush_pending(&mut self) -> bool {
         let pending = self.cpu.tb_flush_pending;
         self.cpu.tb_flush_pending = false;
@@ -955,6 +1003,7 @@ impl GuestCpu for FullSystemCpu {
 
     fn handle_priv_csr(&mut self) -> bool {
         let pc = self.cpu.pc;
+        self.instret_write_suppression = false;
         self.cpu.fault_pc = 0;
         let phys_pc = self.translate_pc(pc);
         if phys_pc == u64::MAX {
@@ -1001,17 +1050,20 @@ impl GuestCpu for FullSystemCpu {
         let old = match csr_addr {
             machina_guest_riscv::riscv::csr::CSR_TIME
             | machina_guest_riscv::riscv::csr::CSR_CYCLE => {
-                self.read_aclint_mtime()
+                self.read_time_mmio()
             }
             machina_guest_riscv::riscv::csr::CSR_INSTRET => {
                 self.cpu.csr.instret
             }
-            _ => match self.cpu.csr.read(csr_addr, priv_level) {
+            _ => match self.cpu.csr.read_for_profile(
+                csr_addr,
+                priv_level,
+                self.cpu.profile(),
+            ) {
                 Ok(v) => v,
                 Err(_) => return false,
             },
         };
-
         // Compute new value based on funct3.
         let new_val = match funct3 {
             1 | 5 => rs1_val,        // CSRRW / CSRRWI
@@ -1028,10 +1080,19 @@ impl GuestCpu for FullSystemCpu {
             _ => false,
         };
 
-        if do_write
-            && self.cpu.csr.write(csr_addr, new_val, priv_level).is_err()
-        {
-            return false;
+        if do_write {
+            let profile = *self.cpu.profile();
+            if self
+                .cpu
+                .csr
+                .write_for_profile(csr_addr, new_val, priv_level, &profile)
+                .is_err()
+            {
+                return false;
+            }
+            if writes_instret_counter(csr_addr, funct3, rs1_idx) {
+                self.instret_write_suppression = true;
+            }
         }
 
         if do_write {
@@ -1075,6 +1136,12 @@ impl GuestCpu for FullSystemCpu {
 
         self.cpu.pc += 4;
         true
+    }
+
+    fn take_instret_write_suppression(&mut self) -> bool {
+        let suppression = self.instret_write_suppression;
+        self.instret_write_suppression = false;
+        suppression
     }
 }
 
@@ -1335,6 +1402,249 @@ pub unsafe extern "sysv64" fn machina_mem_write(
     }
 }
 
+/// JIT helper: RISC-V load-reserved.
+///
+/// # Safety
+/// `env` must point to a valid `RiscvCpu`.
+#[no_mangle]
+pub unsafe extern "sysv64" fn machina_lr_op(
+    env: *mut u8,
+    gva: u64,
+    size: u64,
+) -> u64 {
+    let cpu = &mut *(env as *mut RiscvCpu);
+    let Some(pa) =
+        translate_for_helper(cpu, gva, AccessType::Read, size as u32)
+    else {
+        let cause = cpu.mem_fault_cause;
+        let tval = cpu.mem_fault_tval;
+        cpu.mem_fault_cause = 0;
+        cpu.mem_fault_tval = 0;
+        let excp = match cause {
+            5 => Exception::LoadAccessFault,
+            13 => Exception::LoadPageFault,
+            _ => Exception::LoadPageFault,
+        };
+        cpu.load_res = u64::MAX;
+        cpu.raise_exception(excp, tval);
+        cpu_loop_exit(cpu);
+    };
+
+    if !is_phys_backed(cpu, pa, size as u32) {
+        cpu.load_res = u64::MAX;
+        cpu.raise_exception(Exception::LoadAccessFault, gva);
+        cpu_loop_exit(cpu);
+    }
+
+    {
+        let _guard = fullsystem_atomic_lock();
+        let val = if size == 4 {
+            (read_phys_sized(cpu, pa, 4) as u32 as i32) as i64 as u64
+        } else {
+            read_phys_sized(cpu, pa, 8)
+        };
+        cpu.load_res = pa;
+        cpu.load_val = val;
+        val
+    }
+}
+
+/// JIT helper: RISC-V store-conditional.
+///
+/// SC is a store for translation and protection purposes:
+/// a valid LR reservation does not permit writing through a
+/// read-only TLB entry after Linux has write-protected a COW
+/// page.
+///
+/// # Safety
+/// `env` must point to a valid `RiscvCpu`.
+#[no_mangle]
+pub unsafe extern "sysv64" fn machina_sc_op(
+    env: *mut u8,
+    gva: u64,
+    val: u64,
+    size: u64,
+) -> u64 {
+    let cpu = &mut *(env as *mut RiscvCpu);
+    let Some(pa) =
+        translate_for_helper(cpu, gva, AccessType::Write, size as u32)
+    else {
+        let cause = cpu.mem_fault_cause;
+        let tval = cpu.mem_fault_tval;
+        cpu.mem_fault_cause = 0;
+        cpu.mem_fault_tval = 0;
+        let excp = match cause {
+            7 => Exception::StoreAccessFault,
+            15 => Exception::StorePageFault,
+            _ => Exception::StorePageFault,
+        };
+        cpu.load_res = u64::MAX;
+        cpu.raise_exception(excp, tval);
+        cpu_loop_exit(cpu);
+    };
+
+    if cpu.load_res != pa {
+        cpu.load_res = u64::MAX;
+        return 1;
+    }
+
+    if !is_phys_backed(cpu, pa, size as u32) {
+        cpu.load_res = u64::MAX;
+        cpu.raise_exception(Exception::StoreAccessFault, gva);
+        cpu_loop_exit(cpu);
+    }
+
+    {
+        let _guard = fullsystem_atomic_lock();
+        let current = if size == 4 {
+            (read_phys_sized(cpu, pa, 4) as u32 as i32) as i64 as u64
+        } else {
+            read_phys_sized(cpu, pa, 8)
+        };
+        if current != cpu.load_val {
+            cpu.load_res = u64::MAX;
+            return 1;
+        }
+
+        write_phys_sized(cpu, pa, val, size as u32);
+    }
+    cpu.load_res = u64::MAX;
+    0
+}
+
+/// JIT helper: RISC-V atomic memory operation.
+///
+/// # Safety
+/// `env` must point to a valid `RiscvCpu`.
+#[no_mangle]
+pub unsafe extern "sysv64" fn machina_amo_op(
+    env: *mut u8,
+    gva: u64,
+    val: u64,
+    size: u64,
+    op: u64,
+) -> u64 {
+    const AMO_SWAP: u64 = 0;
+    const AMO_ADD: u64 = 1;
+    const AMO_XOR: u64 = 2;
+    const AMO_AND: u64 = 3;
+    const AMO_OR: u64 = 4;
+    const AMO_MIN: u64 = 5;
+    const AMO_MAX: u64 = 6;
+    const AMO_MINU: u64 = 7;
+    const AMO_MAXU: u64 = 8;
+
+    let cpu = &mut *(env as *mut RiscvCpu);
+    let size = size as u32;
+    if size != 4 && size != 8 {
+        cpu.raise_exception(Exception::StoreAccessFault, gva);
+        cpu_loop_exit(cpu);
+    }
+    if gva & (u64::from(size) - 1) != 0 {
+        cpu.raise_exception(Exception::StoreMisaligned, gva);
+        cpu_loop_exit(cpu);
+    }
+
+    let Some(pa) = translate_for_helper(cpu, gva, AccessType::Write, size)
+    else {
+        let cause = cpu.mem_fault_cause;
+        let tval = cpu.mem_fault_tval;
+        cpu.mem_fault_cause = 0;
+        cpu.mem_fault_tval = 0;
+        let excp = match cause {
+            7 => Exception::StoreAccessFault,
+            15 => Exception::StorePageFault,
+            _ => Exception::StorePageFault,
+        };
+        cpu.raise_exception(excp, tval);
+        cpu_loop_exit(cpu);
+    };
+
+    if !is_phys_backed(cpu, pa, size) {
+        cpu.raise_exception(Exception::StoreAccessFault, gva);
+        cpu_loop_exit(cpu);
+    }
+    if op > AMO_MAXU {
+        cpu.raise_exception(Exception::IllegalInstruction, 0);
+        cpu_loop_exit(cpu);
+    }
+
+    let _guard = fullsystem_atomic_lock();
+    let old_raw = read_phys_sized(cpu, pa, size);
+    let new_raw = match (op, size) {
+        (AMO_SWAP, _) => val,
+        (AMO_ADD, 4) => (old_raw as u32).wrapping_add(val as u32) as u64,
+        (AMO_ADD, _) => old_raw.wrapping_add(val),
+        (AMO_XOR, _) => old_raw ^ val,
+        (AMO_AND, _) => old_raw & val,
+        (AMO_OR, _) => old_raw | val,
+        (AMO_MIN, 4) => {
+            if (old_raw as u32 as i32) <= (val as u32 as i32) {
+                old_raw
+            } else {
+                val
+            }
+        }
+        (AMO_MIN, _) => {
+            if (old_raw as i64) <= (val as i64) {
+                old_raw
+            } else {
+                val
+            }
+        }
+        (AMO_MAX, 4) => {
+            if (old_raw as u32 as i32) >= (val as u32 as i32) {
+                old_raw
+            } else {
+                val
+            }
+        }
+        (AMO_MAX, _) => {
+            if (old_raw as i64) >= (val as i64) {
+                old_raw
+            } else {
+                val
+            }
+        }
+        (AMO_MINU, 4) => {
+            if (old_raw as u32) <= (val as u32) {
+                old_raw
+            } else {
+                val
+            }
+        }
+        (AMO_MINU, _) => {
+            if old_raw <= val {
+                old_raw
+            } else {
+                val
+            }
+        }
+        (AMO_MAXU, 4) => {
+            if (old_raw as u32) >= (val as u32) {
+                old_raw
+            } else {
+                val
+            }
+        }
+        (AMO_MAXU, _) => {
+            if old_raw >= val {
+                old_raw
+            } else {
+                val
+            }
+        }
+        _ => unreachable!("AMO op was validated before taking the lock"),
+    };
+
+    write_phys_sized(cpu, pa, new_raw, size);
+    if size == 4 {
+        (old_raw as u32 as i32) as i64 as u64
+    } else {
+        old_raw
+    }
+}
+
 // ---- longjmp-based TB abort ----
 
 // Abort the current TB and return to the exec loop via
@@ -1386,6 +1696,7 @@ pub unsafe extern "sysv64" fn machina_csr_op(
     env: *mut u8,
     csr: u64,
     rs1_val: u64,
+    rs1_idx: u64,
     funct3: u64,
 ) -> u64 {
     use machina_guest_riscv::riscv::csr::{
@@ -1394,20 +1705,22 @@ pub unsafe extern "sysv64" fn machina_csr_op(
     let cpu = &mut *(env as *mut RiscvCpu);
     let csr_addr = csr as u16;
     let priv_level = cpu.priv_level;
+    let profile = cpu.profile;
 
     let old = match csr_addr {
         machina_guest_riscv::riscv::csr::CSR_TIME
         | machina_guest_riscv::riscv::csr::CSR_CYCLE => {
             let asp = cpu.as_ptr;
-            if asp != 0 {
+            let addr = cpu.time_mmio_addr;
+            if asp != 0 && addr != 0 {
                 let a = &*(asp as *const AddressSpace);
-                a.read(GPA::new(0x0200_BFF8), 8)
+                a.read(GPA::new(addr), 8)
             } else {
                 0
             }
         }
         machina_guest_riscv::riscv::csr::CSR_INSTRET => cpu.csr.instret,
-        _ => match cpu.csr.read(csr_addr, priv_level) {
+        _ => match cpu.csr.read_for_profile(csr_addr, priv_level, &profile) {
             Ok(v) => v,
             Err(_) => {
                 cpu.raise_exception(Exception::IllegalInstruction, 0);
@@ -1425,11 +1738,15 @@ pub unsafe extern "sysv64" fn machina_csr_op(
 
     let do_write = match funct3 {
         1 | 5 => true,
-        _ => rs1_val != 0,
+        _ => rs1_idx != 0,
     };
 
     if do_write {
-        if cpu.csr.write(csr_addr, new_val, priv_level).is_err() {
+        if cpu
+            .csr
+            .write_for_profile(csr_addr, new_val, priv_level, &profile)
+            .is_err()
+        {
             cpu.raise_exception(Exception::IllegalInstruction, 0);
             cpu_loop_exit(cpu);
         }
@@ -1477,7 +1794,9 @@ fn gdb_read_phys(
         let mut buf = vec![0u8; len];
         let as_ = unsafe { &*(as_ptr as *const AddressSpace) };
         for (i, byte) in buf.iter_mut().enumerate() {
-            *byte = as_.read(GPA::new(pa + i as u64), 1) as u8;
+            if let Some(addr) = pa.checked_add(i as u64) {
+                *byte = as_.read(GPA::new(addr), 1) as u8;
+            }
         }
         buf
     } else {
@@ -1508,7 +1827,10 @@ fn gdb_write_phys(
     } else if as_ptr != 0 {
         let as_ = unsafe { &*(as_ptr as *const AddressSpace) };
         for (i, &byte) in data.iter().enumerate() {
-            as_.write(GPA::new(pa + i as u64), 1, byte as u64);
+            let Some(addr) = pa.checked_add(i as u64) else {
+                return false;
+            };
+            as_.write(GPA::new(addr), 1, byte as u64);
         }
         true
     } else {
@@ -1523,7 +1845,16 @@ impl FullSystemCpu {
         let priv_level = self.cpu.priv_level;
         GDB_CSRS
             .iter()
-            .map(|entry| self.cpu.csr.read(entry.addr, priv_level).unwrap_or(0))
+            .map(|entry| {
+                self.cpu
+                    .csr
+                    .read_for_profile(
+                        entry.addr,
+                        priv_level,
+                        self.cpu.profile(),
+                    )
+                    .unwrap_or(0)
+            })
             .collect()
     }
 
@@ -1531,11 +1862,14 @@ impl FullSystemCpu {
     fn restore_csrs(&self, csrs: &[u64]) {
         use crate::gdb_csr::GDB_CSRS;
         let priv_level = self.cpu.priv_level;
+        let profile = self.cpu.profile;
         let cpu_ptr = &self.cpu as *const RiscvCpu as *mut RiscvCpu;
         for (i, entry) in GDB_CSRS.iter().enumerate() {
             if let Some(&val) = csrs.get(i) {
                 unsafe {
-                    let _ = (*cpu_ptr).csr.write(entry.addr, val, priv_level);
+                    let _ = (*cpu_ptr).csr.write_for_profile(
+                        entry.addr, val, priv_level, &profile,
+                    );
                 }
             }
         }
@@ -1627,7 +1961,11 @@ impl GdbTarget for FullSystemCpu {
                         let val = self
                             .cpu
                             .csr
-                            .read(entry.addr, self.cpu.priv_level)
+                            .read_for_profile(
+                                entry.addr,
+                                self.cpu.priv_level,
+                                self.cpu.profile(),
+                            )
                             .unwrap_or(0);
                         val.to_le_bytes().to_vec()
                     }
@@ -1653,10 +1991,12 @@ impl GdbTarget for FullSystemCpu {
                 use crate::gdb_csr::csr_by_gdb_reg;
                 match csr_by_gdb_reg(r) {
                     Some(entry) => {
-                        let _ = self.cpu.csr.write(
+                        let profile = self.cpu.profile;
+                        let _ = self.cpu.csr.write_for_profile(
                             entry.addr,
                             v,
                             self.cpu.priv_level,
+                            &profile,
                         );
                     }
                     None => return false,

@@ -83,6 +83,7 @@ fn test_exception_delegated_to_s_mode() {
 fn test_mret() {
     let mut cpu = make_cpu();
     cpu.priv_level = PrivLevel::Machine;
+    cpu.load_res = 0x1234;
     // Set MPP = Supervisor (1), MPIE = 1.
     cpu.csr.mstatus |= (1u64 << 11) | (1u64 << 7);
     cpu.csr.mepc = 0x3000;
@@ -98,6 +99,7 @@ fn test_mret() {
     // MPP should be cleared to User (0).
     let mpp = (cpu.csr.mstatus >> 11) & 0x3;
     assert_eq!(mpp, 0);
+    assert_eq!(cpu.load_res, u64::MAX);
 }
 
 /// SRET restores privilege and PC correctly.
@@ -105,6 +107,7 @@ fn test_mret() {
 fn test_sret() {
     let mut cpu = make_cpu();
     cpu.priv_level = PrivLevel::Supervisor;
+    cpu.load_res = 0x1234;
     // Set SPP = 1 (Supervisor), SPIE = 1.
     cpu.csr.mstatus |= (1u64 << 8) | (1u64 << 5);
     cpu.csr.sepc = 0x5000;
@@ -119,6 +122,24 @@ fn test_sret() {
     assert_ne!(cpu.csr.mstatus & (1 << 5), 0);
     // SPP should be cleared to 0.
     assert_eq!(cpu.csr.mstatus & (1 << 8), 0);
+    assert_eq!(cpu.load_res, u64::MAX);
+}
+
+/// Taking a trap yields the local LR/SC reservation, matching
+/// QEMU's riscv_cpu_set_mode() trap-entry behavior.
+#[test]
+fn test_interrupt_clears_lr_reservation() {
+    let mut cpu = make_cpu();
+    cpu.priv_level = PrivLevel::Machine;
+    cpu.pc = 0x6000;
+    cpu.csr.mtvec = 0xA000_0000;
+    cpu.csr.mstatus |= 1 << 3; // MIE
+    cpu.csr.mie = 1 << 7; // MTIE
+    cpu.csr.mip = 1 << 7; // MTIP
+    cpu.load_res = 0x1234;
+
+    assert!(cpu.handle_interrupt());
+    assert_eq!(cpu.load_res, u64::MAX);
 }
 
 // -- Interrupt priority test --

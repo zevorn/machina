@@ -21,13 +21,13 @@ pub const KERNEL_OFFSET: u64 = 0x20_0000;
 
 /// Default embedded firmware (fw_dynamic.bin).
 #[cfg(feature = "embed-firmware")]
-const EMBEDDED_FW: &[u8] = include_bytes!(concat!(
+pub(crate) const EMBEDDED_FW: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/rustsbi-riscv64-machina-fw_dynamic.bin"
 ));
 
 #[cfg(not(feature = "embed-firmware"))]
-const EMBEDDED_FW: &[u8] = &[];
+pub(crate) const EMBEDDED_FW: &[u8] = &[];
 
 /// OpenSBI-compatible DynamicInfo structure (RV64).
 #[repr(C)]
@@ -67,16 +67,28 @@ impl DynamicInfo {
     }
 }
 
-const FW_FILENAME: &str = "rustsbi-riscv64-machina-fw_dynamic.bin";
+pub(crate) const FW_FILENAME: &str = "rustsbi-riscv64-machina-fw_dynamic.bin";
+pub(crate) const K230_FW_FILENAME: &str =
+    "rustsbi-riscv64-machina-k230-fw_dynamic.bin";
+
+/// K230 firmware is linked for the K230 DDR base at 0x0.
+#[cfg(feature = "embed-firmware")]
+pub(crate) const K230_EMBEDDED_FW: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/rustsbi-riscv64-machina-k230-fw_dynamic.bin"
+));
+
+#[cfg(not(feature = "embed-firmware"))]
+pub(crate) const K230_EMBEDDED_FW: &[u8] = &[];
 
 /// Resolve the bios source: embedded, file, or none.
-enum BiosSource {
+pub(crate) enum BiosSource {
     None,
     File(std::path::PathBuf),
     Embedded,
 }
 
-fn is_elf(data: &[u8]) -> bool {
+pub(crate) fn is_elf(data: &[u8]) -> bool {
     data.len() >= 4 && data[0..4] == [0x7f, b'E', b'L', b'F']
 }
 
@@ -123,7 +135,7 @@ fn place_fdt(
 ///   3. <exe_dir>/../share/machina/<name> (FHS install)
 ///   4. /usr/share/machina/<name>
 ///   5. /usr/local/share/machina/<name>
-fn find_firmware(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn find_firmware(name: &str) -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
 
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -140,6 +152,7 @@ fn find_firmware(name: &str) -> Option<std::path::PathBuf> {
         }
     }
 
+    dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../pc-bios"));
     dirs.push(PathBuf::from("/usr/share/machina"));
     dirs.push(PathBuf::from("/usr/local/share/machina"));
 
@@ -152,7 +165,9 @@ fn find_firmware(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-fn resolve_bios(bios_path: &Option<std::path::PathBuf>) -> BiosSource {
+pub(crate) fn resolve_bios(
+    bios_path: &Option<std::path::PathBuf>,
+) -> BiosSource {
     match bios_path {
         Some(p) => {
             let s = p.to_str().unwrap_or("");

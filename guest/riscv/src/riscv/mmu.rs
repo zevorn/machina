@@ -1,7 +1,7 @@
-//! Sv39 MMU with software TLB.
+//! RISC-V Sv39/Sv48 MMU with software TLB.
 //!
-//! Implements RISC-V Sv39 virtual-to-physical address
-//! translation with a 256-entry direct-mapped TLB.
+//! Implements RISC-V virtual-to-physical address translation
+//! with a 256-entry direct-mapped TLB.
 //! Supports 4KiB pages, 2MiB megapages, and 1GiB
 //! gigapages.
 //!
@@ -12,7 +12,7 @@ use super::csr::PrivLevel;
 use super::exception::Exception;
 use super::pmp::Pmp;
 
-// ── Sv39 constants ────────────────────────────────────
+// ── Sv39/Sv48 constants ───────────────────────────────
 
 const PAGE_SIZE: u64 = 4096;
 const PTE_SIZE: u64 = 8;
@@ -26,6 +26,7 @@ const VPN_MASK: u64 = (1 << VPN_BITS) - 1; // 0x1FF
 const SATP_MODE_SHIFT: u32 = 60;
 const SATP_MODE_BARE: u64 = 0;
 const SATP_MODE_SV39: u64 = 8;
+const SATP_MODE_SV48: u64 = 9;
 
 /// SATP ASID field: bits [59:44].
 const SATP_ASID_SHIFT: u32 = 44;
@@ -43,6 +44,8 @@ const PTE_U: u8 = 1 << 4;
 const PTE_A: u8 = 1 << 6;
 const PTE_D: u8 = 1 << 7;
 const PTE_N: u64 = 1 << 63;
+const PTE_PBMT: u64 = 0x6000_0000_0000_0000;
+const PTE_PPN_MASK: u64 = (1u64 << 44) - 1;
 
 // mstatus bits used by permission checks
 const MSTATUS_MXR: u64 = 1 << 19;
@@ -145,11 +148,13 @@ pub struct MmuStats {
     pub tlb_misses: u64,
 }
 
-/// Sv39 MMU with software TLB.
+/// RISC-V Sv39/Sv48 MMU with software TLB.
 pub struct Mmu {
     satp: u64,
     pub tlb: Box<[TlbEntry; TLB_SIZE]>,
     stats: MmuStats,
+    max_satp_mode: u64,
+    ext_svpbmt: bool,
     /// Reusable buffer for dirty page collection.
     /// Avoids per-call Vec allocation.
     dirty_pages_buf: Vec<u64>,
@@ -162,7 +167,7 @@ fn vpn_index(va: u64, level: usize) -> u64 {
     (va >> (12 + level as u32 * VPN_BITS)) & VPN_MASK
 }
 
-/// Page size for a given leaf level (0=4K, 1=2M, 2=1G).
+/// Page size for a given leaf level (0=4K, 1=2M, 2=1G, 3=512G).
 fn level_page_size(level: usize) -> u64 {
     PAGE_SIZE << (level as u32 * VPN_BITS)
 }
@@ -188,6 +193,21 @@ pub fn access_fault(access: AccessType) -> Exception {
 }
 
 /// Compute TLB index from a virtual address.
+/// Check canonical-address invariant for Sv39/Sv48.
+///
+/// For Sv39 (va_bits=39), bits 63:39 must equal bit 38.
+/// For Sv48 (va_bits=48), bits 63:48 must equal bit 47.
+fn is_canonical_sv(gva: u64, satp_mode: u64) -> bool {
+    let va_bits = match satp_mode {
+        SATP_MODE_SV39 => 39u32,
+        SATP_MODE_SV48 => 48u32,
+        _ => return true, // BARE / unsupported: no canonical check
+    };
+    let shift = va_bits - 1;
+    let s = (gva as i64) >> shift;
+    s == 0 || s == -1
+}
+
 pub fn tlb_index(va: u64) -> usize {
     let vpn = va >> 12;
     let h = vpn ^ (vpn >> 8);
@@ -202,8 +222,15 @@ impl Mmu {
             satp: 0,
             tlb: Box::new([TlbEntry::default(); TLB_SIZE]),
             stats: MmuStats::default(),
+            max_satp_mode: SATP_MODE_SV39,
+            ext_svpbmt: false,
             dirty_pages_buf: Vec::with_capacity(16),
         }
+    }
+
+    pub fn configure_profile(&mut self, max_satp_mode: u64, ext_svpbmt: bool) {
+        self.max_satp_mode = max_satp_mode;
+        self.ext_svpbmt = ext_svpbmt;
     }
 
     pub fn set_satp(&mut self, val: u64) {
@@ -281,7 +308,7 @@ impl Mmu {
     // ── Translation ───────────────────────────────────
 
     /// Translate a guest virtual address to a physical
-    /// address using Sv39 page tables and TLB.
+    /// address using Sv39/Sv48 page tables and TLB.
     ///
     /// This is the full translation path used by the slow
     /// path helper. It handles TLB lookup, page walk,
@@ -307,7 +334,16 @@ impl Mmu {
         if mode == SATP_MODE_BARE {
             return Ok(gva);
         }
-        if mode != SATP_MODE_SV39 {
+        if mode != SATP_MODE_SV39 && mode != SATP_MODE_SV48 {
+            return Err(page_fault(access));
+        }
+        if mode > self.max_satp_mode {
+            return Err(page_fault(access));
+        }
+        // Canonical-address check: for Sv39 bits 63:39
+        // must equal bit 38; for Sv48 bits 63:48 must
+        // equal bit 47.
+        if !is_canonical_sv(gva, mode) {
             return Err(page_fault(access));
         }
 
@@ -472,7 +508,7 @@ impl Mmu {
         entry.page_size = PAGE_SIZE;
     }
 
-    /// Three-level Sv39 page table walk.
+    /// Sv39 or Sv48 page table walk.
     ///
     /// Returns `(ppn, perm_bits, page_size, pte_addr, pte)`
     /// on success.
@@ -484,10 +520,18 @@ impl Mmu {
         priv_level: PrivLevel,
         mem_read: &impl Fn(u64) -> u64,
     ) -> Result<(u64, u8, u64, u64, u64), Exception> {
+        // Reject non-canonical addresses before walking.
+        let mode = self.satp_mode();
+        if !is_canonical_sv(gva, mode) {
+            return Err(page_fault(access));
+        }
+
         let root_ppn = self.satp & SATP_PPN_MASK;
         let mut a = root_ppn * PAGE_SIZE;
 
-        for level in (0..LEVELS).rev() {
+        let levels = if mode == SATP_MODE_SV48 { 4 } else { LEVELS };
+
+        for level in (0..levels).rev() {
             let idx = vpn_index(gva, level);
             let pte_addr = a + idx * PTE_SIZE;
             // PMP check on PTE read (AC-12).
@@ -501,6 +545,9 @@ impl Mmu {
                 .map_err(|_| access_fault(access))?;
             }
             let pte = mem_read(pte_addr);
+            if !self.ext_svpbmt && (pte & PTE_PBMT) != 0 {
+                return Err(page_fault(access));
+            }
 
             let flags = (pte & 0xFF) as u8;
 
@@ -517,7 +564,7 @@ impl Mmu {
 
             // Leaf PTE
             if r || x {
-                let mut ppn = pte >> 10;
+                let mut ppn = (pte >> 10) & PTE_PPN_MASK;
                 if (pte & PTE_N) != 0 {
                     if level != 0 {
                         return Err(page_fault(access));
@@ -531,7 +578,7 @@ impl Mmu {
                     ppn = (ppn & !napot_mask) | (vpn & napot_mask);
                 }
                 if level > 0 {
-                    let ppn_raw = pte >> 10;
+                    let ppn_raw = (pte >> 10) & PTE_PPN_MASK;
                     let align_mask = (1u64 << (level as u32 * VPN_BITS)) - 1;
                     if ppn_raw & align_mask != 0 {
                         return Err(page_fault(access));
@@ -542,7 +589,7 @@ impl Mmu {
             }
 
             // Non-leaf: descend
-            a = (pte >> 10) * PAGE_SIZE;
+            a = ((pte >> 10) & PTE_PPN_MASK) * PAGE_SIZE;
         }
 
         Err(page_fault(access))

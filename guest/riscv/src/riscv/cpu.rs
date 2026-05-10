@@ -3,12 +3,15 @@
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32};
 
+use super::cpu_model::{RiscvCpuModel, RiscvCpuProfile};
 use super::csr::{CsrFile, PrivLevel};
 
 /// Number of general-purpose registers (x0-x31).
 pub const NUM_GPRS: usize = 32;
 /// Number of floating-point registers (f0-f31).
 pub const NUM_FPRS: usize = 32;
+/// Default RISC-V virt/ref ACLINT mtime MMIO address.
+pub const DEFAULT_TIME_MMIO_ADDR: u64 = 0x0200_BFF8;
 
 /// RISC-V CPU architectural state (RV64).
 ///
@@ -64,6 +67,8 @@ pub struct RiscvCpu {
     pub priv_level: PrivLevel,
     /// Full CSR register file (M/S/U).
     pub csr: CsrFile,
+    /// Named CPU profile used for vendor hooks and board-selected ISA state.
+    pub profile: RiscvCpuProfile,
 
     /// Runtime PMP state, synced from CSR on pmpcfg/
     /// pmpaddr writes.
@@ -81,6 +86,9 @@ pub struct RiscvCpu {
     /// dispatch from JIT helpers. Cast from *const
     /// AddressSpace. Zero means not initialized.
     pub as_ptr: u64,
+    /// Physical MMIO address backing CSR_TIME/rdtime.
+    /// Zero means no machine timer source is configured.
+    pub time_mmio_addr: u64,
     /// Start of the RAM window (board-specific, e.g.
     /// 0x8000_0000 for RISC-V virt). Set by the system
     /// layer at CPU creation; JIT helpers use this to
@@ -190,6 +198,14 @@ pub const USTATUS_FS_DIRTY: u64 = 0x0000_6000;
 
 impl RiscvCpu {
     pub fn new() -> Self {
+        Self::new_with_model(RiscvCpuModel::GenericRv64)
+    }
+
+    pub fn new_with_model(model: RiscvCpuModel) -> Self {
+        let profile = model.profile();
+        let mut csr = CsrFile::new();
+        csr.set_machine_ids(profile.mvendorid, profile.marchid);
+        csr.set_max_satp_mode(profile.max_satp_mode);
         Self {
             gpr: [0u64; NUM_GPRS],
             fpr: [0u64; NUM_FPRS],
@@ -210,12 +226,21 @@ impl RiscvCpu {
             interrupt_request: AtomicU32::new(0),
             halted: AtomicBool::new(false),
             priv_level: PrivLevel::Machine,
-            csr: CsrFile::new(),
+            csr,
+            profile,
             pmp: super::pmp::Pmp::new(),
-            mmu: super::mmu::Mmu::new(),
+            mmu: {
+                let mut mmu = super::mmu::Mmu::new();
+                mmu.configure_profile(
+                    profile.max_satp_mode,
+                    profile.cfg.ext_svpbmt,
+                );
+                mmu
+            },
             mem_fault_cause: 0,
             mem_fault_tval: 0,
             as_ptr: 0,
+            time_mmio_addr: DEFAULT_TIME_MMIO_ADDR,
             ram_base: 0,
             ram_end: 0,
             code_pages_ptr: 0,
@@ -229,6 +254,10 @@ impl RiscvCpu {
         }
     }
 
+    pub fn profile(&self) -> &RiscvCpuProfile {
+        &self.profile
+    }
+
     /// Set the current privilege level.
     pub fn set_priv(&mut self, p: PrivLevel) {
         self.priv_level = p;
@@ -238,26 +267,30 @@ impl RiscvCpu {
     /// Panics on illegal access.
     pub fn csr_read(&self, addr: u16) -> u64 {
         self.csr
-            .read(addr, self.priv_level)
+            .read_for_profile(addr, self.priv_level, self.profile())
             .expect("illegal CSR read")
     }
 
     /// Write a CSR, using the current privilege level.
     /// Panics on illegal access.
     pub fn csr_write(&mut self, addr: u16, val: u64) {
+        let profile = self.profile;
         self.csr
-            .write(addr, val, self.priv_level)
+            .write_for_profile(addr, val, self.priv_level, &profile)
             .expect("illegal CSR write");
     }
 
     /// Try to read a CSR with privilege check.
     pub fn try_csr_read(&self, addr: u16) -> Result<u64, u64> {
-        self.csr.read(addr, self.priv_level)
+        self.csr
+            .read_for_profile(addr, self.priv_level, self.profile())
     }
 
     /// Try to write a CSR with privilege check.
     pub fn try_csr_write(&mut self, addr: u16, val: u64) -> Result<(), u64> {
-        self.csr.write(addr, val, self.priv_level)
+        let profile = self.profile;
+        self.csr
+            .write_for_profile(addr, val, self.priv_level, &profile)
     }
 }
 

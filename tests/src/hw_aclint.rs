@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -236,6 +236,7 @@ fn test_aclint_msip_rejects_non_32_bit_accesses() {
 #[test]
 fn test_aclint_timer_compare() {
     let aclint = Aclint::new(2);
+    aclint.set_virtual_clock(true);
 
     // Set mtimecmp[0] = 100.
     aclint.write(0x4000, 8, 100);
@@ -250,6 +251,42 @@ fn test_aclint_timer_compare() {
 
     // Hart 1 has mtimecmp = u64::MAX, not pending.
     assert!(!aclint.timer_irq_pending(1));
+}
+
+#[test]
+fn test_aclint_virtual_clock_advances_only_by_tick() {
+    let aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti_irq = 7u32;
+    let exit_requested = Arc::new(AtomicBool::new(false));
+    let exit_seen = Arc::clone(&exit_requested);
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti_irq);
+    aclint.connect_mti(0, line);
+    aclint.connect_exit_request(
+        0,
+        Arc::new(move || {
+            exit_seen.store(true, Ordering::Release);
+        }),
+    );
+    aclint.set_virtual_clock(true);
+
+    aclint.write(0xBFF8, 8, 10);
+    let t0 = aclint.read(0xBFF8, 8);
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(aclint.read(0xBFF8, 8), t0);
+
+    aclint.write(0x4000, 8, 20);
+    aclint.tick(9);
+    assert_eq!(aclint.read(0xBFF8, 8), 19);
+    assert!(!sink.level(mti_irq));
+
+    aclint.tick(1);
+    assert_eq!(aclint.read(0xBFF8, 8), 20);
+    assert!(sink.level(mti_irq));
+    assert!(
+        exit_requested.load(Ordering::Acquire),
+        "virtual timer expiry should request an exec-loop exit"
+    );
 }
 
 #[test]
@@ -353,6 +390,36 @@ fn test_aclint_mtimecmp_disable() {
 }
 
 #[test]
+fn test_aclint_mtimecmp_disable_cancels_stale_timer_worker() {
+    let aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti = 7u32;
+    let exits = Arc::new(AtomicUsize::new(0));
+    let exits_seen = Arc::clone(&exits);
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
+    aclint.connect_mti(0, line);
+    aclint.connect_exit_request(
+        0,
+        Arc::new(move || {
+            exits_seen.fetch_add(1, Ordering::AcqRel);
+        }),
+    );
+
+    let now = aclint.read(0xBFF8, 8);
+    aclint.write(0x4000, 8, now + 100_000);
+    aclint.write(0x4000, 8, u64::MAX);
+
+    std::thread::sleep(Duration::from_millis(50));
+
+    assert!(!sink.level(mti), "disabled timer must not assert MTI");
+    assert_eq!(
+        exits.load(Ordering::Acquire),
+        0,
+        "disabled stale timer worker must not request exit"
+    );
+}
+
+#[test]
 fn test_aclint_mtimecmp_retarget_past() {
     let aclint = Aclint::new(1);
     let sink = Arc::new(TestIrqSink::new(16));
@@ -364,6 +431,43 @@ fn test_aclint_mtimecmp_retarget_past() {
     aclint.write(0xBFF8, 8, 1000);
     aclint.write(0x4000, 8, 500);
     assert!(sink.level(mti), "MTI should be high when mtimecmp < mtime");
+}
+
+#[test]
+fn test_aclint_mtimecmp_past_retarget_cancels_stale_timer_worker() {
+    let aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti = 7u32;
+    let exits = Arc::new(AtomicUsize::new(0));
+    let exits_seen = Arc::clone(&exits);
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
+    aclint.connect_mti(0, line);
+    aclint.connect_exit_request(
+        0,
+        Arc::new(move || {
+            exits_seen.fetch_add(1, Ordering::AcqRel);
+        }),
+    );
+
+    let now = aclint.read(0xBFF8, 8);
+    aclint.write(0x4000, 8, now + 300_000);
+    let past = aclint.read(0xBFF8, 8).saturating_sub(1);
+    aclint.write(0x4000, 8, past);
+
+    assert!(sink.level(mti), "past retarget should assert MTI now");
+    assert_eq!(
+        exits.load(Ordering::Acquire),
+        1,
+        "past retarget should request exactly one immediate exit"
+    );
+
+    std::thread::sleep(Duration::from_millis(60));
+
+    assert_eq!(
+        exits.load(Ordering::Acquire),
+        1,
+        "old future timer worker must not request another exit"
+    );
 }
 
 #[test]

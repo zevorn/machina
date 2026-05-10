@@ -144,21 +144,20 @@ impl Plic {
         }
     }
 
-    /// Update the source wire level.  Only a rising edge
-    /// (0→1) latches the pending bit, preventing interrupt
-    /// storms when the guest defers source-clearing to a
-    /// task/bottom-half.
+    /// Update the source wire level. High input updates latch
+    /// pending, while low input updates are ignored by the
+    /// pending bitmap. Pending is cleared by claim, not by
+    /// source deassertion.
     pub fn set_irq(&self, source: u32, level: bool) {
         if source == 0 || source >= self.num_sources {
             return;
         }
-        let prev = self.source_level[source as usize]
-            .swap(level as u32, Ordering::Relaxed);
-        if level && prev == 0 {
-            // Rising edge: latch pending.
+        self.source_level[source as usize]
+            .store(level as u32, Ordering::Relaxed);
+        if level {
             self.set_pending(source, true);
+            self.update_outputs();
         }
-        self.update_outputs();
     }
 
     /// Re-evaluate all context outputs based on current
@@ -250,9 +249,9 @@ impl Plic {
     /// Complete (acknowledge) a previously claimed IRQ.
     /// Clears the claim record and the claimed bitmap,
     /// then re-evaluates outputs.
-    /// Does NOT automatically re-pend based on source wire
-    /// level — the device must de-assert and re-assert to
-    /// generate a new interrupt.
+    /// A high source can already have refreshed the pending
+    /// bit while the IRQ was claimed; clearing the claimed
+    /// bit then lets that pending level become visible.
     pub fn complete_irq(&self, context: u32, irq: u32) {
         if context >= self.num_contexts {
             return;

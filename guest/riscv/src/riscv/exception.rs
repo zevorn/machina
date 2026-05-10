@@ -151,6 +151,7 @@ impl RiscvCpu {
             self.pc = tvec_addr(self.csr.mtvec, cause, is_interrupt);
             self.priv_level = PrivLevel::Machine;
         }
+        self.load_res = u64::MAX;
         self.mmu.flush();
     }
 
@@ -236,6 +237,7 @@ impl RiscvCpu {
         self.csr.mstatus &= !MSTATUS_MPP_MASK;
 
         self.pc = self.csr.mepc;
+        self.load_res = u64::MAX;
         self.mmu.flush();
     }
 
@@ -272,6 +274,7 @@ impl RiscvCpu {
         self.csr.mstatus &= !MSTATUS_SPP;
 
         self.pc = self.csr.sepc;
+        self.load_res = u64::MAX;
         self.mmu.flush();
         true
     }

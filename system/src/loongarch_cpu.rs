@@ -219,9 +219,9 @@ impl GuestCpu for LoongArchFullSystemCpu {
         self.cpu.take_translation_fault_pending()
     }
 
-    fn on_tb_executed(&mut self, guest_size: u32) {
+    fn on_tb_executed(&mut self, _guest_size: u32, guest_insns: u16) {
         self.apply_async_interrupts();
-        let insns = (guest_size / 4).max(1);
+        let insns = u32::from(guest_insns).max(1);
         self.cpu.timer_tick(u64::from(insns));
     }
 

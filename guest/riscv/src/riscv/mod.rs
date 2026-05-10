@@ -1,6 +1,7 @@
 //! RISC-V frontend — RV64 user-mode instruction translation.
 
 pub mod cpu;
+pub mod cpu_model;
 pub mod csr;
 pub mod exception;
 pub mod ext;
@@ -9,6 +10,7 @@ mod insn_decode;
 pub mod mmu;
 pub mod pmp;
 mod trans;
+pub mod vendor;
 
 use crate::{DisasContextBase, DisasJumpType, TranslatorOps};
 use cpu::{gpr_offset, LOAD_RES_OFFSET, LOAD_VAL_OFFSET, NUM_GPRS, PC_OFFSET};
@@ -60,6 +62,12 @@ pub struct RiscvDisasContext {
     pub guest_base: *const u8,
     /// Address of the CSR helper function for JIT call.
     pub csr_helper: u64,
+    /// Address of the full-system LR helper function.
+    pub lr_helper: u64,
+    /// Address of the full-system SC helper function.
+    pub sc_helper: u64,
+    /// Address of the full-system AMO helper function.
+    pub amo_helper: u64,
 }
 
 impl RiscvDisasContext {
@@ -89,6 +97,9 @@ impl RiscvDisasContext {
             cur_insn_len: 4,
             guest_base,
             csr_helper: 0,
+            lr_helper: 0,
+            sc_helper: 0,
+            amo_helper: 0,
         }
     }
 
@@ -175,6 +186,9 @@ impl TranslatorOps for RiscvTranslator {
             ctx.cur_insn_len = 4;
             insn_decode::decode(ctx, ir, insn)
         };
+
+        let decoded =
+            decoded || trans::decode_vendor_thead(ctx, ir, ctx.opcode);
 
         if !decoded {
             let pc_val = ctx.base.pc_next;

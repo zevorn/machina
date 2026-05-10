@@ -32,11 +32,20 @@ use machina_memory::region::MmioOps;
 
 // IER bits
 const IER_RX_AVAIL: u8 = 1 << 0;
+const IER_THR_EMPTY: u8 = 1 << 1;
 
 // IIR values
 const IIR_NONE: u8 = 0x01; // no interrupt pending
 const IIR_RX_AVAIL: u8 = 0x04; // rx data available
 const IIR_THR_EMPTY: u8 = 0x02; // THR empty
+const IIR_ID_MASK: u8 = 0x0F;
+const IIR_FIFO_ENABLED: u8 = 0xC0;
+
+// FCR bits
+const FCR_FIFO_ENABLE: u8 = 1 << 0;
+const FCR_CLEAR_RX: u8 = 1 << 1;
+const FCR_CLEAR_TX: u8 = 1 << 2;
+const FCR_STICKY_MASK: u8 = 0xC9;
 
 // LSR bits
 const LSR_DR: u8 = 1 << 0; // data ready
@@ -113,6 +122,7 @@ struct Uart16550Regs {
     dll: u8,
     dlm: u8,
     rx_fifo: VecDeque<u8>,
+    thr_ipending: bool,
     irq_pending: bool,
 }
 
@@ -132,6 +142,7 @@ impl Uart16550Regs {
             dll: 0,
             dlm: 0,
             rx_fifo: VecDeque::with_capacity(FIFO_SIZE),
+            thr_ipending: false,
             irq_pending: false,
         }
     }
@@ -149,6 +160,7 @@ impl Uart16550Regs {
         self.dll = 0;
         self.dlm = 0;
         self.rx_fifo.clear();
+        self.thr_ipending = false;
         self.irq_pending = false;
         self.update_msr(has_chardev);
     }
@@ -176,6 +188,14 @@ impl Uart16550Regs {
             self.msr = MSR_CTS | MSR_DSR | MSR_DCD;
         } else {
             self.msr = 0;
+        }
+    }
+
+    fn iir_fifo_bits(&self) -> u8 {
+        if self.fcr & FCR_FIFO_ENABLE != 0 {
+            IIR_FIFO_ENABLED
+        } else {
+            0
         }
     }
 }
@@ -366,11 +386,11 @@ impl Uart16550 {
             // RX data available has higher priority.
             if (regs.ier & IER_RX_AVAIL) != 0 && (regs.lsr & LSR_DR) != 0 {
                 iir = IIR_RX_AVAIL;
-            } else if (regs.ier & 0x02) != 0 && (regs.lsr & LSR_THRE) != 0 {
+            } else if (regs.ier & IER_THR_EMPTY) != 0 && regs.thr_ipending {
                 iir = IIR_THR_EMPTY;
             }
 
-            regs.iir = iir;
+            regs.iir = iir | regs.iir_fifo_bits();
             regs.irq_pending = iir != IIR_NONE;
             pending = regs.irq_pending;
         }
@@ -384,7 +404,8 @@ impl Uart16550 {
     pub fn read(&self, offset: u64) -> u8 {
         let mut regs = self.regs.borrow();
         let dlab = regs.lcr & LCR_DLAB != 0;
-        match (offset & 0x7, dlab) {
+        let reg = offset & 0x7;
+        match (reg, dlab) {
             (0, true) => regs.dll,
             (0, false) => {
                 let ch = Self::read_rbr(&mut regs);
@@ -394,7 +415,18 @@ impl Uart16550 {
             }
             (1, true) => regs.dlm,
             (1, false) => regs.ier,
-            (2, _) => regs.iir,
+            (2, _) => {
+                let iir = regs.iir;
+                let clears_thr_ipending = (iir & IIR_ID_MASK) == IIR_THR_EMPTY;
+                if clears_thr_ipending {
+                    regs.thr_ipending = false;
+                }
+                drop(regs);
+                if clears_thr_ipending {
+                    self.update_irq();
+                }
+                iir
+            }
             (3, _) => regs.lcr,
             (4, _) => regs.mcr,
             (5, _) => regs.lsr,
@@ -406,23 +438,39 @@ impl Uart16550 {
 
     pub fn write(&self, offset: u64, val: u8) {
         let dlab = self.regs.borrow().lcr & LCR_DLAB != 0;
-        match (offset & 0x7, dlab) {
+        let reg = offset & 0x7;
+        match (reg, dlab) {
             (0, true) => self.regs.borrow().dll = val,
             (0, false) => self.write_thr(val),
             (1, true) => self.regs.borrow().dlm = val,
             (1, false) => {
-                self.regs.borrow().ier = val & 0x0F;
+                let mut regs = self.regs.borrow();
+                let old_ier = regs.ier;
+                regs.ier = val & 0x0F;
+                if (old_ier ^ regs.ier) & IER_THR_EMPTY != 0 {
+                    regs.thr_ipending = (regs.ier & IER_THR_EMPTY) != 0
+                        && (regs.lsr & LSR_THRE) != 0;
+                }
+                drop(regs);
                 self.update_irq();
             }
             (2, _) => {
                 let mut regs = self.regs.borrow();
-                regs.fcr = val;
-                if val & 0x02 != 0 {
+                let mut fcr = val;
+                if (fcr ^ regs.fcr) & FCR_FIFO_ENABLE != 0 {
+                    fcr |= FCR_CLEAR_RX | FCR_CLEAR_TX;
+                }
+                if fcr & FCR_CLEAR_RX != 0 {
                     regs.rx_fifo.clear();
                     regs.lsr &= !LSR_DR;
-                    drop(regs);
-                    self.update_irq();
                 }
+                if fcr & FCR_CLEAR_TX != 0 {
+                    regs.lsr |= LSR_THRE | LSR_TEMT;
+                    regs.thr_ipending = true;
+                }
+                regs.fcr = fcr & FCR_STICKY_MASK;
+                drop(regs);
+                self.update_irq();
             }
             (3, _) => self.regs.borrow().lcr = val,
             (4, _) => {
@@ -469,9 +517,12 @@ impl Uart16550 {
         let loopback = {
             let mut regs = self.regs.borrow();
             regs.thr = val;
+            regs.thr_ipending = false;
+            regs.lsr &= !(LSR_THRE | LSR_TEMT);
             // In emulation the byte is "transmitted"
-            // instantly, so THRE stays set.
+            // instantly, so THRE becomes set again right away.
             regs.lsr |= LSR_THRE | LSR_TEMT;
+            regs.thr_ipending = true;
             regs.mcr & MCR_LOOPBACK != 0
         };
         if loopback {
@@ -509,5 +560,46 @@ impl MmioOps for Uart16550Mmio {
             return;
         }
         self.0.write(offset, val as u8);
+    }
+}
+
+pub struct Uart16550ShiftedMmio {
+    uart: Arc<Uart16550>,
+    reg_shift: u8,
+}
+
+impl Uart16550ShiftedMmio {
+    pub fn new(uart: Arc<Uart16550>, reg_shift: u8) -> Self {
+        Self { uart, reg_shift }
+    }
+
+    fn reg_offset(&self, offset: u64) -> Option<u64> {
+        let stride = 1u64.checked_shl(self.reg_shift.into())?;
+        if stride == 0 || !offset.is_multiple_of(stride) {
+            return None;
+        }
+        let reg = offset / stride;
+        (reg < 8).then_some(reg)
+    }
+}
+
+impl MmioOps for Uart16550ShiftedMmio {
+    fn read(&self, offset: u64, size: u32) -> u64 {
+        if size > 8 {
+            return 0;
+        }
+        let Some(reg) = self.reg_offset(offset) else {
+            return 0;
+        };
+        self.uart.read(reg) as u64
+    }
+
+    fn write(&self, offset: u64, size: u32, val: u64) {
+        if size > 8 {
+            return;
+        }
+        if let Some(reg) = self.reg_offset(offset) {
+            self.uart.write(reg, val as u8);
+        }
     }
 }

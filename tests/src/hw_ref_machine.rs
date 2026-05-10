@@ -24,6 +24,8 @@ fn default_opts() -> MachineOpts {
         nographic: false,
         drive: None,
         initrd: None,
+        dtb: None,
+        loaders: Vec::new(),
         netdev: None,
     }
 }
@@ -434,6 +436,8 @@ fn test_ref_machine_zero_ram_fails() {
         nographic: false,
         drive: None,
         initrd: None,
+        dtb: None,
+        loaders: Vec::new(),
         netdev: None,
     };
     let result = m.init(&opts);
@@ -471,6 +475,8 @@ fn test_ref_machine_plic_contexts_multi_hart() {
         nographic: false,
         drive: None,
         initrd: None,
+        dtb: None,
+        loaders: Vec::new(),
         netdev: None,
     };
     m.init(&opts).expect("init failed");

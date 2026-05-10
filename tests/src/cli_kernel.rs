@@ -58,3 +58,20 @@ fn kernel_nonexistent_path_fails_fast() {
         "expected the offending path in stderr; got: {stderr}",
     );
 }
+
+#[test]
+fn machine_help_lists_k230() {
+    ensure_machina_built();
+
+    let output = Command::new(machina_bin())
+        .args(["-M", "?"])
+        .output()
+        .expect("failed to spawn machina -M ?");
+
+    assert!(output.status.success(), "machina -M ? should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("k230"),
+        "expected k230 in machine list; got: {stderr}",
+    );
+}

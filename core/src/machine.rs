@@ -68,6 +68,55 @@ impl NetdevOpts {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoaderSpec {
+    pub file: PathBuf,
+    pub addr: u64,
+    pub force_raw: bool,
+}
+
+impl LoaderSpec {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let mut parts = raw.split(',');
+        match parts.next() {
+            Some("loader") => {}
+            _ => {
+                return Err(
+                    "-device: only loader devices are supported by this parser"
+                        .to_string(),
+                );
+            }
+        }
+
+        let mut file = None;
+        let mut addr = None;
+        let mut force_raw = false;
+        for part in parts {
+            if let Some(value) = part.strip_prefix("file=") {
+                file = Some(PathBuf::from(value));
+            } else if let Some(value) = part.strip_prefix("addr=") {
+                let parsed = if let Some(hex) = value.strip_prefix("0x") {
+                    u64::from_str_radix(hex, 16)
+                } else {
+                    value.parse::<u64>()
+                }
+                .map_err(|_| format!("loader addr is invalid: {value}"))?;
+                addr = Some(parsed);
+            } else if let Some(value) = part.strip_prefix("force-raw=") {
+                force_raw = matches!(value, "on" | "true" | "1");
+            } else {
+                return Err(format!("unsupported loader option: {part}"));
+            }
+        }
+
+        Ok(Self {
+            file: file.ok_or("loader: missing file=".to_string())?,
+            addr: addr.ok_or("loader: missing addr=".to_string())?,
+            force_raw,
+        })
+    }
+}
+
 pub struct MachineOpts {
     pub ram_size: u64,
     pub cpu_count: u32,
@@ -80,6 +129,8 @@ pub struct MachineOpts {
     pub nographic: bool,
     pub drive: Option<PathBuf>,
     pub initrd: Option<PathBuf>,
+    pub dtb: Option<PathBuf>,
+    pub loaders: Vec<LoaderSpec>,
     pub netdev: Option<NetdevOpts>,
 }
 

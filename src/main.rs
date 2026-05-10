@@ -6,7 +6,7 @@ mod difftest;
 use std::env;
 use std::path::PathBuf;
 use std::process;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use machina_accel::exec::{ExecEnv, ExitReason};
@@ -14,12 +14,19 @@ use machina_accel::x86_64::emitter::SoftMmuConfig;
 use machina_accel::X86_64CodeGen;
 #[cfg(unix)]
 use machina_core::machine::NetdevOpts;
-use machina_core::machine::{Machine, MachineOpts};
+use machina_core::machine::{LoaderSpec, Machine, MachineOpts};
+use machina_core::wfi::WfiWaker;
 use machina_guest_loongarch::loongarch::cpu::{
     GUEST_BASE_CPU_OFFSET, NEG_ALIGN_CPU_OFFSET,
 };
+use machina_guest_riscv::riscv::cpu::RiscvCpu;
+use machina_hw_char::uart::Uart16550;
+use machina_hw_intc::aclint::Aclint;
 use machina_hw_loongarch::virt_machine::LoongArchVirtMachine;
-use machina_hw_riscv::ref_machine::RefMachine;
+use machina_hw_riscv::k230::{K230Machine, K230MemMap, K230_MEMMAP};
+use machina_hw_riscv::ref_machine::{
+    RefMachine, RefMemMap, MROM_BASE, MROM_SIZE, RAM_BASE, REF_MEMMAP,
+};
 use machina_hw_riscv::sbi::SbiBackend;
 use machina_hw_riscv::sifive_test::ShutdownReason;
 #[cfg(unix)]
@@ -46,6 +53,7 @@ fn usage() {
          with host-side SBI"
     );
     eprintln!("  -kernel path  Kernel binary");
+    eprintln!("  -dtb path     Device tree blob");
     eprintln!("  -nographic    Disable graphical output");
     eprintln!("  -append args  Kernel command line arguments");
     #[cfg(unix)]
@@ -69,6 +77,10 @@ fn usage() {
         "  -device virtio-net-device,netdev=<id>\
          [,mac=XX:XX:XX:XX:XX:XX]"
     );
+    eprintln!(
+        "  -device loader,file=<path>,addr=<addr>\
+         [,force-raw=on]"
+    );
     eprintln!("  --trace file  Trace output file");
     eprintln!("  -h, --help    Show this help");
 }
@@ -76,9 +88,11 @@ fn usage() {
 struct CliArgs {
     machine: String,
     ram_mib: u64,
+    ram_mib_explicit: bool,
     bios: Option<PathBuf>,
     bios_builtin: bool,
     kernel: Option<PathBuf>,
+    dtb: Option<PathBuf>,
     append: Option<String>,
     nographic: bool,
     #[cfg(unix)]
@@ -88,6 +102,7 @@ struct CliArgs {
     gdb: Option<String>,
     start_paused: bool,
     initrd: Option<PathBuf>,
+    loaders: Vec<LoaderSpec>,
     #[cfg(unix)]
     netdev_raw: Option<String>,
     #[cfg(unix)]
@@ -100,9 +115,11 @@ impl Default for CliArgs {
         Self {
             machine: "riscv64-ref".to_string(),
             ram_mib: 128,
+            ram_mib_explicit: false,
             bios: None,
             bios_builtin: false,
             kernel: None,
+            dtb: None,
             append: None,
             nographic: false,
             #[cfg(unix)]
@@ -112,6 +129,7 @@ impl Default for CliArgs {
             gdb: None,
             start_paused: false,
             initrd: None,
+            loaders: Vec::new(),
             #[cfg(unix)]
             netdev_raw: None,
             #[cfg(unix)]
@@ -144,6 +162,7 @@ fn parse_args() -> Result<CliArgs, String> {
                         "-m: RAM size must be greater than 0".to_string()
                     );
                 }
+                cli.ram_mib_explicit = true;
             }
             "-bios" => {
                 i += 1;
@@ -180,6 +199,11 @@ fn parse_args() -> Result<CliArgs, String> {
                     }
                 }
                 cli.kernel = Some(path);
+            }
+            "-dtb" => {
+                i += 1;
+                let s = args.get(i).ok_or("-dtb requires argument")?;
+                cli.dtb = Some(PathBuf::from(s));
             }
             "-nographic" => {
                 cli.nographic = true;
@@ -220,14 +244,23 @@ fn parse_args() -> Result<CliArgs, String> {
             "-device" => {
                 i += 1;
                 let val = args.get(i).ok_or("-device requires argument")?;
+                if val.starts_with("loader,") {
+                    cli.loaders.push(LoaderSpec::parse(val)?);
+                    i += 1;
+                    continue;
+                }
                 // virtio-net-device is Unix-only (TAP backend).
                 #[cfg(unix)]
                 if val.starts_with("virtio-net-device,") {
                     cli.device_net_raw = Some(val.clone());
+                    i += 1;
+                    continue;
                 }
-                // virtio-blk-device and other devices are
-                // handled via -drive; accept without error.
-                let _ = val;
+                if val.starts_with("virtio-blk-device") {
+                    i += 1;
+                    continue;
+                }
+                return Err(format!("-device: unsupported device: {val}"));
             }
             "--trace" => {
                 i += 1;
@@ -280,6 +313,191 @@ fn parse_args() -> Result<CliArgs, String> {
 // parse_netdev_opts moved to NetdevOpts::parse() in
 // core/src/machine.rs for testability.
 
+trait RiscvRuntimeMachine: Machine {
+    fn take_cpu(&self, idx: usize) -> Option<RiscvCpu>;
+    fn ram_base(&self) -> u64;
+    fn time_mmio_addr(&self) -> u64;
+    fn ram_ptr(&self) -> *const u8;
+    fn bootrom_ptr(&self) -> *const u8;
+    fn bootrom_base(&self) -> u64;
+    fn bootrom_size(&self) -> u64;
+    fn address_space(&self) -> &machina_memory::address_space::AddressSpace;
+    fn shared_mip(&self) -> Arc<AtomicU64>;
+    fn wfi_waker(&self) -> Arc<WfiWaker>;
+    fn connect_timer_exit_request(
+        &self,
+        hart: u32,
+        request: Arc<dyn Fn() + Send + Sync>,
+    );
+    fn cancel_timers(&self);
+    fn uart_for_sbi(&self) -> Option<Arc<Uart16550>>;
+    fn aclint_for_sbi(&self) -> Option<Arc<Aclint>>;
+    fn install_shutdown_handler(
+        &self,
+        _handler: Box<dyn Fn(ShutdownReason) + Send + Sync>,
+    ) {
+    }
+    fn set_quit_cb_if_supported(&mut self, _cb: Arc<dyn Fn() + Send + Sync>) {}
+    fn set_monitor_cb_if_supported(
+        &mut self,
+        _cb: Arc<std::sync::Mutex<dyn FnMut(u8) + Send>>,
+    ) {
+    }
+}
+
+impl RiscvRuntimeMachine for RefMachine {
+    fn take_cpu(&self, idx: usize) -> Option<RiscvCpu> {
+        self.take_cpu(idx)
+    }
+
+    fn ram_base(&self) -> u64 {
+        RAM_BASE
+    }
+
+    fn time_mmio_addr(&self) -> u64 {
+        REF_MEMMAP[RefMemMap::Aclint as usize].base + 0xBFF8
+    }
+
+    fn ram_ptr(&self) -> *const u8 {
+        self.ram_ptr()
+    }
+
+    fn bootrom_ptr(&self) -> *const u8 {
+        self.mrom_block().as_ptr() as *const u8
+    }
+
+    fn bootrom_base(&self) -> u64 {
+        MROM_BASE
+    }
+
+    fn bootrom_size(&self) -> u64 {
+        MROM_SIZE
+    }
+
+    fn address_space(&self) -> &machina_memory::address_space::AddressSpace {
+        self.address_space()
+    }
+
+    fn shared_mip(&self) -> Arc<AtomicU64> {
+        self.shared_mip()
+    }
+
+    fn wfi_waker(&self) -> Arc<WfiWaker> {
+        self.wfi_waker()
+    }
+
+    fn connect_timer_exit_request(
+        &self,
+        hart: u32,
+        request: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        self.aclint().connect_exit_request(hart, request);
+    }
+
+    fn cancel_timers(&self) {
+        self.aclint().cancel_timers();
+    }
+
+    fn uart_for_sbi(&self) -> Option<Arc<Uart16550>> {
+        Some(self.uart().clone())
+    }
+
+    fn aclint_for_sbi(&self) -> Option<Arc<Aclint>> {
+        Some(self.aclint().clone())
+    }
+
+    fn install_shutdown_handler(
+        &self,
+        handler: Box<dyn Fn(ShutdownReason) + Send + Sync>,
+    ) {
+        self.sifive_test().set_shutdown_handler(handler);
+    }
+
+    fn set_quit_cb_if_supported(&mut self, cb: Arc<dyn Fn() + Send + Sync>) {
+        self.set_quit_cb(cb);
+    }
+
+    fn set_monitor_cb_if_supported(
+        &mut self,
+        cb: Arc<std::sync::Mutex<dyn FnMut(u8) + Send>>,
+    ) {
+        self.set_monitor_cb(cb);
+    }
+}
+
+impl RiscvRuntimeMachine for K230Machine {
+    fn take_cpu(&self, idx: usize) -> Option<RiscvCpu> {
+        self.take_cpu(idx)
+    }
+
+    fn ram_base(&self) -> u64 {
+        K230_MEMMAP[K230MemMap::Ddr as usize].base
+    }
+
+    fn time_mmio_addr(&self) -> u64 {
+        K230_MEMMAP[K230MemMap::Clint as usize].base + 0xBFF8
+    }
+
+    fn ram_ptr(&self) -> *const u8 {
+        self.ram_ptr()
+    }
+
+    fn bootrom_ptr(&self) -> *const u8 {
+        self.bootrom_block().as_ptr() as *const u8
+    }
+
+    fn bootrom_base(&self) -> u64 {
+        K230_MEMMAP[K230MemMap::Bootrom as usize].base
+    }
+
+    fn bootrom_size(&self) -> u64 {
+        K230_MEMMAP[K230MemMap::Bootrom as usize].size
+    }
+
+    fn address_space(&self) -> &machina_memory::address_space::AddressSpace {
+        self.address_space()
+    }
+
+    fn shared_mip(&self) -> Arc<AtomicU64> {
+        self.shared_mip()
+    }
+
+    fn wfi_waker(&self) -> Arc<WfiWaker> {
+        self.wfi_waker()
+    }
+
+    fn connect_timer_exit_request(
+        &self,
+        hart: u32,
+        request: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        self.aclint().connect_exit_request(hart, request);
+    }
+
+    fn cancel_timers(&self) {
+        self.aclint().cancel_timers();
+    }
+
+    fn uart_for_sbi(&self) -> Option<Arc<Uart16550>> {
+        self.uart(0).cloned()
+    }
+
+    fn aclint_for_sbi(&self) -> Option<Arc<Aclint>> {
+        Some(self.aclint().clone())
+    }
+
+    fn set_quit_cb_if_supported(&mut self, cb: Arc<dyn Fn() + Send + Sync>) {
+        self.set_quit_cb(cb);
+    }
+
+    fn set_monitor_cb_if_supported(
+        &mut self,
+        cb: Arc<std::sync::Mutex<dyn FnMut(u8) + Send>>,
+    ) {
+        self.set_monitor_cb(cb);
+    }
+}
+
 /// Install a SIGSEGV handler that prints the last TB PC
 /// and host register state before exiting.
 /// On Windows there is no SIGSEGV; this is a no-op.
@@ -324,6 +542,7 @@ extern "C" fn crash_handler(
 /// Returns the ShutdownReason if SiFive Test or HTIF
 /// triggered, or None if execution ended without either.
 fn run_machine_cycle(
+    machine_name: &str,
     opts: &MachineOpts,
     ram_size: u64,
     monitor_state: Option<Arc<machina_core::monitor::MonitorState>>,
@@ -333,12 +552,20 @@ fn run_machine_cycle(
     htif_tohost: Option<u64>,
     gdb_state: Option<Arc<machina_system::gdb::GdbState>>,
 ) -> Option<ShutdownReason> {
-    let mut machine = RefMachine::new();
+    let mut machine: Box<dyn RiscvRuntimeMachine> = match machine_name {
+        "riscv64-ref" => Box::new(RefMachine::new()),
+        "k230" => Box::new(K230Machine::new()),
+        other => {
+            return Some(ShutdownReason::Fail(
+                u32::try_from(other.len()).unwrap_or(u32::MAX),
+            ));
+        }
+    };
 
     // Set Ctrl+A X quit callback + Ctrl+A C monitor mux.
     if let Some(ref ms) = monitor_state {
         let ms_quit = Arc::clone(ms);
-        machine.set_quit_cb(Arc::new(move || {
+        machine.set_quit_cb_if_supported(Arc::new(move || {
             ms_quit.request_quit();
         }));
 
@@ -372,7 +599,7 @@ fn run_machine_cycle(
                     eprint!("{}", ch);
                 }
             }));
-        machine.set_monitor_cb(mon_cb);
+        machine.set_monitor_cb_if_supported(mon_cb);
     }
 
     if let Err(e) = machine.init(opts) {
@@ -425,7 +652,7 @@ fn run_machine_cycle(
     cpu_mgr.set_wfi_waker(wfi_waker.clone());
 
     let stop_flag = cpu_mgr.running_flag();
-    let ram_base = machina_hw_riscv::ref_machine::RAM_BASE;
+    let ram_base = machine.ram_base();
     let mut fs_cpu = unsafe {
         FullSystemCpu::new(
             cpu0,
@@ -438,12 +665,12 @@ fn run_machine_cycle(
             Arc::clone(&stop_flag),
         )
     };
-    // Register MROM for instruction fetch at 0x1000.
-    {
-        use machina_hw_riscv::ref_machine::{MROM_BASE, MROM_SIZE};
-        let mrom_ptr = machine.mrom_block().as_ptr() as *const u8;
-        fs_cpu.set_mrom(mrom_ptr, MROM_BASE, MROM_SIZE);
-    }
+    fs_cpu.cpu.time_mmio_addr = machine.time_mmio_addr();
+    fs_cpu.set_mrom(
+        machine.bootrom_ptr(),
+        machine.bootrom_base(),
+        machine.bootrom_size(),
+    );
     // Configure HTIF tohost polling if provided.
     if let Some(tohost_gpa) = htif_tohost {
         fs_cpu.set_htif_tohost(tohost_gpa);
@@ -470,7 +697,7 @@ fn run_machine_cycle(
     {
         let ptr = cpu_mgr.cpu(0).neg_align_ptr();
         let exit_request = cpu_mgr.cpu(0).exit_request_handle();
-        machine.aclint().connect_exit_request(0, exit_request);
+        machine.connect_timer_exit_request(0, exit_request);
         // Also give the pointer to MonitorState so
         // request_quit can break goto_tb chains.
         if let Some(ref ms) = monitor_state {
@@ -485,8 +712,12 @@ fn run_machine_cycle(
 
     // Wire builtin SBI backend (-bios builtin).
     if opts.bios_builtin {
-        let uart = machine.uart().clone();
-        let aclint = machine.aclint().clone();
+        let uart = machine
+            .uart_for_sbi()
+            .expect("RISC-V builtin SBI requires a UART");
+        let aclint = machine
+            .aclint_for_sbi()
+            .expect("RISC-V builtin SBI requires ACLINT");
         let sbi_stop = Arc::clone(&stop_flag);
         let sbi_wk = machine.wfi_waker();
         let sbi_reason = Arc::clone(&shutdown_reason);
@@ -512,13 +743,11 @@ fn run_machine_cycle(
         let reason_slot = Arc::clone(&shutdown_reason);
         let flag = Arc::clone(&stop_flag);
         let wk = wfi_waker;
-        machine
-            .sifive_test()
-            .set_shutdown_handler(Box::new(move |reason| {
-                *reason_slot.lock().unwrap() = Some(reason);
-                flag.store(false, Ordering::SeqCst);
-                wk.stop();
-            }));
+        machine.install_shutdown_handler(Box::new(move |reason| {
+            *reason_slot.lock().unwrap() = Some(reason);
+            flag.store(false, Ordering::SeqCst);
+            wk.stop();
+        }));
     }
 
     let _exit = unsafe { cpu_mgr.run(&shared) };
@@ -529,7 +758,7 @@ fn run_machine_cycle(
     // Any sleeping timer thread that wakes up after this
     // point will see a bumped cancel generation and exit
     // without touching the CPU's neg_align field.
-    machine.aclint().cancel_timers();
+    machine.cancel_timers();
 
     // Invalidate the CPU pointer in MonitorState so
     // a late quit does not dereference freed memory.
@@ -636,11 +865,17 @@ fn main() {
     if cli.machine == "?" {
         eprintln!("Available machines:");
         eprintln!("  riscv64-ref      RISC-V reference machine");
+        eprintln!(
+            "  k230             Kendryte K230 SDK-compatible RISC-V machine"
+        );
         eprintln!("  loongarch64-ref  LoongArch64 reference machine");
         machina_hw_core::chardev::restore_terminal();
         process::exit(0);
     }
-    if cli.machine != "riscv64-ref" && cli.machine != "loongarch64-ref" {
+    if cli.machine != "riscv64-ref"
+        && cli.machine != "loongarch64-ref"
+        && cli.machine != "k230"
+    {
         eprintln!("machina: unknown machine: {}", cli.machine);
         machina_hw_core::chardev::restore_terminal();
         process::exit(1);
@@ -696,17 +931,25 @@ fn main() {
         }
     }
 
-    let ram_size = cli.ram_mib * 1024 * 1024;
+    let ram_mib = if cli.machine == "k230" && !cli.ram_mib_explicit {
+        K230_MEMMAP[K230MemMap::Ddr as usize].size / 1024 / 1024
+    } else {
+        cli.ram_mib
+    };
+    let ram_size = ram_mib * 1024 * 1024;
+    let bios_builtin = cli.bios_builtin;
     let opts = MachineOpts {
         ram_size,
         cpu_count: 1,
         kernel: cli.kernel.clone(),
+        dtb: cli.dtb.clone(),
         bios: cli.bios.clone(),
-        bios_builtin: cli.bios_builtin,
+        bios_builtin,
         append: cli.append.clone(),
         nographic: cli.nographic,
         drive: cli.drive.clone(),
         initrd: cli.initrd.clone(),
+        loaders: cli.loaders.clone(),
         netdev,
     };
 
@@ -748,7 +991,7 @@ fn main() {
         None
     };
 
-    eprintln!("machina: {}, {} MiB RAM", cli.machine, cli.ram_mib,);
+    eprintln!("machina: {}, {} MiB RAM", cli.machine, ram_mib,);
     if let Some(addr) = htif_tohost {
         eprintln!("machina: HTIF tohost at {:#x}", addr);
     }
@@ -760,7 +1003,7 @@ fn main() {
             machina_hw_core::chardev::restore_terminal();
             process::exit(1);
         }
-        if cli.bios_builtin {
+        if bios_builtin {
             eprintln!(
                 "machina: --difftest is incompatible \
                  with -bios builtin"
@@ -768,7 +1011,7 @@ fn main() {
             machina_hw_core::chardev::restore_terminal();
             process::exit(1);
         }
-        difftest::run_difftest(&opts, cli.ram_mib);
+        difftest::run_difftest(&opts, ram_mib);
         return;
     }
 
@@ -862,6 +1105,7 @@ fn main() {
             };
             let gs = gdb_state.as_ref().map(Arc::clone);
             run_machine_cycle(
+                &cli.machine,
                 &opts,
                 ram_size,
                 ms,

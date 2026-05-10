@@ -25,6 +25,9 @@ const CSR_UIP: i64 = 0x044;
 const CSR_CYCLE: i64 = 0xC00;
 const CSR_TIME: i64 = 0xC01;
 const CSR_INSTRET: i64 = 0xC02;
+const CSR_SATP: i64 = 0x180;
+const CSR_MINSTRET: i64 = 0xB02;
+const CSR_MINSTRETH: i64 = 0xB82;
 
 impl RiscvDisasContext {
     /// Emit a TB exit for privileged CSR access.
@@ -44,24 +47,30 @@ impl RiscvDisasContext {
     /// value. On illegal access, it raises exception via
     /// longjmp (never returns).
     pub(super) fn gen_csr_helper(
-        &self,
+        &mut self,
         ir: &mut Context,
         csr: i64,
         rs1_val: TempIdx,
+        rs1_idx: i64,
         funct3: u32,
         rd: i64,
     ) {
+        if csr == CSR_SATP {
+            self.gen_priv_csr_exit(ir);
+            return;
+        }
         // Sync PC so raise_exception has correct mepc.
         let cur_pc = self.base.pc_next;
         let pc = ir.new_const(Type::I64, cur_pc);
         ir.gen_mov(Type::I64, self.pc, pc);
 
         let csr_arg = ir.new_const(Type::I64, csr as u64);
+        let rs1_arg = ir.new_const(Type::I64, rs1_idx as u64);
         let f3_arg = ir.new_const(Type::I64, funct3 as u64);
         let old = self.gen_helper_call(
             ir,
             self.csr_helper as usize,
-            &[self.env, csr_arg, rs1_val, f3_arg],
+            &[self.env, csr_arg, rs1_val, rs1_arg, f3_arg],
         );
         self.gen_set_gpr(ir, rd, old);
 
@@ -229,4 +238,26 @@ impl RiscvDisasContext {
             _ => false,
         }
     }
+
+    pub(super) fn suppress_instret_write_increment(
+        &self,
+        ir: &mut Context,
+        csr: i64,
+        funct3: u32,
+        rs1_idx: i64,
+    ) {
+        if writes_instret_counter(csr, funct3, rs1_idx) {
+            ir.instret_discarded =
+                u16::try_from(self.base.num_insns).unwrap_or(u16::MAX);
+        }
+    }
+}
+
+fn writes_instret_counter(csr: i64, funct3: u32, rs1_idx: i64) -> bool {
+    let writes = match funct3 {
+        1 | 5 => true,
+        2 | 3 | 6 | 7 => rs1_idx != 0,
+        _ => false,
+    };
+    writes && matches!(csr, CSR_INSTRET | CSR_MINSTRET | CSR_MINSTRETH)
 }

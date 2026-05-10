@@ -2,6 +2,8 @@
 
 mod multi_vcpu;
 
+use std::sync::atomic::Ordering;
+
 use machina_accel::exec::exec_loop::{cpu_exec_loop_env, ExitReason};
 use machina_accel::exec::ExecEnv;
 use machina_accel::ir::context::Context;
@@ -9,6 +11,7 @@ use machina_accel::ir::TempIdx;
 use machina_accel::X86_64CodeGen;
 use machina_accel::{ArchExitAction, GuestCpu};
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
+use machina_guest_riscv::riscv::cpu::NEG_ALIGN_OFFSET;
 use machina_guest_riscv::riscv::exception::Exception;
 use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
@@ -18,6 +21,7 @@ use machina_guest_riscv::{translator_loop, DisasJumpType, TranslatorOps};
 struct TestCpu {
     cpu: RiscvCpu,
     code: Vec<u8>,
+    executed_tbs: u64,
 }
 
 impl TestCpu {
@@ -27,6 +31,7 @@ impl TestCpu {
         Self {
             cpu: RiscvCpu::new(),
             code,
+            executed_tbs: 0,
         }
     }
 }
@@ -42,6 +47,10 @@ impl GuestCpu for TestCpu {
 
     fn get_flags(&self) -> u32 {
         0
+    }
+
+    fn translate_pc(&self, pc: u64) -> u64 {
+        pc
     }
 
     fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
@@ -122,6 +131,10 @@ impl GuestCpu for TestCpu {
 
     fn tlb_flush(&mut self) {
         self.cpu.mmu.flush();
+    }
+
+    fn on_tb_executed(&mut self, _guest_size: u32, _guest_insns: u16) {
+        self.executed_tbs = self.executed_tbs.wrapping_add(1);
     }
 }
 
@@ -423,6 +436,30 @@ fn test_jal_chain_three_tbs() {
     assert_eq!(t.cpu.gpr[2], 20);
     assert_eq!(t.cpu.gpr[3], 30);
     assert_eq!(env.shared.tb_store.len(), 3);
+}
+
+#[test]
+fn test_riscv_neg_align_breaks_patched_direct_chain() {
+    let mut t = TestCpu::new(&[
+        addi(1, 1, 1), // x1++
+        bne(1, 3, -4), // loop until x1 == x3
+        ecall(),
+    ]);
+    t.cpu.gpr[3] = 32;
+    t.cpu.neg_align.store(-1, Ordering::Relaxed);
+
+    let mut backend = X86_64CodeGen::new();
+    backend.neg_align_off = NEG_ALIGN_OFFSET as i32;
+    let mut env = ExecEnv::new(backend);
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
+    assert_eq!(t.cpu.gpr[1], 32);
+    assert!(
+        t.executed_tbs > 8,
+        "neg_align should force patched branch chains back through the exec loop"
+    );
 }
 
 /// JAL with link: simulate function call.
