@@ -242,12 +242,23 @@ fn parse_args() -> Result<CliArgs, String> {
             "-drive" => {
                 i += 1;
                 let s = args.get(i).ok_or("-drive requires argument")?;
-                // Parse file=<path> from the option
-                // string (ignore if=, format=, id=).
+                // Only file=<path> is honoured today. Warn on every
+                // other suboption so users do not silently get a raw
+                // image when they asked for, say, format=qcow2.
                 let mut path = None;
                 for part in s.split(',') {
+                    if part.is_empty() {
+                        continue;
+                    }
                     if let Some(p) = part.strip_prefix("file=") {
                         path = Some(p.to_string());
+                    } else {
+                        let key = part.split('=').next().unwrap_or(part);
+                        eprintln!(
+                            "machina: warning: -drive {}: suboption is \
+                             not implemented; ignoring",
+                            key,
+                        );
                     }
                 }
                 cli.drive = path.map(PathBuf::from);
