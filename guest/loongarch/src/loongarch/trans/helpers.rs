@@ -2724,7 +2724,12 @@ pub unsafe extern "sysv64" fn loongarch_helper_invtlb(
 #[no_mangle]
 pub unsafe extern "sysv64" fn loongarch_helper_check_plv(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<LoongArchCpu>());
-    if cpu.crmd & CRMD_PLV_MASK != CRMD_PLV_MASK {
+    let crmd = if cpu.in_guest_mode() {
+        cpu.gcsr_read(CSR_CRMD)
+    } else {
+        cpu.crmd
+    };
+    if crmd & CRMD_PLV_MASK != CRMD_PLV_MASK {
         return 0;
     }
     enter_exception(cpu, u64::from(ECODE_IPE), 0, None)

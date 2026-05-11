@@ -1391,6 +1391,31 @@ fn translated_guest_csr_access_uses_gcsr_state() {
 }
 
 #[test]
+fn translated_guest_plv3_csr_access_raises_guest_ipe() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.csr_write(CSR_EENTRY, 0x9000_0000);
+    cpu.gcsr_write(CSR_EENTRY, 0x8000_0000);
+    cpu.gcsr_write(CSR_CRMD, CRMD_DA | CRMD_PLV_MASK);
+    cpu.write_gpr(4, 0x55);
+    enter_guest_mode_for_test(&mut cpu);
+
+    assert_eq!(
+        run_priv_la(&mut cpu, &[csr_insn(CSR_EENTRY, 0, 4)]),
+        EXCP_LOONGARCH_DONE as usize
+    );
+    assert_eq!(cpu.pc(), 0x8000_0000);
+    assert_ne!(cpu.csr_read(CSR_GSTAT) & GSTAT_VM, 0);
+    assert_eq!(cpu.csr_read(CSR_GSTAT) & GSTAT_PVM, 0);
+    assert_eq!(cpu.gcsr_read(CSR_ERA), 0);
+    assert_eq!(
+        (cpu.gcsr_read(CSR_ESTAT) >> 16) & 0x3F,
+        u64::from(ECODE_IPE)
+    );
+    assert_eq!(cpu.csr_read(CSR_ERA), 0);
+    assert_eq!(cpu.read_gpr(4), 0x55);
+}
+
+#[test]
 fn translated_guest_invalid_csr_raises_gspr() {
     let mut cpu = LoongArchCpu::new();
     cpu.csr_write(CSR_EENTRY, 0x9000_0000);
