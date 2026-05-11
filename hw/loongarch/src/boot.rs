@@ -95,6 +95,8 @@ const SECONDARY_BOOT_CODE: [u32; 30] = [
     0x0015_0181,
     0x4c00_0020,
 ];
+const SECONDARY_BOOT_CODE_SIZE: u64 =
+    (SECONDARY_BOOT_CODE.len() * std::mem::size_of::<u32>()) as u64;
 
 const DEVICE_TREE_GUID: [u8; 16] = [
     0xd5, 0x21, 0xb6, 0xb1, 0x9c, 0xf1, 0xa5, 0x41, 0x83, 0x0b, 0xd9, 0x15,
@@ -253,8 +255,12 @@ pub fn install_secondary_boot_code(
     ram_size: u64,
     address_space: &AddressSpace,
 ) -> BootResult<u64> {
-    let size = (SECONDARY_BOOT_CODE.len() * std::mem::size_of::<u32>()) as u64;
-    ensure_ram_range(SECONDARY_BOOT_ENTRY, size, ram_size, "secondary boot")?;
+    ensure_ram_range(
+        SECONDARY_BOOT_ENTRY,
+        SECONDARY_BOOT_CODE_SIZE,
+        ram_size,
+        "secondary boot",
+    )?;
     for (index, insn) in SECONDARY_BOOT_CODE.iter().enumerate() {
         address_space.write(
             GPA::new(SECONDARY_BOOT_ENTRY + (index as u64 * 4)),
@@ -538,6 +544,13 @@ fn low_ram_reserved_ranges(ram_size: u64, cpu_count: u32) -> Vec<(u64, u64)> {
     push_reserved_range(&mut ranges, VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE);
     push_reserved_range(&mut ranges, VIRT_FWCFG_BASE, VIRT_FWCFG_SIZE);
     push_reserved_range(&mut ranges, VIRT_UART_BASE, VIRT_UART_SIZE);
+    if cpu_count > 1 {
+        push_reserved_range(
+            &mut ranges,
+            boot_phys_addr(SECONDARY_BOOT_ENTRY),
+            SECONDARY_BOOT_CODE_SIZE,
+        );
+    }
     if cpu_count > 0 {
         push_reserved_range(
             &mut ranges,

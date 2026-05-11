@@ -6,7 +6,7 @@ use machina_guest_loongarch::loongarch::csr::{
     CRMD_DA, CRMD_IE, CRMD_PG, CSR_CRMD,
 };
 use machina_hw_firmware::keys;
-use machina_hw_loongarch::boot::KERNEL_ENTRY_DEFAULT;
+use machina_hw_loongarch::boot::{KERNEL_ENTRY_DEFAULT, SECONDARY_BOOT_ENTRY};
 use machina_hw_loongarch::virt_machine::{
     LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE,
     VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE, VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE,
@@ -24,6 +24,7 @@ const EFI_MEMORY_DESCRIPTOR_SIZE: u64 = 40;
 const EFI_RESERVED_MEMORY: u32 = 0;
 const EFI_CONVENTIONAL_MEMORY: u32 = 7;
 const EFI_PAGE_SIZE: u64 = 4096;
+const LOW_PHYS_MASK: u64 = 0x0fff_ffff_ffff_ffff;
 
 const DEVICE_TREE_GUID: [u8; 16] = [
     0xd5, 0x21, 0xb6, 0xb1, 0x9c, 0xf1, 0xa5, 0x41, 0x83, 0x0b, 0xd9, 0x15,
@@ -159,7 +160,10 @@ fn align_up(value: u64, align: u64) -> u64 {
     value.saturating_add(align - 1) & !(align - 1)
 }
 
-fn expected_low_ram_reserved_ranges(ram_size: u64) -> Vec<(u64, u64)> {
+fn expected_low_ram_reserved_ranges(
+    ram_size: u64,
+    cpu_count: u32,
+) -> Vec<(u64, u64)> {
     let ram_size = ram_size & !(EFI_PAGE_SIZE - 1);
     let mut ranges = Vec::new();
     for (base, size) in [
@@ -182,18 +186,27 @@ fn expected_low_ram_reserved_ranges(ram_size: u64) -> Vec<(u64, u64)> {
             ranges.push((start, end.min(ram_size) - start));
         }
     }
+    if cpu_count > 1 {
+        let start = SECONDARY_BOOT_ENTRY & LOW_PHYS_MASK;
+        if start < ram_size {
+            ranges.push((start, EFI_PAGE_SIZE.min(ram_size - start)));
+        }
+    }
     ranges.sort_by_key(|(start, _)| *start);
     ranges
 }
 
-fn expected_low_ram_usable_ranges(ram_size: u64) -> Vec<(u64, u64)> {
+fn expected_low_ram_usable_ranges(
+    ram_size: u64,
+    cpu_count: u32,
+) -> Vec<(u64, u64)> {
     let ram_size = ram_size & !(EFI_PAGE_SIZE - 1);
     if ram_size == 0 {
         return Vec::new();
     }
     let mut ranges = Vec::new();
     let mut cursor = 0;
-    for (base, size) in expected_low_ram_reserved_ranges(ram_size) {
+    for (base, size) in expected_low_ram_reserved_ranges(ram_size, cpu_count) {
         if cursor < base {
             ranges.push((cursor, base - cursor));
         }
@@ -454,8 +467,10 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
     );
     let memmap_guest = boot_guest_addr(memmap_addr);
     let memmap_descs = read_efi_memmap(&machine, memmap_guest);
-    let expected_memory = expected_low_ram_usable_ranges(opts.ram_size);
-    let expected_reserved = expected_low_ram_reserved_ranges(opts.ram_size);
+    let expected_memory =
+        expected_low_ram_usable_ranges(opts.ram_size, opts.cpu_count);
+    let expected_reserved =
+        expected_low_ram_reserved_ranges(opts.ram_size, opts.cpu_count);
     assert_eq!(
         desc_ranges(&memmap_descs, EFI_CONVENTIONAL_MEMORY),
         expected_memory
@@ -691,8 +706,10 @@ fn task47_direct_boot_exposes_physical_boot_data_addresses() {
     );
     let memmap_guest = boot_guest_addr(memmap_addr);
     let memmap_descs = read_efi_memmap(&machine, memmap_guest);
-    let expected_memory = expected_low_ram_usable_ranges(opts.ram_size);
-    let expected_reserved = expected_low_ram_reserved_ranges(opts.ram_size);
+    let expected_memory =
+        expected_low_ram_usable_ranges(opts.ram_size, opts.cpu_count);
+    let expected_reserved =
+        expected_low_ram_reserved_ranges(opts.ram_size, opts.cpu_count);
     assert_eq!(
         desc_ranges(&memmap_descs, EFI_CONVENTIONAL_MEMORY),
         expected_memory
@@ -809,6 +826,32 @@ fn task44_direct_boot_fdt_describes_all_configured_cpus() {
             cpu_id.to_be_bytes().as_slice()
         );
     }
+
+    let memmap_addr = config_table_ptr(
+        &machine,
+        system_table_addr,
+        LINUX_EFI_BOOT_MEMMAP_GUID,
+    );
+    let memmap_descs = read_efi_memmap(&machine, boot_guest_addr(memmap_addr));
+    let expected_reserved =
+        expected_low_ram_reserved_ranges(opts.ram_size, opts.cpu_count);
+    let expected_memory =
+        expected_low_ram_usable_ranges(opts.ram_size, opts.cpu_count);
+
+    assert!(expected_reserved
+        .contains(&(SECONDARY_BOOT_ENTRY & LOW_PHYS_MASK, EFI_PAGE_SIZE,)));
+    assert_eq!(
+        desc_ranges(&memmap_descs, EFI_RESERVED_MEMORY),
+        expected_reserved
+    );
+    assert_eq!(
+        desc_ranges(&memmap_descs, EFI_CONVENTIONAL_MEMORY),
+        expected_memory
+    );
+    assert_eq!(
+        fdt_prop(&props, "/memory@0", "reg"),
+        cells_for_pairs(&expected_memory).as_slice()
+    );
 }
 
 #[test]
@@ -824,8 +867,10 @@ fn task44_direct_boot_memory_map_omits_low_mmio_holes() {
         LINUX_EFI_BOOT_MEMMAP_GUID,
     );
     let memmap_descs = read_efi_memmap(&machine, boot_guest_addr(memmap_addr));
-    let expected_reserved = expected_low_ram_reserved_ranges(opts.ram_size);
-    let expected_memory = expected_low_ram_usable_ranges(opts.ram_size);
+    let expected_reserved =
+        expected_low_ram_reserved_ranges(opts.ram_size, opts.cpu_count);
+    let expected_memory =
+        expected_low_ram_usable_ranges(opts.ram_size, opts.cpu_count);
 
     assert_eq!(
         desc_ranges(&memmap_descs, EFI_RESERVED_MEMORY),
