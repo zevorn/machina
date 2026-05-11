@@ -14,6 +14,7 @@ use super::csr::{
 use super::exception::{
     ECODE_FPE, ECODE_GCM, ECODE_GSPR, ECODE_HVC, ECODE_PIF, ECODE_PIL,
     ECODE_PIS, ECODE_PME, ECODE_PNR, ECODE_PNX, ECODE_PPI, ECODE_TLBR,
+    ESUBCODE_GCHC,
 };
 use super::ext::LoongArchCfg;
 use super::mmu::{
@@ -1004,7 +1005,11 @@ impl LoongArchCpu {
     ) -> u64 {
         self.pc = fault_pc;
         if host_stage && self.in_guest_mode() {
-            self.leave_guest_mode_for_exception();
+            return self.enter_exception(
+                u64::from(ECODE_GCM),
+                u64::from(ESUBCODE_GCHC),
+                Some(va),
+            );
         }
         if self.in_guest_mode() {
             if fault == TlbLookupResult::Miss {

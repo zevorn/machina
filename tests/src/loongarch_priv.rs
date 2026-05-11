@@ -1640,20 +1640,21 @@ fn lvz_guest_translation_applies_second_stage_host_tlb_gid() {
 }
 
 #[test]
-fn lvz_guest_second_stage_miss_exits_to_host_tlbr() {
+fn lvz_guest_second_stage_miss_exits_to_host_gcm() {
     let mut cpu = LoongArchCpu::new();
     let gid = 5;
     let gva = 0x4100_0000;
     let gpa = 0x1100_0000;
     let fault_pc = 0x1234_5600;
-    let tlbrentry = 0x9000_2000;
+    let eentry = 0x9000_2000;
     let ps = 12;
     let guest_idx = mmu::mtlb_flat_index(11).unwrap();
 
     cpu.csr_write(CSR_CRMD, 2 | CRMD_IE | CRMD_PG);
     cpu.csr_write(CSR_PRMD, 2 | CRMD_IE);
-    cpu.csr_write(CSR_TLBRENTRY, tlbrentry);
+    cpu.csr_write(CSR_EENTRY, eentry);
     cpu.csr_write(CSR_TLBREHI, 0xDEAD_0000_0000_002A);
+    let old_tlbrehi = cpu.csr_read(CSR_TLBREHI);
     cpu.csr_write(CSR_GSTAT, gid << 16);
     cpu.gcsr_write(CSR_CRMD, CRMD_PG);
     cpu.gcsr_write(CSR_STLBPS, ps);
@@ -1674,33 +1675,38 @@ fn lvz_guest_second_stage_miss_exits_to_host_tlbr() {
             mmu::AccessType::Load,
             fault_pc,
         ),
-        Err(tlbrentry)
+        Err(eentry)
     );
     assert_eq!(cpu.csr_read(CSR_GSTAT) & GSTAT_VM, 0);
     assert_ne!(cpu.csr_read(CSR_GSTAT) & GSTAT_PVM, 0);
-    assert_eq!(cpu.csr_read(CSR_TLBRERA) & 1, 1);
-    assert_eq!(cpu.csr_read(CSR_TLBRERA) & !0x3, fault_pc);
-    assert_eq!(cpu.csr_read(CSR_TLBRBADV), gpa);
-    assert_eq!(cpu.csr_read(CSR_TLBRPRMD), 2 | CRMD_IE);
-    assert_eq!(cpu.csr_read(CSR_TLBREHI), (gpa & !0x1FFF) | 0x2A);
+    assert_eq!(cpu.csr_read(CSR_ERA), fault_pc);
+    assert_eq!(cpu.csr_read(CSR_PRMD), 2 | CRMD_IE);
+    assert_eq!(cpu.csr_read(CSR_BADV), gpa);
+    let estat = cpu.csr_read(CSR_ESTAT);
+    assert_eq!((estat >> 16) & 0x3F, u64::from(ECODE_GCM));
+    assert_eq!((estat >> 22) & 0x1FF, u64::from(ESUBCODE_GCHC));
+    assert_eq!(cpu.csr_read(CSR_TLBRERA) & 1, 0);
+    assert_eq!(cpu.csr_read(CSR_TLBRBADV), 0);
+    assert_eq!(cpu.csr_read(CSR_TLBREHI), old_tlbrehi);
     assert_eq!(cpu.gcsr_read(CSR_TLBRBADV), 0);
 }
 
 #[test]
-fn task97_helper_load_stage2_miss_exits_to_host_tlbr() {
+fn task97_helper_load_stage2_miss_exits_to_host_gcm() {
     let mut cpu = LoongArchCpu::new();
     let gid = 6;
     let gva = 0x4200_0000;
     let gpa = 0x1200_0000;
     let fault_pc = 0x1234_5800;
-    let tlbrentry = 0x9000_3000;
+    let eentry = 0x9000_3000;
     let ps = 12;
     let guest_idx = mmu::mtlb_flat_index(12).unwrap();
 
     cpu.csr_write(CSR_CRMD, 2 | CRMD_IE | CRMD_PG);
     cpu.csr_write(CSR_PRMD, 2 | CRMD_IE);
-    cpu.csr_write(CSR_TLBRENTRY, tlbrentry);
+    cpu.csr_write(CSR_EENTRY, eentry);
     cpu.csr_write(CSR_TLBREHI, 0xDEAD_0000_0000_002A);
+    let old_tlbrehi = cpu.csr_read(CSR_TLBREHI);
     cpu.csr_write(CSR_GSTAT, gid << 16);
     cpu.gcsr_write(CSR_CRMD, CRMD_PG);
     cpu.gcsr_write(CSR_STLBPS, ps);
@@ -1719,13 +1725,17 @@ fn task97_helper_load_stage2_miss_exits_to_host_tlbr() {
     let value = unsafe { loongarch_mem_read(cpu.env_ptr(), gva, 8) };
 
     assert_eq!(value, 0);
-    assert_eq!(cpu.pc(), tlbrentry);
+    assert_eq!(cpu.pc(), eentry);
     assert_eq!(cpu.csr_read(CSR_GSTAT) & GSTAT_VM, 0);
     assert_ne!(cpu.csr_read(CSR_GSTAT) & GSTAT_PVM, 0);
-    assert_eq!(cpu.csr_read(CSR_TLBRERA) & 1, 1);
-    assert_eq!(cpu.csr_read(CSR_TLBRERA) & !0x3, fault_pc);
-    assert_eq!(cpu.csr_read(CSR_TLBRBADV), gpa);
-    assert_eq!(cpu.csr_read(CSR_TLBREHI), (gpa & !0x1FFF) | 0x2A);
+    assert_eq!(cpu.csr_read(CSR_ERA), fault_pc);
+    assert_eq!(cpu.csr_read(CSR_BADV), gpa);
+    let estat = cpu.csr_read(CSR_ESTAT);
+    assert_eq!((estat >> 16) & 0x3F, u64::from(ECODE_GCM));
+    assert_eq!((estat >> 22) & 0x1FF, u64::from(ESUBCODE_GCHC));
+    assert_eq!(cpu.csr_read(CSR_TLBRERA) & 1, 0);
+    assert_eq!(cpu.csr_read(CSR_TLBRBADV), 0);
+    assert_eq!(cpu.csr_read(CSR_TLBREHI), old_tlbrehi);
     assert_eq!(cpu.gcsr_read(CSR_TLBRBADV), 0);
 }
 
