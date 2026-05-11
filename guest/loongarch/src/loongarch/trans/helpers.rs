@@ -7,7 +7,8 @@
 
 use super::super::cpu::LoongArchCpu;
 use super::super::csr::{
-    valid_gcsr, CRMD_DA, CRMD_PG, CRMD_PLV_MASK, GSTAT_PVM,
+    valid_gcsr, CRMD_DA, CRMD_PG, CRMD_PLV_MASK, CSR_CRMD, CSR_ERA, CSR_PRMD,
+    CSR_TLBRERA, CSR_TLBRPRMD, GSTAT_PVM,
 };
 use super::super::exception::{
     ECODE_BCE, ECODE_FPD, ECODE_GSPR, ECODE_INE, ECODE_IPE,
@@ -2790,7 +2791,24 @@ pub unsafe extern "sysv64" fn loongarch_helper_raise_exception_with_badv(
 #[no_mangle]
 pub unsafe extern "sysv64" fn loongarch_helper_ertn(env: *mut u8) -> u64 {
     let cpu = &mut *(env.cast::<LoongArchCpu>());
-    let pc = if cpu.tlbrera & 1 != 0 {
+    let pc = if cpu.in_guest_mode() {
+        let gtlbrera = cpu.gcsr_read(CSR_TLBRERA);
+        if gtlbrera & 1 != 0 {
+            let pplv_pie = cpu.gcsr_read(CSR_TLBRPRMD) & 0x7;
+            let gcrmd = cpu.gcsr_read(CSR_CRMD);
+            cpu.gcsr_write(
+                CSR_CRMD,
+                (gcrmd & !0x7 & !CRMD_DA & !CRMD_PG) | pplv_pie | CRMD_PG,
+            );
+            cpu.gcsr_write(CSR_TLBRERA, gtlbrera & !1);
+            gtlbrera & !0x3
+        } else {
+            let gcrmd = cpu.gcsr_read(CSR_CRMD);
+            let gprmd = cpu.gcsr_read(CSR_PRMD);
+            cpu.gcsr_write(CSR_CRMD, (gcrmd & !0x7) | (gprmd & 0x7));
+            cpu.gcsr_read(CSR_ERA)
+        }
+    } else if cpu.tlbrera & 1 != 0 {
         // Return from TLB refill: restore PLV/IE, clear DA, set PG
         let pplv_pie = cpu.tlbrprmd & 0x7;
         cpu.set_crmd(

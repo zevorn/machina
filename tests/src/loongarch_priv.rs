@@ -1255,6 +1255,55 @@ fn lvz_ertn_with_previous_guest_mode_enters_guest_mode() {
 }
 
 #[test]
+fn lvz_guest_ertn_restores_guest_prmd_and_era() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.csr_write(CSR_ERA, 0x9000_0000);
+    cpu.gcsr_write(CSR_CRMD, CRMD_DA);
+    cpu.gcsr_write(CSR_PRMD, CRMD_PLV_MASK | CRMD_IE);
+    cpu.gcsr_write(CSR_ERA, 0x8000_2000);
+    cpu.gcsr_write(CSR_TLBRERA, 0);
+    enter_guest_mode_for_test(&mut cpu);
+
+    let pc = unsafe {
+        machina_guest_loongarch::loongarch::trans::helpers
+            ::loongarch_helper_ertn(cpu.env_ptr())
+    };
+
+    assert_eq!(pc, 0x8000_2000);
+    assert_ne!(cpu.csr_read(CSR_GSTAT) & GSTAT_VM, 0);
+    assert_eq!(
+        cpu.gcsr_read(CSR_CRMD) & (CRMD_PLV_MASK | CRMD_IE),
+        CRMD_PLV_MASK | CRMD_IE
+    );
+    assert_ne!(cpu.gcsr_read(CSR_CRMD) & CRMD_DA, 0);
+    assert_eq!(cpu.csr_read(CSR_ERA), 0x9000_0000);
+}
+
+#[test]
+fn lvz_guest_tlbr_ertn_restores_guest_tlbrprmd() {
+    let mut cpu = LoongArchCpu::new();
+    cpu.gcsr_write(CSR_CRMD, CRMD_DA);
+    cpu.gcsr_write(CSR_TLBRPRMD, CRMD_PLV_MASK | CRMD_IE);
+    cpu.gcsr_write(CSR_TLBRERA, 0x8000_3000 | 1);
+    enter_guest_mode_for_test(&mut cpu);
+
+    let pc = unsafe {
+        machina_guest_loongarch::loongarch::trans::helpers
+            ::loongarch_helper_ertn(cpu.env_ptr())
+    };
+
+    assert_eq!(pc, 0x8000_3000);
+    assert_eq!(cpu.gcsr_read(CSR_TLBRERA) & 1, 0);
+    assert_eq!(cpu.gcsr_read(CSR_CRMD) & CRMD_DA, 0);
+    assert_ne!(cpu.gcsr_read(CSR_CRMD) & CRMD_PG, 0);
+    assert_eq!(
+        cpu.gcsr_read(CSR_CRMD) & (CRMD_PLV_MASK | CRMD_IE),
+        CRMD_PLV_MASK | CRMD_IE
+    );
+    assert_eq!(cpu.csr_read(CSR_TLBRERA), 0);
+}
+
+#[test]
 fn translated_gcsrwr_and_gcsrrd_access_guest_csr_state() {
     let mut cpu = LoongArchCpu::new();
     cpu.write_gpr(4, 0x9000_0000);
