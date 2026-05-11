@@ -11,9 +11,10 @@ use machina_hw_loongarch::virt_machine::{
     LoongArchVirtMachine, VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE,
     VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE, VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE,
     VIRT_FWCFG_BASE, VIRT_FWCFG_SIZE, VIRT_IPI_BASE, VIRT_IPI_SIZE,
-    VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE, VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE,
-    VIRT_RAM_BASE, VIRT_RTC_BASE, VIRT_RTC_SIZE, VIRT_UART_BASE,
-    VIRT_UART_SIZE, VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE,
+    VIRT_LEGACY_IO_BASE, VIRT_LEGACY_IO_SIZE, VIRT_PCH_MSI_BASE,
+    VIRT_PCH_MSI_SIZE, VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE, VIRT_RAM_BASE,
+    VIRT_RTC_BASE, VIRT_RTC_SIZE, VIRT_UART1_BASE, VIRT_UART1_SIZE,
+    VIRT_UART_BASE, VIRT_UART_SIZE, VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE,
 };
 
 const EFI_SYSTEM_TABLE_SIGNATURE: u64 = 0x5453_5953_2049_4249;
@@ -154,59 +155,49 @@ struct EfiMemDesc {
     pages: u64,
 }
 
-fn align_down_page(addr: u64) -> u64 {
-    addr & !(EFI_PAGE_SIZE - 1)
-}
-
-fn align_up_page(addr: u64) -> u64 {
-    addr.saturating_add(EFI_PAGE_SIZE - 1) & !(EFI_PAGE_SIZE - 1)
+fn align_up(value: u64, align: u64) -> u64 {
+    value.saturating_add(align - 1) & !(align - 1)
 }
 
 fn expected_low_ram_reserved_ranges(ram_size: u64) -> Vec<(u64, u64)> {
-    let mut ranges: Vec<(u64, u64)> = [
+    let ram_size = ram_size & !(EFI_PAGE_SIZE - 1);
+    let mut ranges = Vec::new();
+    for (base, size) in [
+        (VIRT_LEGACY_IO_BASE, VIRT_LEGACY_IO_SIZE),
         (VIRT_IPI_BASE, VIRT_IPI_SIZE),
         (VIRT_EIOINTC_BASE, VIRT_EIOINTC_SIZE),
         (VIRT_PCH_PIC_BASE, VIRT_PCH_PIC_SIZE),
-        (VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE),
+        (VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE),
+        (VIRT_UART1_BASE, VIRT_UART1_SIZE),
         (VIRT_RTC_BASE, VIRT_RTC_SIZE),
+        (VIRT_PCH_MSI_BASE, VIRT_PCH_MSI_SIZE),
         (VIRT_FLASH0_BASE, VIRT_FLASH0_SIZE),
         (VIRT_FLASH1_BASE, VIRT_FLASH1_SIZE),
-        (VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE),
+        (VIRT_FWCFG_BASE, VIRT_FWCFG_SIZE),
         (VIRT_UART_BASE, VIRT_UART_SIZE),
-    ]
-    .into_iter()
-    .filter_map(|(base, size)| {
-        let start = align_down_page(base).min(ram_size);
-        let end = align_up_page(base + size).min(ram_size);
-        (start < end).then_some((start, end))
-    })
-    .collect();
-    ranges.sort_unstable_by_key(|(start, _)| *start);
-
-    let mut merged: Vec<(u64, u64)> = Vec::new();
-    for (start, end) in ranges {
-        if let Some((_, last_end)) = merged.last_mut() {
-            if start <= *last_end {
-                *last_end = (*last_end).max(end);
-                continue;
-            }
+    ] {
+        let start = base & !(EFI_PAGE_SIZE - 1);
+        let end = align_up(base + size, EFI_PAGE_SIZE);
+        if start < ram_size {
+            ranges.push((start, end.min(ram_size) - start));
         }
-        merged.push((start, end));
     }
-    merged
-        .into_iter()
-        .map(|(start, end)| (start, end - start))
-        .collect()
+    ranges.sort_by_key(|(start, _)| *start);
+    ranges
 }
 
 fn expected_low_ram_usable_ranges(ram_size: u64) -> Vec<(u64, u64)> {
+    let ram_size = ram_size & !(EFI_PAGE_SIZE - 1);
+    if ram_size == 0 {
+        return Vec::new();
+    }
     let mut ranges = Vec::new();
     let mut cursor = 0;
-    for (hole_start, hole_size) in expected_low_ram_reserved_ranges(ram_size) {
-        if cursor < hole_start {
-            ranges.push((cursor, hole_start - cursor));
+    for (base, size) in expected_low_ram_reserved_ranges(ram_size) {
+        if cursor < base {
+            ranges.push((cursor, base - cursor));
         }
-        cursor = cursor.max(hole_start + hole_size);
+        cursor = cursor.max(base + size);
     }
     if cursor < ram_size {
         ranges.push((cursor, ram_size - cursor));
@@ -488,6 +479,7 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
         "bootargs",
         opts.append.as_ref().unwrap(),
     );
+    assert_eq!(fdt_prop(&props, "/chosen", "rng-seed").len(), 32);
     assert_eq!(
         fdt_prop(&props, "/memory@0", "reg"),
         cells_for_pairs(&expected_memory).as_slice()
@@ -573,6 +565,28 @@ fn task44_direct_boot_builds_efi_system_table_and_fdt() {
             "interrupt-parent"
         ),
         2u32.to_be_bytes().as_slice()
+    );
+    let isa_node = format!("/isa@{VIRT_LEGACY_IO_BASE:x}");
+    assert_fdt_string(&props, &isa_node, "compatible", "isa");
+    assert_eq!(
+        fdt_prop(&props, &isa_node, "#address-cells"),
+        2u32.to_be_bytes().as_slice()
+    );
+    assert_eq!(
+        fdt_prop(&props, &isa_node, "#size-cells"),
+        1u32.to_be_bytes().as_slice()
+    );
+    assert_eq!(
+        fdt_prop(&props, &isa_node, "ranges"),
+        [
+            1u32.to_be_bytes(),
+            0u32.to_be_bytes(),
+            ((VIRT_LEGACY_IO_BASE >> 32) as u32).to_be_bytes(),
+            (VIRT_LEGACY_IO_BASE as u32).to_be_bytes(),
+            (VIRT_LEGACY_IO_SIZE as u32).to_be_bytes(),
+        ]
+        .concat()
+        .as_slice()
     );
     assert_fdt_string(
         &props,
@@ -765,6 +779,76 @@ fn task44_direct_boot_adds_initrd_and_optional_virtio_to_fdt() {
     assert_eq!(
         fdt_prop(&props, &format!("/virtio_mmio@{VIRT_VIRTIO_BASE:x}"), "reg"),
         cells_for_pairs(&[(VIRT_VIRTIO_BASE, VIRT_VIRTIO_SIZE)]).as_slice()
+    );
+}
+
+#[test]
+fn task44_direct_boot_fdt_describes_all_configured_cpus() {
+    let mut opts = default_opts();
+    opts.cpu_count = 4;
+    let (machine, _kernel) = boot_minimal_elf(&mut opts);
+
+    let cpu = machine.cpu();
+    let cpu = cpu.lock().unwrap();
+    let system_table_addr = cpu.read_gpr(6);
+    drop(cpu);
+
+    let fdt_addr =
+        config_table_ptr(&machine, system_table_addr, DEVICE_TREE_GUID);
+    let fdt_guest = boot_guest_addr(fdt_addr);
+    let fdt_size = read_guest_be_u32(&machine, fdt_guest + 4) as usize;
+    let fdt = read_bytes(&machine, fdt_guest, fdt_size);
+    let props = parse_fdt_props(&fdt);
+
+    for cpu_id in 0..opts.cpu_count {
+        let node = format!("/cpus/cpu@{cpu_id}");
+        assert_fdt_string(&props, &node, "device_type", "cpu");
+        assert_fdt_string(&props, &node, "compatible", "loongarch,la464");
+        assert_eq!(
+            fdt_prop(&props, &node, "reg"),
+            cpu_id.to_be_bytes().as_slice()
+        );
+    }
+}
+
+#[test]
+fn task44_direct_boot_memory_map_omits_low_mmio_holes() {
+    let mut opts = default_opts();
+    opts.ram_size = VIRT_RTC_BASE + 0x2000;
+    let (machine, _kernel) = boot_minimal_elf(&mut opts);
+
+    let system_table_addr = machine.cpu().lock().unwrap().read_gpr(6);
+    let memmap_addr = config_table_ptr(
+        &machine,
+        system_table_addr,
+        LINUX_EFI_BOOT_MEMMAP_GUID,
+    );
+    let memmap_descs = read_efi_memmap(&machine, boot_guest_addr(memmap_addr));
+    let expected_reserved = expected_low_ram_reserved_ranges(opts.ram_size);
+    let expected_memory = expected_low_ram_usable_ranges(opts.ram_size);
+
+    assert_eq!(
+        desc_ranges(&memmap_descs, EFI_RESERVED_MEMORY),
+        expected_reserved
+    );
+    assert_eq!(
+        desc_ranges(&memmap_descs, EFI_CONVENTIONAL_MEMORY),
+        expected_memory
+    );
+    assert!(expected_reserved.contains(&(VIRT_PCH_PIC_BASE, EFI_PAGE_SIZE)));
+    assert!(expected_reserved.contains(&(VIRT_VIRTIO_BASE, EFI_PAGE_SIZE)));
+    assert!(expected_reserved.contains(&(VIRT_UART1_BASE, EFI_PAGE_SIZE)));
+    assert!(expected_reserved
+        .contains(&(VIRT_RTC_BASE & !(EFI_PAGE_SIZE - 1), EFI_PAGE_SIZE)));
+
+    let fdt_addr =
+        config_table_ptr(&machine, system_table_addr, DEVICE_TREE_GUID);
+    let fdt_guest = boot_guest_addr(fdt_addr);
+    let fdt_size = read_guest_be_u32(&machine, fdt_guest + 4) as usize;
+    let props = parse_fdt_props(&read_bytes(&machine, fdt_guest, fdt_size));
+    assert_eq!(
+        fdt_prop(&props, "/memory@0", "reg"),
+        cells_for_pairs(&expected_memory).as_slice()
     );
 }
 
