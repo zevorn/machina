@@ -501,6 +501,23 @@ fn boot_param_base(ram_size: u64) -> BootResult<u64> {
     Ok(ram_end(ram_size)? - BOOT_PARAM_WINDOW_SIZE)
 }
 
+fn secondary_boot_reserved_range(
+    ram_size: u64,
+    cpu_count: u32,
+) -> BootResult<Option<GuestRange>> {
+    if cpu_count <= 1 {
+        return Ok(None);
+    }
+
+    GuestRange::in_ram(
+        SECONDARY_BOOT_ENTRY,
+        EFI_PAGE_SIZE,
+        ram_size,
+        "secondary boot",
+    )
+    .map(Some)
+}
+
 fn push_le_u32(data: &mut [u8], offset: usize, val: u32) {
     data[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
 }
@@ -979,8 +996,14 @@ fn write_boot_parameters(
         .into());
     }
 
+    let mut initrd_reserved = kernel_ranges.to_vec();
+    if let Some(range) =
+        secondary_boot_reserved_range(ram_size, config.cpu_count)?
+    {
+        initrd_reserved.push(range);
+    }
     let initrd_plan =
-        plan_initrd(config.initrd_path, ram_size, base, kernel_ranges)?;
+        plan_initrd(config.initrd_path, ram_size, base, &initrd_reserved)?;
     let initrd = initrd_plan
         .as_ref()
         .map(|plan| (boot_phys_addr(plan.range.start), plan.len));

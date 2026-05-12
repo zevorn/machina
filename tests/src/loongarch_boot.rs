@@ -1016,6 +1016,35 @@ fn task44_direct_boot_rejects_initrd_overlapping_raw_kernel() {
 }
 
 #[test]
+fn task44_direct_boot_rejects_initrd_overlapping_smp_trampoline() {
+    let mut opts = default_opts();
+    opts.cpu_count = 2;
+    opts.ram_size = 0x60_0000;
+
+    let entry = VIRT_RAM_BASE + 0x20_0000;
+    let segment_addr = VIRT_RAM_BASE + 0x30_0000;
+    let elf = build_minimal_elf(entry, segment_addr, &[0x13, 0x57, 0x9b]);
+    let mut kernel = tempfile::NamedTempFile::new().unwrap();
+    kernel.write_all(&elf).unwrap();
+    opts.kernel = Some(kernel.path().to_path_buf());
+
+    let mut initrd = tempfile::NamedTempFile::new().unwrap();
+    initrd.write_all(&vec![0xa5; 0x2f_f000]).unwrap();
+    opts.initrd = Some(initrd.path().to_path_buf());
+
+    let mut machine = LoongArchVirtMachine::new();
+    machine.init(&opts).expect("init loongarch ref");
+    let err = machine
+        .boot()
+        .expect_err("initrd overlapping SMP trampoline must fail");
+    let err = err.to_string();
+    assert!(
+        err.contains("initrd") && err.contains("secondary boot"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn task43_direct_boot_loads_elf_and_sets_initial_cpu_state() {
     let entry = VIRT_RAM_BASE + 0x20_0000;
     let segment_addr = VIRT_RAM_BASE + 0x30_0000;
